@@ -12,6 +12,7 @@ chrono.workspace = true
 hex.workspace = true
 idna.workspace = true
 ipnet.workspace = true
+iran-split-config = { path = "../iran-split-config" }
 psl.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -21,6 +22,7 @@ tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

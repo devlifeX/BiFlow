@@ -21,10 +21,6 @@ import { useAppStore } from "../store/app";
 
 const formSchema = z
   .object({
-    hiddifyHost: z.literal("127.0.0.1"),
-    hiddifyPort: z.coerce.number().int().min(1).max(65535),
-    startTimeout: z.coerce.number().int().min(1).max(300),
-    stopWithStack: z.boolean(),
     controllerPort: z.coerce.number().int().min(1).max(65535),
     mixedPort: z.coerce.number().int().min(1).max(65535),
     dnsPort: z.coerce.number().int().min(1).max(65535),
@@ -61,14 +57,10 @@ const formSchema = z
   });
 
 type FormValues = z.infer<typeof formSchema>;
-type SettingsTab = "hiddify" | "mihomo" | "behavior";
+type SettingsTab = "mihomo" | "behavior";
 
 function toValues(config: AppConfig): FormValues {
   return {
-    hiddifyHost: "127.0.0.1",
-    hiddifyPort: config.hiddify.port,
-    startTimeout: config.hiddify.start_timeout_seconds,
-    stopWithStack: config.hiddify.stop_with_stack,
     controllerPort: config.mihomo.controller_port,
     mixedPort: config.mihomo.mixed_port,
     dnsPort: config.mihomo.dns_port,
@@ -87,13 +79,6 @@ function toValues(config: AppConfig): FormValues {
 function merge(config: AppConfig, values: FormValues): AppConfig {
   return {
     ...config,
-    hiddify: {
-      ...config.hiddify,
-      host: values.hiddifyHost,
-      port: values.hiddifyPort,
-      start_timeout_seconds: values.startTimeout,
-      stop_with_stack: values.stopWithStack,
-    },
     mihomo: {
       ...config.mihomo,
       controller_port: values.controllerPort,
@@ -119,7 +104,7 @@ function merge(config: AppConfig, values: FormValues): AppConfig {
 export function Settings({ settings }: { settings: AppConfig }) {
   const { t } = useTranslation();
   const { saveSettings, actionPending } = useAppStore();
-  const [tab, setTab] = useState<SettingsTab>("hiddify");
+  const [tab, setTab] = useState<SettingsTab>("mihomo");
   const [issues, setIssues] = useState<ValidationIssue[]>([]);
   const {
     register,
@@ -163,14 +148,6 @@ export function Settings({ settings }: { settings: AppConfig }) {
         className="mt-4 flex shrink-0 gap-1 rounded-xl border border-ink/10 bg-canvas p-1"
       >
         <TabButton
-          id="settings-tab-hiddify"
-          selected={tab === "hiddify"}
-          controls="settings-panel-hiddify"
-          onSelect={() => setTab("hiddify")}
-        >
-          Hiddify
-        </TabButton>
-        <TabButton
           id="settings-tab-mihomo"
           selected={tab === "mihomo"}
           controls="settings-panel-mihomo"
@@ -193,45 +170,6 @@ export function Settings({ settings }: { settings: AppConfig }) {
         className="mt-4 flex flex-col"
       >
         <div className="min-h-0 flex-1 overflow-y-auto pe-1">
-          {tab === "hiddify" ? (
-            <Fieldset
-              id="settings-panel-hiddify"
-              labelledBy="settings-tab-hiddify"
-              legend="Hiddify upstream"
-            >
-              <Field label="Host" error={errors.hiddifyHost?.message}>
-                <input
-                  {...register("hiddifyHost")}
-                  className="w-full rounded-xl border-ink/15 bg-canvas"
-                />
-              </Field>
-              <Field
-                label="SOCKS / mixed port"
-                error={errors.hiddifyPort?.message}
-              >
-                <input
-                  type="number"
-                  {...register("hiddifyPort")}
-                  className="w-full rounded-xl border-ink/15 bg-canvas"
-                />
-              </Field>
-              <Field
-                label="Start timeout (seconds)"
-                error={errors.startTimeout?.message}
-              >
-                <input
-                  type="number"
-                  {...register("startTimeout")}
-                  className="w-full rounded-xl border-ink/15 bg-canvas"
-                />
-              </Field>
-              <Check
-                label="Stop Hiddify with stack"
-                registration={register("stopWithStack")}
-              />
-            </Fieldset>
-          ) : null}
-
           {tab === "mihomo" ? (
             <Fieldset
               id="settings-panel-mihomo"

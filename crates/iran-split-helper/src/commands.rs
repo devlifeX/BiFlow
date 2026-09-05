@@ -115,6 +115,28 @@ async fn execute(supervisor: &Supervisor, command: HelperCommand) -> HelperReply
                 }
                 HelperReply::ReadyForUpdate
             }
+            HelperCommand::StartSideTunnel {
+                driver,
+                client_id,
+                profile,
+                executable,
+                auth_file,
+                timeout_seconds,
+            } => HelperReply::SideTunnel(
+                supervisor
+                    .start_side_tunnel(
+                        &driver,
+                        client_id,
+                        &profile,
+                        executable.as_deref(),
+                        auth_file.as_deref(),
+                        timeout_seconds,
+                    )
+                    .await?,
+            ),
+            HelperCommand::StopSideTunnel { client_id } => {
+                HelperReply::SideTunnel(supervisor.stop_side_tunnel(client_id).await?)
+            }
         })
     }
     .await;
@@ -141,6 +163,7 @@ fn helper_error_code(error: &HelperServiceError) -> &'static str {
         }
         HelperServiceError::Io(_) => "IO_FAILED",
         HelperServiceError::Protocol(_) => "PROTOCOL_ERROR",
+        HelperServiceError::SideTunnel(_) => "SIDE_TUNNEL_FAILED",
     }
 }
 

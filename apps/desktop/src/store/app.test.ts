@@ -38,7 +38,14 @@ const boot = {
     phase: "stopped",
     operation_id: null,
     helper: { phase: "running", message: "Helper is ready", since: "now" },
-    hiddify: { phase: "stopped", message: null, since: "now" },
+    clients: [
+      {
+        id: "11111111-1111-1111-1111-111111111111",
+        preset: "hiddify",
+        enabled: true,
+        status: { phase: "stopped", message: null, since: "now" },
+      },
+    ],
     mihomo: { phase: "stopped", message: null, since: "now" },
     tun: { phase: "stopped", message: null, since: "now" },
     dns: { phase: "stopped", message: null, since: "now" },
@@ -49,7 +56,7 @@ const boot = {
     updated_at: "now",
   },
   settings: { revision: 0 },
-  direct_rules: { revision: 1, rules: [] },
+  direct_rules: { revision: 1, pins: [], lists: [] },
   cloud_rules: {
     domain_count: 10,
     ip_count: 4,
@@ -467,7 +474,7 @@ describe("app store", () => {
 
   it("rethrows addRule failures after recording the store error", async () => {
     useAppStore.setState({
-      rules: { revision: 1, rules: [], vpn_rules: [] },
+      rules: { revision: 1, pins: [], lists: [] },
       error: null,
     });
     vi.mocked(desktop.addRule).mockRejectedValue(new Error("rules changed"));
@@ -480,11 +487,11 @@ describe("app store", () => {
   it("extracts the host from a pasted URL before adding a rule", async () => {
     vi.mocked(desktop.addRule).mockResolvedValue({
       revision: 2,
-      rules: [],
-      vpn_rules: [],
+      pins: [],
+      lists: [],
     });
     useAppStore.setState({
-      rules: { revision: 1, rules: [], vpn_rules: [] },
+      rules: { revision: 1, pins: [], lists: [] },
       error: null,
     });
     await useAppStore.getState().addRule("https://console.kavenegar.com/");

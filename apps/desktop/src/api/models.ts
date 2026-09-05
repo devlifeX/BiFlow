@@ -8,7 +8,7 @@ export type LifecycleBusy =
 
 export type OperationStage =
   | "preparing"
-  | "starting_hiddify"
+  | "starting_client"
   | "preparing_runtime"
   | "validating_config"
   | "starting_core"
@@ -21,7 +21,7 @@ export type OperationStage =
 export type StackPhase =
   | "uninitialized"
   | "stopped"
-  | "starting_hiddify"
+  | "starting_client"
   | "preparing_runtime"
   | "validating_config"
   | "starting_core"
@@ -72,14 +72,27 @@ export interface AppError {
   correlation_id: string;
 }
 
+export interface OperationClient {
+  preset: string;
+  client_id: string;
+}
+
+export interface ClientComponentStatus {
+  id: string;
+  preset: string;
+  enabled: boolean;
+  status: ComponentStatus;
+}
+
 export interface StackSnapshot {
   revision: number;
   phase: StackPhase;
   busy?: LifecycleBusy | null;
   operation_stage?: OperationStage | null;
+  operation_client?: OperationClient | null;
   operation_id: string | null;
   helper: ComponentStatus;
-  hiddify: ComponentStatus;
+  clients: ClientComponentStatus[];
   mihomo: ComponentStatus;
   tun: ComponentStatus;
   dns: ComponentStatus;
@@ -105,16 +118,41 @@ export type DirectDnsPreset =
   | "mokhaberat"
   | "custom";
 
+export type DefaultRoute =
+  | { kind: "direct" }
+  | { kind: "client"; client_id: string };
+
+export type ClientConfig =
+  | {
+      kind: "local_proxy";
+      host: string;
+      port: number;
+      executable: ExecutableSetting;
+      start_timeout_seconds: number;
+      stop_with_stack: boolean;
+    }
+  | {
+      kind: "owned_side_tunnel";
+      profile_path: string | null;
+      executable: ExecutableSetting;
+      username: string | null;
+      password: string | null;
+      start_timeout_seconds: number;
+    }
+  | { kind: "unsupported" };
+
+export interface ClientInstance {
+  id: string;
+  preset: string;
+  enabled: boolean;
+  config: ClientConfig;
+}
+
 export interface AppConfig {
   schema_version: number;
   revision: number;
-  hiddify: {
-    host: string;
-    port: number;
-    executable: ExecutableSetting;
-    start_timeout_seconds: number;
-    stop_with_stack: boolean;
-  };
+  clients: ClientInstance[];
+  default_route: DefaultRoute;
   mihomo: {
     controller_host: string;
     controller_port: number;
@@ -155,16 +193,41 @@ export interface DirectRule {
   refreshed_at: string | null;
 }
 
+export type Outbound =
+  | { kind: "direct" }
+  | { kind: "client"; client_id: string };
+
+export interface PinnedRoute {
+  target: DirectTarget;
+  outbound: Outbound;
+  list_id: string | null;
+  resolved_ips: string[];
+  created_at: string;
+  refreshed_at: string | null;
+}
+
+export interface RuleListMeta {
+  id: string;
+  name: string;
+  outbound: Outbound;
+}
+
+export interface ListCheckEntry {
+  target: string;
+  status: "ok" | "slow" | "fail" | "skipped";
+  latency_ms: number | null;
+  detail: string | null;
+}
+
 export interface DirectRulesDocument {
   revision: number;
-  rules: DirectRule[];
-  /** Hosts forced onto the VPN ahead of the bundled Iran list. */
-  vpn_rules: DirectRule[];
+  pins: PinnedRoute[];
+  lists: RuleListMeta[];
 }
 
 export interface RouteTestResult {
   target: string;
-  outbound: "direct" | "vpn";
+  outbound: Outbound;
   reason: string;
   matched_rule: string | null;
   reachable: boolean | null;
@@ -228,7 +291,7 @@ export interface TrafficTotals {
 export interface ActiveConnection {
   host: string;
   destination_ip: string;
-  outbound: "direct" | "vpn";
+  outbound: string;
   rule: string;
 }
 

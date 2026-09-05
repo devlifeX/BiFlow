@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { StackSnapshot } from "../api/models";
+import { baseSnapshot } from "../test/fixtures";
 import { useAppStore } from "../store/app";
 import { Dashboard } from "./Dashboard";
 
@@ -28,21 +28,7 @@ vi.mock("../api/desktop", () => ({
 }));
 
 const now = new Date().toISOString();
-const stopped: StackSnapshot = {
-  revision: 1,
-  phase: "stopped",
-  operation_id: null,
-  helper: { phase: "running", message: "Helper is ready", since: now },
-  hiddify: { phase: "stopped", message: null, since: now },
-  mihomo: { phase: "stopped", message: null, since: now },
-  tun: { phase: "stopped", message: null, since: now },
-  dns: { phase: "stopped", message: null, since: now },
-  providers: { ready: 0, total: 0, rules_loaded: 0, last_refresh: null },
-  exit_ip: null,
-  backend: "external_hiddify",
-  last_error: null,
-  updated_at: now,
-};
+const stopped = baseSnapshot({ updated_at: now });
 
 describe("Dashboard", () => {
   it("shows real component state and starts without blocking the UI", async () => {
@@ -61,13 +47,14 @@ describe("Dashboard", () => {
       <Dashboard
         snapshot={{
           ...stopped,
-          phase: "starting_hiddify",
+          phase: "starting_client",
           busy: "connecting",
+          operation_stage: "starting_client",
           operation_id: "operation-1",
         }}
       />,
     );
-    const connecting = screen.getByRole("button", { name: "Start Hiddify" });
+    const connecting = screen.getByRole("button", { name: "Start client" });
     expect(connecting).toBeDisabled();
     expect(connecting).toHaveAttribute("data-progress", "25");
     expect(connecting).toHaveAttribute("data-connect-glow", "off");
@@ -88,7 +75,10 @@ describe("Dashboard", () => {
           phase: "running",
           busy: "pausing",
           helper: running,
-          hiddify: running,
+          clients: stopped.clients.map((client) => ({
+            ...client,
+            status: running,
+          })),
           mihomo: running,
           tun: running,
           dns: running,
@@ -227,7 +217,10 @@ describe("Dashboard", () => {
           ...stopped,
           phase: "running",
           helper: running,
-          hiddify: running,
+          clients: stopped.clients.map((client) => ({
+            ...client,
+            status: running,
+          })),
           mihomo: running,
           tun: running,
           dns: running,
@@ -258,7 +251,10 @@ describe("Dashboard", () => {
           ...stopped,
           phase: "running",
           helper: running,
-          hiddify: running,
+          clients: stopped.clients.map((client) => ({
+            ...client,
+            status: running,
+          })),
           mihomo: running,
           tun: running,
           dns: running,
@@ -272,7 +268,10 @@ describe("Dashboard", () => {
         snapshot={{
           ...stopped,
           phase: "paused",
-          hiddify: running,
+          clients: stopped.clients.map((client) => ({
+            ...client,
+            status: running,
+          })),
         }}
       />,
     );

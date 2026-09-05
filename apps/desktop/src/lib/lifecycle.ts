@@ -1,7 +1,7 @@
 import type { LifecycleBusy, StackPhase, StackSnapshot } from "../api/models";
 
 export const TRANSITIONAL_PHASES: StackPhase[] = [
-  "starting_hiddify",
+  "starting_client",
   "preparing_runtime",
   "validating_config",
   "starting_core",

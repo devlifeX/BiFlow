@@ -61,6 +61,17 @@ pub enum HelperCommand {
         max_entries: u16,
     },
     PrepareForUpdate,
+    StartSideTunnel {
+        driver: String,
+        client_id: Uuid,
+        profile: std::path::PathBuf,
+        executable: Option<std::path::PathBuf>,
+        auth_file: Option<std::path::PathBuf>,
+        timeout_seconds: u64,
+    },
+    StopSideTunnel {
+        client_id: Uuid,
+    },
 }
 
 impl HelperCommand {
@@ -96,6 +107,20 @@ impl HelperCommand {
                     "log request must contain between 1 and 2000 entries".into(),
                 ))
             }
+            Self::StartSideTunnel {
+                driver,
+                timeout_seconds,
+                profile,
+                ..
+            } if driver != "openvpn"
+                || *timeout_seconds == 0
+                || *timeout_seconds > 300
+                || profile.as_os_str().is_empty() =>
+            {
+                Err(ProtocolError::InvalidMessage(
+                    "side tunnel request is missing a supported driver, profile, or timeout".into(),
+                ))
+            }
             _ => Ok(()),
         }
     }
@@ -113,6 +138,8 @@ impl HelperCommand {
             Self::CleanupOwnedNetworkState => "cleanup_owned_network_state",
             Self::CollectServiceLogs { .. } => "collect_service_logs",
             Self::PrepareForUpdate => "prepare_for_update",
+            Self::StartSideTunnel { .. } => "start_side_tunnel",
+            Self::StopSideTunnel { .. } => "stop_side_tunnel",
         }
     }
 }
@@ -134,8 +161,18 @@ pub enum HelperReply {
     CleanupReport(CleanupReport),
     Logs(Vec<ServiceLogEntry>),
     ReadyForUpdate,
+    SideTunnel(SideTunnelStatus),
     Ack,
     Error(HelperError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SideTunnelStatus {
+    pub client_id: Option<Uuid>,
+    pub driver: String,
+    pub running: bool,
+    pub device: Option<String>,
+    pub routing_mark: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,6 +1,9 @@
 use futures_util::StreamExt;
-use iran_split_config::AppConfig;
-use iran_split_rules::{DirectRulesDocument, DirectTarget};
+use iran_split_clients::{
+    process_bypass_union, synthesized_local_handle, DriverPlatform, EgressHandle,
+};
+use iran_split_config::{AppConfig, DefaultRoute, EgressKind};
+use iran_split_rules::{DirectTarget, RoutePinsDocument};
 use reqwest::{header, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -54,8 +57,6 @@ pub struct RuntimePaths {
     pub iran_networks: PathBuf,
     pub custom_direct_domains: PathBuf,
     pub custom_direct_ips: PathBuf,
-    pub custom_vpn_domains: PathBuf,
-    pub custom_vpn_ips: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,9 +145,16 @@ struct ProxyConfig {
     name: String,
     #[serde(rename = "type")]
     kind: String,
-    server: String,
-    port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port: Option<u16>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     udp: bool,
+    #[serde(rename = "interface-name", skip_serializing_if = "Option::is_none")]
+    interface_name: Option<String>,
+    #[serde(rename = "routing-mark", skip_serializing_if = "Option::is_none")]
+    routing_mark: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -172,15 +180,32 @@ struct RuleProvider {
 ///
 /// Returns [`MihomoError::InvalidConfig`] when application or custom-rule
 /// settings are invalid, or [`MihomoError::Yaml`] when serialization fails.
+pub fn generate_config(
+    app: &AppConfig,
+    platform: Platform,
+    paths: &RuntimePaths,
+    custom_rules: &RoutePinsDocument,
+) -> Result<GeneratedConfig, MihomoError> {
+    generate_config_with_handles(app, platform, paths, custom_rules, &[])
+}
+
+/// Generates YAML from ready client handles. Empty `handles` synthesizes
+/// `LocalProxy` endpoints from config so unit tests stay hermetic.
+///
+/// # Errors
+///
+/// Returns [`MihomoError::InvalidConfig`] when application or custom-rule
+/// settings are invalid, or [`MihomoError::Yaml`] when serialization fails.
 #[expect(
     clippy::too_many_lines,
     reason = "the function assembles one declarative Mihomo configuration document"
 )]
-pub fn generate_config(
+pub fn generate_config_with_handles(
     app: &AppConfig,
     platform: Platform,
     _paths: &RuntimePaths,
-    custom_rules: &DirectRulesDocument,
+    custom_rules: &RoutePinsDocument,
+    handles: &[EgressHandle],
 ) -> Result<GeneratedConfig, MihomoError> {
     let issues = app.validate();
     if !issues.is_empty() {
@@ -198,28 +223,63 @@ pub fn generate_config(
         ));
     }
 
-    let mut rules = process_bypass_rules(platform);
+    let ready = ready_handles(app, handles);
+    let match_target = match_group(app, &ready);
+    let mut rules = process_bypass_rules(app, platform);
     rules.extend([
         "DOMAIN-SUFFIX,localhost,DIRECT".into(),
         "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve".into(),
         "IP-CIDR6,::1/128,DIRECT,no-resolve".into(),
-        "RULE-SET,private-networks,DIRECT,no-resolve".into(),
-        // User VPN pins sit above every DIRECT source except loopback and LAN,
-        // so an exact host can be forced through the tunnel even when the
-        // bundled Iran list would keep it direct.
-        "RULE-SET,custom-vpn-domains,VPN".into(),
-        "RULE-SET,custom-vpn-ips,VPN,no-resolve".into(),
+    ]);
+    for exclude in ready.iter().flat_map(|handle| &handle.transport_excludes) {
+        let flag = if exclude.addr().is_ipv6() {
+            "IP-CIDR6"
+        } else {
+            "IP-CIDR"
+        };
+        rules.push(format!("{flag},{exclude},DIRECT,no-resolve"));
+    }
+    for handle in ready
+        .iter()
+        .filter(|handle| handle.kind == EgressKind::OwnedSideTunnel)
+    {
+        let id = handle.client_id.as_hyphenated();
+        rules.push(format!(
+            "RULE-SET,custom-{id}-domains,{}",
+            handle
+                .outbound
+                .as_ref()
+                .map_or_else(|| format!("client-{id}"), |out| out.group_name.clone())
+        ));
+        rules.push(format!(
+            "RULE-SET,custom-{id}-ips,{},no-resolve",
+            handle
+                .outbound
+                .as_ref()
+                .map_or_else(|| format!("client-{id}"), |out| out.group_name.clone())
+        ));
+    }
+    rules.push("RULE-SET,private-networks,DIRECT,no-resolve".into());
+    for handle in ready
+        .iter()
+        .filter(|handle| handle.kind == EgressKind::LocalProxy)
+    {
+        let id = handle.client_id.as_hyphenated();
+        let group = handle
+            .outbound
+            .as_ref()
+            .map_or_else(|| format!("client-{id}"), |out| out.group_name.clone());
+        rules.push(format!("RULE-SET,custom-{id}-domains,{group}"));
+        rules.push(format!("RULE-SET,custom-{id}-ips,{group},no-resolve"));
+    }
+    rules.extend([
         "RULE-SET,custom-direct-domains,DIRECT".into(),
         "RULE-SET,custom-direct-ips,DIRECT,no-resolve".into(),
         "RULE-SET,iran-domains,DIRECT".into(),
         "RULE-SET,iran-business-domains,DIRECT".into(),
         "RULE-SET,iran-networks,DIRECT,no-resolve".into(),
-        // QUIC through the Hiddify egress blackholes (packets go out, nothing
-        // returns), so browsers hang on HTTP/3 instead of falling back to
-        // TCP. Reject UDP 443 for VPN-bound traffic only: every DIRECT source
-        // sits above this line and keeps QUIC (ADR 0063).
         "AND,((NETWORK,udp),(DST-PORT,443)),REJECT".into(),
-        "MATCH,VPN".into(),
+        format!("MATCH,{match_target}"),
     ]);
 
     let direct_dns = app.mihomo.direct_dns_resolvers();
@@ -270,7 +330,7 @@ pub fn generate_config(
             fake_ip_range: "198.18.0.1/16".into(),
             fake_ip_filter,
             default_nameserver: vec!["1.1.1.1".into(), "8.8.8.8".into()],
-            nameserver: nameservers(platform),
+            nameserver: nameservers(&match_target),
             proxy_server_nameserver: vec!["8.8.8.8".into(), "1.1.1.1".into()],
             direct_nameserver: if apply_direct_dns {
                 direct_dns.clone()
@@ -309,19 +369,29 @@ pub fn generate_config(
                 ),
             ]),
         },
-        proxies: vec![ProxyConfig {
-            name: "Hiddify".into(),
-            kind: "socks5".into(),
-            server: app.hiddify.host.clone(),
-            port: app.hiddify.port,
-            udp: true,
-        }],
-        proxy_groups: vec![ProxyGroup {
-            name: "VPN".into(),
-            kind: "select".into(),
-            proxies: vec!["Hiddify".into()],
-        }],
-        rule_providers: providers(),
+        proxies: ready
+            .iter()
+            .filter_map(|handle| handle.outbound.as_ref())
+            .map(|outbound| ProxyConfig {
+                name: outbound.name.clone(),
+                kind: outbound.kind.clone(),
+                server: outbound.server.clone(),
+                port: outbound.port,
+                udp: outbound.udp,
+                interface_name: outbound.interface_name.clone(),
+                routing_mark: outbound.routing_mark,
+            })
+            .collect(),
+        proxy_groups: ready
+            .iter()
+            .filter_map(|handle| handle.outbound.as_ref())
+            .map(|outbound| ProxyGroup {
+                name: outbound.group_name.clone(),
+                kind: "select".into(),
+                proxies: vec![outbound.name.clone()],
+            })
+            .collect(),
+        rule_providers: providers(&ready),
         rules,
     };
     validate_custom_rules(custom_rules)?;
@@ -330,15 +400,44 @@ pub fn generate_config(
     Ok(GeneratedConfig { yaml, sha256 })
 }
 
-fn nameservers(_platform: Platform) -> Vec<String> {
-    // Pin DoH to the Hiddify group on every platform. Unpinned Cloudflare /
-    // Google DoH is often blocked on the Iranian WAN, so VPN destinations
-    // (including Google) stay on fake-ip with no usable mapping. Windows also
-    // needs `#VPN` because Wintun + strict-route blackholes DIRECT DoH.
+fn nameservers(match_target: &str) -> Vec<String> {
+    // Pin DoH to the MATCH group. Unpinned Cloudflare / Google DoH is often
+    // blocked on the Iranian WAN. When MATCH is DIRECT the hash is omitted.
+    if match_target == "DIRECT" {
+        return vec![
+            "https://1.1.1.1/dns-query".into(),
+            "https://8.8.8.8/dns-query".into(),
+        ];
+    }
     vec![
-        "https://1.1.1.1/dns-query#VPN".into(),
-        "https://8.8.8.8/dns-query#VPN".into(),
+        format!("https://1.1.1.1/dns-query#{match_target}"),
+        format!("https://8.8.8.8/dns-query#{match_target}"),
     ]
+}
+
+fn ready_handles(app: &AppConfig, handles: &[EgressHandle]) -> Vec<EgressHandle> {
+    if !handles.is_empty() {
+        return handles
+            .iter()
+            .filter(|handle| handle.ready && !handle.degraded)
+            .cloned()
+            .collect();
+    }
+    app.enabled_clients()
+        .into_iter()
+        .filter_map(synthesized_local_handle)
+        .collect()
+}
+
+fn match_group(app: &AppConfig, ready: &[EgressHandle]) -> String {
+    match app.default_route {
+        DefaultRoute::Direct => "DIRECT".into(),
+        DefaultRoute::Client { client_id } => ready
+            .iter()
+            .find(|handle| handle.client_id == client_id)
+            .and_then(|handle| handle.outbound.as_ref())
+            .map_or_else(|| "DIRECT".into(), |outbound| outbound.group_name.clone()),
+    }
 }
 
 fn direct_nameserver_policy(resolvers: &[String]) -> BTreeMap<String, Vec<String>> {
@@ -352,30 +451,44 @@ fn direct_nameserver_policy(resolvers: &[String]) -> BTreeMap<String, Vec<String
     .collect()
 }
 
-fn process_bypass_rules(platform: Platform) -> Vec<String> {
+fn process_bypass_rules(app: &AppConfig, platform: Platform) -> Vec<String> {
+    let driver_platform = match platform {
+        Platform::Linux => DriverPlatform::Linux,
+        Platform::Windows => DriverPlatform::Windows,
+    };
+    let mut rules: Vec<String> = process_bypass_union(&app.clients, driver_platform)
+        .into_iter()
+        .map(|bypass| {
+            if bypass.wildcard {
+                format!("PROCESS-NAME-WILDCARD,{},DIRECT", bypass.name)
+            } else {
+                format!("PROCESS-NAME,{},DIRECT", bypass.name)
+            }
+        })
+        .collect();
     match platform {
-        Platform::Linux => vec![
-            "PROCESS-NAME,hiddify,DIRECT".into(),
-            "PROCESS-NAME-WILDCARD,*Hiddify*,DIRECT".into(),
-            "PROCESS-NAME,tailscaled,DIRECT".into(),
-            "PROCESS-NAME,iran-split-desktop,DIRECT".into(),
-            "PROCESS-NAME,iran-split-desk,DIRECT".into(),
-            "PROCESS-NAME,BiFlow,DIRECT".into(),
-        ],
-        Platform::Windows => vec![
-            "PROCESS-NAME,hiddify.exe,DIRECT".into(),
-            "PROCESS-NAME,Hiddify.exe,DIRECT".into(),
-            "PROCESS-NAME,HiddifyNext.exe,DIRECT".into(),
-            "PROCESS-NAME-WILDCARD,*Hiddify*,DIRECT".into(),
-            "PROCESS-NAME,tailscaled.exe,DIRECT".into(),
-            "PROCESS-NAME,iran-split-desktop.exe,DIRECT".into(),
-            "PROCESS-NAME,BiFlow.exe,DIRECT".into(),
-        ],
+        Platform::Linux => {
+            rules.extend([
+                "PROCESS-NAME,tailscaled,DIRECT".into(),
+                "PROCESS-NAME,iran-split-desktop,DIRECT".into(),
+                "PROCESS-NAME,iran-split-desk,DIRECT".into(),
+                "PROCESS-NAME,BiFlow,DIRECT".into(),
+            ]);
+        }
+        Platform::Windows => {
+            rules.extend([
+                "PROCESS-NAME,tailscaled.exe,DIRECT".into(),
+                "PROCESS-NAME,iran-split-desktop.exe,DIRECT".into(),
+                "PROCESS-NAME,BiFlow.exe,DIRECT".into(),
+            ]);
+        }
     }
+    rules
 }
 
-fn providers() -> BTreeMap<String, RuleProvider> {
-    [
+fn providers(ready: &[EgressHandle]) -> BTreeMap<String, RuleProvider> {
+    let mut map = BTreeMap::new();
+    for (name, behavior, path) in [
         ("private-networks", "ipcidr", "private.txt"),
         ("iran-domains", "domain", "iran-domains.txt"),
         (
@@ -390,12 +503,8 @@ fn providers() -> BTreeMap<String, RuleProvider> {
             "custom-direct-domains.txt",
         ),
         ("custom-direct-ips", "ipcidr", "custom-direct-ips.txt"),
-        ("custom-vpn-domains", "domain", "custom-vpn-domains.txt"),
-        ("custom-vpn-ips", "ipcidr", "custom-vpn-ips.txt"),
-    ]
-    .into_iter()
-    .map(|(name, behavior, path)| {
-        (
+    ] {
+        map.insert(
             name.into(),
             RuleProvider {
                 kind: "file".into(),
@@ -403,17 +512,37 @@ fn providers() -> BTreeMap<String, RuleProvider> {
                 format: "text".into(),
                 path: path.into(),
             },
-        )
-    })
-    .collect()
+        );
+    }
+    for handle in ready {
+        let id = handle.client_id.as_hyphenated();
+        map.insert(
+            format!("custom-{id}-domains"),
+            RuleProvider {
+                kind: "file".into(),
+                behavior: "domain".into(),
+                format: "text".into(),
+                path: format!("custom-{id}-domains.txt"),
+            },
+        );
+        map.insert(
+            format!("custom-{id}-ips"),
+            RuleProvider {
+                kind: "file".into(),
+                behavior: "ipcidr".into(),
+                format: "text".into(),
+                path: format!("custom-{id}-ips.txt"),
+            },
+        );
+    }
+    map
 }
 
-const OPTIONAL_RULE_PROVIDERS: [&str; 4] = [
-    "custom-direct-domains",
-    "custom-direct-ips",
-    "custom-vpn-domains",
-    "custom-vpn-ips",
-];
+fn optional_rule_provider(name: &str) -> bool {
+    name == "custom-direct-domains"
+        || name == "custom-direct-ips"
+        || iran_split_config::is_custom_client_generation_file(&format!("{name}.txt"))
+}
 
 fn summarize_rule_providers(value: &Value) -> Result<ProviderStatus, MihomoError> {
     let providers = value
@@ -440,7 +569,7 @@ fn rule_provider_is_ready(name: &str, provider: &Value) -> bool {
     if !provider.get("error").is_none_or(Value::is_null) {
         return false;
     }
-    if OPTIONAL_RULE_PROVIDERS.contains(&name) {
+    if optional_rule_provider(name) {
         return true;
     }
     provider
@@ -450,8 +579,8 @@ fn rule_provider_is_ready(name: &str, provider: &Value) -> bool {
         > 0
 }
 
-fn validate_custom_rules(document: &DirectRulesDocument) -> Result<(), MihomoError> {
-    for rule in &document.rules {
+fn validate_custom_rules(document: &RoutePinsDocument) -> Result<(), MihomoError> {
+    for rule in &document.pins {
         if let DirectTarget::Domain(domain) = &rule.target {
             if domain.contains(',') || domain.contains('\n') || domain.contains('\r') {
                 return Err(MihomoError::InvalidConfig(
@@ -835,25 +964,25 @@ impl From<ConnectionEntry> for ActiveConnection {
         };
         Self {
             destination_ip: entry.metadata.destination_ip,
-            outbound: classify_outbound(&entry.chains, &entry.rule).to_owned(),
+            outbound: classify_outbound(&entry.chains, &entry.rule),
             rule: entry.rule,
             host,
         }
     }
 }
 
-fn classify_outbound(chains: &[String], rule: &str) -> &'static str {
+fn classify_outbound(chains: &[String], rule: &str) -> String {
     if let Some(last) = chains.last() {
         return if last.eq_ignore_ascii_case("DIRECT") {
-            "direct"
+            "direct".into()
         } else {
-            "vpn"
+            last.clone()
         };
     }
     if rule.eq_ignore_ascii_case("DIRECT") {
-        "direct"
+        "direct".into()
     } else {
-        "vpn"
+        rule.to_owned()
     }
 }
 
@@ -933,7 +1062,7 @@ async fn optional_exit_ip(client: &reqwest::Client) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iran_split_rules::{DirectRule, DirectTarget};
+    use iran_split_rules::{Outbound, PinnedRoute, RoutePinsDocument};
     use std::net::Ipv4Addr;
 
     fn paths() -> RuntimePaths {
@@ -944,25 +1073,30 @@ mod tests {
             iran_networks: "/runtime/iran-networks.txt".into(),
             custom_direct_domains: "/runtime/custom-direct-domains.txt".into(),
             custom_direct_ips: "/runtime/custom-direct-ips.txt".into(),
-            custom_vpn_domains: "/runtime/custom-vpn-domains.txt".into(),
-            custom_vpn_ips: "/runtime/custom-vpn-ips.txt".into(),
         }
+    }
+
+    fn match_needle(app: &AppConfig) -> String {
+        format!("MATCH,{}", app.clients[0].group_name())
     }
 
     #[test]
     fn generated_config_is_loopback_secret_and_precedence_safe() {
         let app = AppConfig::default();
-        let custom = DirectRulesDocument {
+        let custom = RoutePinsDocument {
             revision: 1,
-            vpn_rules: Vec::new(),
-            rules: vec![DirectRule {
+            pins: vec![PinnedRoute {
                 target: DirectTarget::Ip(Ipv4Addr::new(203, 0, 113, 1).into()),
+                outbound: Outbound::Direct,
+                list_id: None,
                 resolved_ips: vec![],
                 created_at: chrono::Utc::now(),
                 refreshed_at: None,
             }],
+            lists: vec![],
         };
         let generated = generate_config(&app, Platform::Linux, &paths(), &custom).expect("config");
+        let match_line = match_needle(&app);
         assert!(generated
             .yaml
             .contains("external-controller: 127.0.0.1:19090"));
@@ -974,9 +1108,7 @@ mod tests {
         assert!(generated
             .yaml
             .contains("PROCESS-NAME,iran-split-desk,DIRECT"));
-        assert!(generated.yaml.contains("MATCH,VPN"));
-        // QUIC reject must protect only VPN-bound traffic: after every DIRECT
-        // rule, immediately before MATCH (ADR 0063)
+        assert!(generated.yaml.contains(&match_line));
         let quic_reject = generated
             .yaml
             .find("AND,((NETWORK,udp),(DST-PORT,443)),REJECT")
@@ -985,11 +1117,13 @@ mod tests {
             .yaml
             .find("RULE-SET,iran-networks,DIRECT")
             .expect("iran-networks rule");
-        let match_vpn = generated.yaml.find("MATCH,VPN").expect("match rule");
+        let match_vpn = generated.yaml.find(&match_line).expect("match rule");
         assert!(iran_networks < quic_reject && quic_reject < match_vpn);
         assert!(generated.yaml.contains("find-process-mode: always"));
         assert!(generated.yaml.contains("ipv6: true"));
-        assert!(generated.yaml.contains("dns-query#VPN"));
+        assert!(generated
+            .yaml
+            .contains(&format!("dns-query#{}", app.clients[0].group_name())));
         assert!(generated.yaml.contains("path: private.txt"));
         assert!(generated.yaml.contains("path: iran-business-domains.txt"));
         assert!(generated
@@ -1028,14 +1162,14 @@ mod tests {
             &AppConfig::default(),
             Platform::Windows,
             &paths(),
-            &DirectRulesDocument::default(),
+            &RoutePinsDocument::default(),
         )
         .expect("config");
         assert!(generated.yaml.contains("strict-route: true"));
         assert!(generated.yaml.contains("find-process-mode: always"));
         assert!(generated.yaml.contains("auto-redirect: false"));
         assert!(generated.yaml.contains("ipv6: false"));
-        assert!(generated.yaml.contains("dns-query#VPN"));
+        assert!(generated.yaml.contains("dns-query#client-"));
         assert!(generated.yaml.contains("PROCESS-NAME,Hiddify.exe,DIRECT"));
         assert!(generated
             .yaml
@@ -1051,7 +1185,7 @@ mod tests {
             &app,
             Platform::Linux,
             &paths(),
-            &DirectRulesDocument::default(),
+            &RoutePinsDocument::default(),
         )
         .expect("config");
         assert!(generated.yaml.contains("5.200.200.200"));
@@ -1086,7 +1220,7 @@ mod tests {
             &app,
             Platform::Linux,
             &paths(),
-            &DirectRulesDocument::default(),
+            &RoutePinsDocument::default(),
         )
         .expect("config");
         let parsed: serde_yaml::Value =
@@ -1108,6 +1242,39 @@ mod tests {
                 "fake-ip-filter missing {key}"
             );
         }
+    }
+
+    #[test]
+    fn generation_emits_one_group_per_ready_client_and_match_can_be_direct() {
+        let mut app = AppConfig::default();
+        let happ =
+            iran_split_config::ClientInstance::from_preset(iran_split_config::PresetId::Happ);
+        let happ_id = happ.id;
+        app.clients.push(happ);
+        let generated = generate_config(
+            &app,
+            Platform::Linux,
+            &paths(),
+            &RoutePinsDocument::default(),
+        )
+        .expect("config");
+        assert!(generated.yaml.contains(&app.clients[0].group_name()));
+        assert!(generated
+            .yaml
+            .contains(&format!("client-{}", happ_id.as_hyphenated())));
+        assert!(generated
+            .yaml
+            .contains(&format!("custom-{}-domains.txt", happ_id.as_hyphenated())));
+        app.default_route = DefaultRoute::Direct;
+        let direct = generate_config(
+            &app,
+            Platform::Linux,
+            &paths(),
+            &RoutePinsDocument::default(),
+        )
+        .expect("direct match");
+        assert!(direct.yaml.contains("MATCH,DIRECT"));
+        assert!(!direct.yaml.contains("dns-query#client-"));
     }
 
     #[test]
@@ -1197,7 +1364,7 @@ mod tests {
                 rule: "RuleSet".into(),
             }
         );
-        assert_eq!(rows[1].outbound, "vpn");
+        assert_eq!(rows[1].outbound, "PROXY");
         assert_eq!(rows[1].host, "openai.com");
     }
 
@@ -1281,16 +1448,13 @@ mod tests {
         std::fs::write(generation.path().join("custom-direct-domains.txt"), "")
             .expect("custom domains");
         std::fs::write(generation.path().join("custom-direct-ips.txt"), "").expect("custom ips");
-        std::fs::write(generation.path().join("custom-vpn-domains.txt"), "").expect("vpn domains");
-        std::fs::write(generation.path().join("custom-vpn-ips.txt"), "").expect("vpn ips");
+        let app = AppConfig::default();
+        for name in app.clients[0].provider_files() {
+            std::fs::write(generation.path().join(name), "").expect("client provider");
+        }
 
-        let generated = generate_config(
-            &AppConfig::default(),
-            platform,
-            &paths(),
-            &DirectRulesDocument::default(),
-        )
-        .expect("config");
+        let generated = generate_config(&app, platform, &paths(), &RoutePinsDocument::default())
+            .expect("config");
         let config_path = generation.path().join("config.yaml");
         std::fs::write(&config_path, generated.yaml.as_bytes()).expect("config yaml");
 

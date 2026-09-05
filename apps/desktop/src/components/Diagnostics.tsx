@@ -1,5 +1,4 @@
 import {
-  ArrowLeftRight,
   CheckCircle2,
   CircleAlert,
   Download,
@@ -31,7 +30,8 @@ import { extractHost } from "../lib/host";
 import type { SortState } from "../lib/tableSort";
 import { sortRows, toggleSort } from "../lib/tableSort";
 import { useAppStore } from "../store/app";
-import { FlowResult } from "./DirectRules";
+import { outboundLabel } from "../lib/outbound";
+import { FlowResult, OutboundSelect } from "./DirectRules";
 import { SortHeader } from "./SortHeader";
 
 export function Diagnostics({ report }: { report: DiagnosticsReport | null }) {
@@ -727,9 +727,9 @@ function LiveConnectionsCard() {
     dir: "desc",
   });
   const [query, setQuery] = useState("");
-  const [outboundFilter, setOutboundFilter] = useState<
-    "all" | "direct" | "vpn"
-  >("all");
+  const settings = useAppStore((state) => state.settings);
+  const clients = settings?.clients ?? [];
+  const [outboundFilter, setOutboundFilter] = useState("all");
   const [ruleFilter, setRuleFilter] = useState("all");
   const live = snapshot?.phase === "running" || snapshot?.phase === "degraded";
 
@@ -798,16 +798,18 @@ function LiveConnectionsCard() {
             <select
               aria-label={t("liveConnectionsOutbound")}
               value={outboundFilter}
-              onChange={(event) =>
-                setOutboundFilter(
-                  event.target.value as "all" | "direct" | "vpn",
-                )
-              }
+              onChange={(event) => setOutboundFilter(event.target.value)}
               className="rounded-xl border-ink/15 bg-canvas text-sm"
             >
               <option value="all">{t("liveConnectionsAllRoutes")}</option>
               <option value="direct">{t("direct")}</option>
-              <option value="vpn">{t("vpn")}</option>
+              {clients
+                .filter((client) => client.enabled)
+                .map((client) => (
+                  <option key={client.id} value={client.id}>
+                    {outboundLabel(client.id, clients)}
+                  </option>
+                ))}
             </select>
             <select
               aria-label={t("liveConnectionsRule")}
@@ -881,8 +883,6 @@ function LiveConnectionsCard() {
                   {sortRows(filtered, sort, CONNECTION_SORT_ACCESSORS).map(
                     (group) => {
                       const target = group.host || group.ips[0] || "";
-                      const destination =
-                        group.outbound === "direct" ? "vpn" : "direct";
                       return (
                         <tr key={group.key} className="hover:bg-canvas/60">
                           <td className="px-3 py-2 font-medium break-all">
@@ -897,14 +897,12 @@ function LiveConnectionsCard() {
                           <td className="px-3 py-2">
                             <span
                               className={`rounded-md px-2 py-0.5 text-xs font-semibold ${
-                                group.outbound === "vpn"
-                                  ? "bg-brand/10 text-brand"
-                                  : "bg-success/10 text-success"
+                                group.outbound === "direct"
+                                  ? "bg-success/10 text-success"
+                                  : "bg-brand/10 text-brand"
                               }`}
                             >
-                              {group.outbound === "direct"
-                                ? t("direct")
-                                : t("vpn")}
+                              {outboundLabel(group.outbound, clients)}
                             </span>
                           </td>
                           <td className="px-3 py-2 font-mono text-xs text-muted">
@@ -912,26 +910,16 @@ function LiveConnectionsCard() {
                           </td>
                           <td className="px-3 py-2">
                             {target ? (
-                              <button
-                                type="button"
+                              <OutboundSelect
+                                value={group.outbound}
+                                clients={clients.filter((item) => item.enabled)}
                                 disabled={actionPending}
-                                onClick={() =>
-                                  void pinRoute(target, destination).catch(
+                                onChange={(next) =>
+                                  void pinRoute(target, next).catch(
                                     () => undefined,
                                   )
                                 }
-                                className="inline-flex items-center gap-1 rounded-lg border border-ink/15 px-2 py-1 text-xs font-semibold text-muted hover:text-brand disabled:opacity-50"
-                                title={
-                                  destination === "direct"
-                                    ? t("moveToDirect", { target })
-                                    : t("moveToVpn", { target })
-                                }
-                              >
-                                <ArrowLeftRight size={14} aria-hidden />
-                                {destination === "direct"
-                                  ? t("direct")
-                                  : t("vpn")}
-                              </button>
+                              />
                             ) : null}
                           </td>
                         </tr>

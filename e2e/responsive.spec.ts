@@ -106,7 +106,7 @@ test.describe("responsive viewports", () => {
       expect(dirname(file)).toBe(screenshotDir);
 
       const pages = [
-        "Direct rules",
+        "List Management",
         "Diagnostics",
         "Settings",
         "About",
@@ -165,9 +165,9 @@ test.describe("responsive viewports", () => {
     await page.reload();
     await expect(page.getByRole("radio", { name: "Basic" })).toBeChecked();
     await expect(page.getByTestId("bottom-nav")).toBeVisible();
-    await page.getByRole("button", { name: "Direct rules" }).click();
+    await page.getByRole("button", { name: "List Management" }).click();
     await expect(
-      page.getByRole("heading", { name: "Direct rules" }),
+      page.getByRole("heading", { name: "List Management" }),
     ).toBeVisible();
     await expect(page.getByRole("radio", { name: "Advanced" })).toBeChecked();
   });

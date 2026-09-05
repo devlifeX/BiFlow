@@ -70,3 +70,6 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0064](./0064-windows-machine-wide-helper-staging.md)    | Windows machine-wide helper staging         | Accepted   |
 | [0065](./0065-linux-vpn-doh-and-egress-probe.md)         | Linux VPN DoH and multi-path egress probe   | Accepted   |
 | [0066](./0066-reachability-diagnostics.md)               | Reachability section in Diagnostics         | Accepted   |
+| [0067](./0067-owned-side-tunnel-invariants.md)           | OwnedSideTunnel invariants                  | Accepted   |
+| [0068](./0068-client-registry-and-egress-kinds.md)       | Client registry and egress kinds            | Accepted   |
+| [0069](./0069-named-rule-lists.md)                       | Named rule lists                            | Accepted   |

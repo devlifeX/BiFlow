@@ -4,9 +4,10 @@ mod cloud;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ipnet::IpNet;
+use iran_split_config::{ClientId, EgressKind};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     io::Write,
     net::{IpAddr, SocketAddr},
@@ -16,6 +17,7 @@ use std::{
 use tempfile::NamedTempFile;
 use thiserror::Error;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 pub use canonical::{canonical_target, domain_matches_pin, registrable_domain};
 pub use cloud::{
@@ -115,14 +117,172 @@ pub struct DirectRule {
     pub refreshed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct DirectRulesDocument {
-    pub revision: u64,
-    pub rules: Vec<DirectRule>,
-    /// Hosts forced onto the VPN even when the Iran list would keep them
-    /// direct. `default` so documents written before exclusions still load.
+/// One user pin: a host lives in exactly one outbound and one named list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedRoute {
+    pub target: DirectTarget,
+    pub outbound: Outbound,
     #[serde(default)]
-    pub vpn_rules: Vec<DirectRule>,
+    pub list_id: Option<Uuid>,
+    pub resolved_ips: Vec<IpAddr>,
+    pub created_at: DateTime<Utc>,
+    pub refreshed_at: Option<DateTime<Utc>>,
+}
+
+/// A named bundle of pins with exactly one outbound. The list is the
+/// user-facing model; generation still reads the flat pins by outbound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleListMeta {
+    pub id: Uuid,
+    pub name: String,
+    pub outbound: Outbound,
+}
+
+/// User route pins. Schema 3 is a single list; older `rules` / `vpn_rules`
+/// documents are migrated on load when a legacy client id is supplied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RoutePinsDocument {
+    pub revision: u64,
+    #[serde(default)]
+    pub pins: Vec<PinnedRoute>,
+    #[serde(default)]
+    pub lists: Vec<RuleListMeta>,
+}
+
+/// Compatibility name used by older call sites and the desktop IPC.
+pub type DirectRulesDocument = RoutePinsDocument;
+
+/// Client ids that receive leftover `vpn_rules` / `openvpn_rules` lists.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LegacyPinClients {
+    pub vpn: Option<ClientId>,
+    pub openvpn: Option<ClientId>,
+}
+
+/// How strictly a pin may target private or loopback addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinPolicy {
+    Direct,
+    LocalProxy,
+    OwnedSideTunnel,
+}
+
+impl PinPolicy {
+    #[must_use]
+    pub const fn for_kind(kind: EgressKind) -> Self {
+        match kind {
+            EgressKind::LocalProxy | EgressKind::Unsupported => Self::LocalProxy,
+            EgressKind::OwnedSideTunnel => Self::OwnedSideTunnel,
+        }
+    }
+}
+
+impl RoutePinsDocument {
+    #[must_use]
+    pub fn pins_for<'a>(&'a self, outbound: &'a Outbound) -> Vec<&'a PinnedRoute> {
+        self.pins
+            .iter()
+            .filter(|pin| pin.outbound == *outbound)
+            .collect()
+    }
+
+    #[must_use]
+    pub fn count_for_client(&self, id: ClientId) -> usize {
+        self.pins
+            .iter()
+            .filter(|pin| pin.outbound == Outbound::client(id))
+            .count()
+    }
+
+    pub fn delete_client_pins(&mut self, id: ClientId) -> usize {
+        let before = self.pins.len();
+        self.pins.retain(|pin| pin.outbound != Outbound::client(id));
+        self.lists
+            .retain(|list| list.outbound != Outbound::client(id));
+        before.saturating_sub(self.pins.len())
+    }
+
+    pub fn move_client_pins(&mut self, from: ClientId, to: Outbound) -> usize {
+        let mut moved = 0;
+        for pin in &mut self.pins {
+            if pin.outbound == Outbound::client(from) {
+                pin.outbound = to;
+                moved += 1;
+            }
+        }
+        for list in &mut self.lists {
+            if list.outbound == Outbound::client(from) {
+                list.outbound = to;
+            }
+        }
+        self.pins.sort_by_key(|pin| pin.target.display_value());
+        ensure_list_membership(self);
+        moved
+    }
+
+    #[must_use]
+    pub fn list_meta(&self, id: Uuid) -> Option<&RuleListMeta> {
+        self.lists.iter().find(|list| list.id == id)
+    }
+
+    #[must_use]
+    pub fn pins_in_list(&self, id: Uuid) -> Vec<&PinnedRoute> {
+        self.pins
+            .iter()
+            .filter(|pin| pin.list_id == Some(id))
+            .collect()
+    }
+
+    /// First list bound to `outbound`, creating a default-named one if none
+    /// exists. Returns its id.
+    pub fn default_list_for(&mut self, outbound: Outbound) -> Uuid {
+        if let Some(list) = self.lists.iter().find(|list| list.outbound == outbound) {
+            return list.id;
+        }
+        let id = Uuid::new_v4();
+        self.lists.push(RuleListMeta {
+            id,
+            name: default_list_name(outbound),
+            outbound,
+        });
+        id
+    }
+}
+
+fn default_list_name(outbound: Outbound) -> String {
+    match outbound {
+        Outbound::Direct => "Direct".into(),
+        Outbound::Client { .. } => "Client pins".into(),
+    }
+}
+
+/// Repairs the pin <-> list relationship: every pin belongs to a list whose
+/// outbound matches; orphan pins are attached to (or get) a default list.
+fn ensure_list_membership(document: &mut RoutePinsDocument) {
+    let outbounds: Vec<Outbound> = document.pins.iter().map(|pin| pin.outbound).collect();
+    for outbound in outbounds {
+        if !document.lists.iter().any(|list| list.outbound == outbound) {
+            document.lists.push(RuleListMeta {
+                id: Uuid::new_v4(),
+                name: default_list_name(outbound),
+                outbound,
+            });
+        }
+    }
+    let lists = document.lists.clone();
+    for pin in &mut document.pins {
+        let valid = pin.list_id.is_some_and(|id| {
+            lists
+                .iter()
+                .any(|list| list.id == id && list.outbound == pin.outbound)
+        });
+        if !valid {
+            pin.list_id = lists
+                .iter()
+                .find(|list| list.outbound == pin.outbound)
+                .map(|list| list.id);
+        }
+    }
 }
 
 #[async_trait]
@@ -224,16 +384,29 @@ impl std::fmt::Debug for RuleManager {
 }
 
 impl RuleManager {
-    /// Loads the direct-rule document at `path`, or starts empty when absent.
+    /// Loads the pin document at `path`, or starts empty when absent.
     ///
     /// # Errors
     ///
     /// Returns [`RuleError`] when the document cannot be read or decoded.
     pub fn load(path: impl Into<PathBuf>, resolver: Arc<dyn Resolver>) -> Result<Self, RuleError> {
+        Self::load_with_legacy(path, resolver, LegacyPinClients::default())
+    }
+
+    /// Loads pins and remaps leftover `vpn_rules` / `openvpn_rules` lists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuleError`] when the document cannot be read or decoded.
+    pub fn load_with_legacy(
+        path: impl Into<PathBuf>,
+        resolver: Arc<dyn Resolver>,
+        legacy: LegacyPinClients,
+    ) -> Result<Self, RuleError> {
         let path = path.into();
         let document = if path.exists() {
             let bytes = fs::read(&path)?;
-            let original: DirectRulesDocument = serde_json::from_slice(&bytes)?;
+            let original = decode_pins_document(&bytes, legacy)?;
             let migrated = canonicalize_document(original.clone());
             if migrated != original {
                 backup_last_good(&path)?;
@@ -241,7 +414,7 @@ impl RuleManager {
             }
             migrated
         } else {
-            DirectRulesDocument::default()
+            RoutePinsDocument::default()
         };
         Ok(Self {
             path,
@@ -283,18 +456,67 @@ impl RuleManager {
         input: &str,
         outbound: Outbound,
         expected_revision: u64,
-    ) -> Result<DirectRulesDocument, RuleError> {
+    ) -> Result<RoutePinsDocument, RuleError> {
+        let policy = match outbound {
+            Outbound::Direct => PinPolicy::Direct,
+            Outbound::Client { .. } => PinPolicy::LocalProxy,
+        };
+        self.pin_with_policy(input, outbound, policy, expected_revision)
+            .await
+    }
+
+    /// Pins a host to one outbound using the egress-kind policy for that client.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuleError`] for invalid input, a rejected private address, a
+    /// revision conflict, or an atomic persistence failure.
+    pub async fn pin_with_policy(
+        &self,
+        input: &str,
+        outbound: Outbound,
+        policy: PinPolicy,
+        expected_revision: u64,
+    ) -> Result<RoutePinsDocument, RuleError> {
+        self.pin_into(input, outbound, None, policy, expected_revision)
+            .await
+    }
+
+    /// Pins a host into one specific named list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuleError`] for invalid input, an unknown list, a rejected
+    /// private address, a revision conflict, or a persistence failure.
+    pub async fn pin_to_list(
+        &self,
+        input: &str,
+        list_id: Uuid,
+        policy: PinPolicy,
+        expected_revision: u64,
+    ) -> Result<RoutePinsDocument, RuleError> {
+        let outbound = {
+            let document = self.document.lock().await;
+            document
+                .list_meta(list_id)
+                .map(|list| list.outbound)
+                .ok_or_else(|| RuleError::InvalidRule("unknown list".into()))?
+        };
+        self.pin_into(input, outbound, Some(list_id), policy, expected_revision)
+            .await
+    }
+
+    async fn pin_into(
+        &self,
+        input: &str,
+        outbound: Outbound,
+        list_id: Option<Uuid>,
+        policy: PinPolicy,
+        expected_revision: u64,
+    ) -> Result<RoutePinsDocument, RuleError> {
         let target = DirectTarget::parse(input)?;
-        if outbound == Outbound::Vpn {
-            // Loopback, LAN, and CGNAT have to stay direct or the machine
-            // loses its own network while the tunnel is up.
-            if let DirectTarget::Ip(address) = &target {
-                if is_private_or_local(*address) {
-                    return Err(RuleError::InvalidRule(
-                        "private, loopback, and carrier-grade NAT addresses cannot be sent through the VPN".into(),
-                    ));
-                }
-            }
+        if let DirectTarget::Ip(address) = &target {
+            reject_pin_address(*address, policy)?;
         }
         let resolved_ips = match &target {
             DirectTarget::Domain(_) => Vec::new(),
@@ -302,36 +524,158 @@ impl RuleManager {
         };
         let mut document = self.document.lock().await;
         ensure_revision(&document, expected_revision)?;
+        let list_id = list_id.unwrap_or_else(|| document.default_list_for(outbound));
 
-        let already_pinned = match outbound {
-            Outbound::Direct => &document.rules,
-            Outbound::Vpn => &document.vpn_rules,
-        }
-        .iter()
-        .any(|rule| rule.target == target);
-        let other = match outbound {
-            Outbound::Direct => &mut document.vpn_rules,
-            Outbound::Vpn => &mut document.rules,
-        };
-        let dropped = other.len();
-        other.retain(|rule| rule.target != target);
-        let moved = other.len() != dropped;
-        if already_pinned && !moved {
-            return Ok(document.clone());
-        }
-        if !already_pinned {
+        let already_pinned = document
+            .pins
+            .iter()
+            .any(|pin| pin.target == target && pin.outbound == outbound);
+        let other_count = document
+            .pins
+            .iter()
+            .filter(|pin| pin.target == target && pin.outbound != outbound)
+            .count();
+        document
+            .pins
+            .retain(|pin| pin.target != target || pin.outbound == outbound);
+        if already_pinned {
+            // Keep the pin but move it into the requested list if needed.
+            for pin in &mut document.pins {
+                if pin.target == target {
+                    pin.list_id = Some(list_id);
+                }
+            }
+            if other_count == 0 {
+                publish(&self.path, &document)?;
+                return Ok(document.clone());
+            }
+        } else {
             let now = Utc::now();
-            let list = match outbound {
-                Outbound::Direct => &mut document.rules,
-                Outbound::Vpn => &mut document.vpn_rules,
-            };
-            list.push(DirectRule {
+            document.pins.push(PinnedRoute {
                 target,
+                outbound,
+                list_id: Some(list_id),
                 resolved_ips,
                 created_at: now,
                 refreshed_at: Some(now),
             });
-            list.sort_by_key(|rule| rule.target.display_value());
+            document.pins.sort_by_key(|pin| pin.target.display_value());
+        }
+        document.revision = document.revision.saturating_add(1);
+        publish(&self.path, &document)?;
+        Ok(document.clone())
+    }
+
+    /// Creates a named list bound to one outbound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuleError`] for an empty name, a revision conflict, or a
+    /// persistence failure.
+    pub async fn create_list(
+        &self,
+        name: &str,
+        outbound: Outbound,
+        expected_revision: u64,
+    ) -> Result<RoutePinsDocument, RuleError> {
+        let name = validate_list_name(name)?;
+        let mut document = self.document.lock().await;
+        ensure_revision(&document, expected_revision)?;
+        document.lists.push(RuleListMeta {
+            id: Uuid::new_v4(),
+            name,
+            outbound,
+        });
+        document.revision = document.revision.saturating_add(1);
+        publish(&self.path, &document)?;
+        Ok(document.clone())
+    }
+
+    /// Renames a list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuleError`] for an empty name, an unknown list, a revision
+    /// conflict, or a persistence failure.
+    pub async fn rename_list(
+        &self,
+        list_id: Uuid,
+        name: &str,
+        expected_revision: u64,
+    ) -> Result<RoutePinsDocument, RuleError> {
+        let name = validate_list_name(name)?;
+        let mut document = self.document.lock().await;
+        ensure_revision(&document, expected_revision)?;
+        let list = document
+            .lists
+            .iter_mut()
+            .find(|list| list.id == list_id)
+            .ok_or_else(|| RuleError::InvalidRule("unknown list".into()))?;
+        list.name = name;
+        document.revision = document.revision.saturating_add(1);
+        publish(&self.path, &document)?;
+        Ok(document.clone())
+    }
+
+    /// Deletes a list and every pin in it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuleError`] for an unknown list, a revision conflict, or a
+    /// persistence failure.
+    pub async fn delete_list(
+        &self,
+        list_id: Uuid,
+        expected_revision: u64,
+    ) -> Result<RoutePinsDocument, RuleError> {
+        let mut document = self.document.lock().await;
+        ensure_revision(&document, expected_revision)?;
+        if document.list_meta(list_id).is_none() {
+            return Err(RuleError::InvalidRule("unknown list".into()));
+        }
+        document.lists.retain(|list| list.id != list_id);
+        document.pins.retain(|pin| pin.list_id != Some(list_id));
+        document.revision = document.revision.saturating_add(1);
+        publish(&self.path, &document)?;
+        Ok(document.clone())
+    }
+
+    /// Re-binds a list (and every pin in it) to another outbound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuleError`] for an unknown list, a pin that the target
+    /// policy rejects, a revision conflict, or a persistence failure.
+    pub async fn set_list_outbound(
+        &self,
+        list_id: Uuid,
+        outbound: Outbound,
+        policy: PinPolicy,
+        expected_revision: u64,
+    ) -> Result<RoutePinsDocument, RuleError> {
+        let mut document = self.document.lock().await;
+        ensure_revision(&document, expected_revision)?;
+        if document.list_meta(list_id).is_none() {
+            return Err(RuleError::InvalidRule("unknown list".into()));
+        }
+        for pin in document
+            .pins
+            .iter()
+            .filter(|pin| pin.list_id == Some(list_id))
+        {
+            if let DirectTarget::Ip(address) = &pin.target {
+                reject_pin_address(*address, policy)?;
+            }
+        }
+        for list in &mut document.lists {
+            if list.id == list_id {
+                list.outbound = outbound;
+            }
+        }
+        for pin in &mut document.pins {
+            if pin.list_id == Some(list_id) {
+                pin.outbound = outbound;
+            }
         }
         document.revision = document.revision.saturating_add(1);
         publish(&self.path, &document)?;
@@ -352,10 +696,9 @@ impl RuleManager {
         let target = DirectTarget::parse(input)?;
         let mut document = self.document.lock().await;
         ensure_revision(&document, expected_revision)?;
-        let before = document.rules.len() + document.vpn_rules.len();
-        document.rules.retain(|rule| rule.target != target);
-        document.vpn_rules.retain(|rule| rule.target != target);
-        if document.rules.len() + document.vpn_rules.len() != before {
+        let before = document.pins.len();
+        document.pins.retain(|pin| pin.target != target);
+        if document.pins.len() != before {
             document.revision = document.revision.saturating_add(1);
             publish(&self.path, &document)?;
         }
@@ -371,9 +714,8 @@ impl RuleManager {
         let domains = {
             let document = self.document.lock().await;
             document
-                .rules
+                .pins
                 .iter()
-                .chain(document.vpn_rules.iter())
                 .filter_map(|rule| match &rule.target {
                     DirectTarget::Domain(domain) => Some(domain.clone()),
                     DirectTarget::Ip(_) => None,
@@ -386,10 +728,7 @@ impl RuleManager {
         }
         let now = Utc::now();
         let mut document = self.document.lock().await;
-        let DirectRulesDocument {
-            rules, vpn_rules, ..
-        } = &mut *document;
-        for rule in rules.iter_mut().chain(vpn_rules.iter_mut()) {
+        for rule in &mut document.pins {
             if let DirectTarget::Domain(domain) = &rule.target {
                 if let Some((_, addresses)) = resolved.iter().find(|(name, _)| name == domain) {
                     rule.resolved_ips.clone_from(addresses);
@@ -419,40 +758,136 @@ impl RuleManager {
     }
 }
 
-fn canonicalize_document(mut document: DirectRulesDocument) -> DirectRulesDocument {
+fn validate_list_name(name: &str) -> Result<String, RuleError> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 60 {
+        return Err(RuleError::InvalidRule(
+            "list name must be 1-60 characters".into(),
+        ));
+    }
+    Ok(name.to_owned())
+}
+
+fn canonicalize_document(mut document: RoutePinsDocument) -> RoutePinsDocument {
     let before = document.clone();
-    document.rules = merge_canonical_rules(document.rules);
-    document.vpn_rules = merge_canonical_rules(document.vpn_rules);
-    if document.rules != before.rules || document.vpn_rules != before.vpn_rules {
+    document.pins = merge_canonical_pins(document.pins);
+    ensure_list_membership(&mut document);
+    if document.pins != before.pins || document.lists != before.lists {
         document.revision = document.revision.saturating_add(1);
     }
     document
 }
 
-fn merge_canonical_rules(rules: Vec<DirectRule>) -> Vec<DirectRule> {
-    let mut merged: Vec<DirectRule> = Vec::new();
-    for rule in rules {
-        let target = match &rule.target {
+fn merge_canonical_pins(pins: Vec<PinnedRoute>) -> Vec<PinnedRoute> {
+    let mut merged: Vec<PinnedRoute> = Vec::new();
+    for pin in pins {
+        let target = match &pin.target {
             DirectTarget::Domain(domain) => {
-                canonical_target(domain).unwrap_or_else(|_| rule.target.clone())
+                canonical_target(domain).unwrap_or_else(|_| pin.target.clone())
             }
-            DirectTarget::Ip(_) => rule.target.clone(),
+            DirectTarget::Ip(_) => pin.target.clone(),
         };
         if let Some(existing) = merged.iter_mut().find(|item| item.target == target) {
-            if rule.created_at < existing.created_at {
-                existing.created_at = rule.created_at;
+            existing.outbound = pin.outbound;
+            existing.list_id = pin.list_id;
+            if pin.created_at < existing.created_at {
+                existing.created_at = pin.created_at;
             }
             continue;
         }
-        merged.push(DirectRule {
+        merged.push(PinnedRoute {
             target,
+            outbound: pin.outbound,
+            list_id: pin.list_id,
             resolved_ips: Vec::new(),
-            created_at: rule.created_at,
-            refreshed_at: rule.refreshed_at,
+            created_at: pin.created_at,
+            refreshed_at: pin.refreshed_at,
         });
     }
-    merged.sort_by_key(|rule| rule.target.display_value());
+    merged.sort_by_key(|pin| pin.target.display_value());
     merged
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPinsDocument {
+    revision: u64,
+    #[serde(default)]
+    pins: Vec<PinnedRoute>,
+    #[serde(default)]
+    lists: Vec<RuleListMeta>,
+    #[serde(default)]
+    rules: Vec<DirectRule>,
+    #[serde(default)]
+    vpn_rules: Vec<DirectRule>,
+    #[serde(default)]
+    openvpn_rules: Vec<DirectRule>,
+}
+
+fn decode_pins_document(
+    bytes: &[u8],
+    legacy: LegacyPinClients,
+) -> Result<RoutePinsDocument, RuleError> {
+    let raw: RawPinsDocument = serde_json::from_slice(bytes)?;
+    if !raw.pins.is_empty()
+        || (raw.rules.is_empty() && raw.vpn_rules.is_empty() && raw.openvpn_rules.is_empty())
+    {
+        return Ok(RoutePinsDocument {
+            revision: raw.revision,
+            pins: raw.pins,
+            lists: raw.lists,
+        });
+    }
+    let mut pins = Vec::new();
+    for rule in raw.rules {
+        pins.push(pin_from_legacy(rule, Outbound::Direct));
+    }
+    if let Some(id) = legacy.vpn {
+        for rule in raw.vpn_rules {
+            pins.push(pin_from_legacy(rule, Outbound::client(id)));
+        }
+    }
+    if let Some(id) = legacy.openvpn {
+        for rule in raw.openvpn_rules {
+            pins.push(pin_from_legacy(rule, Outbound::client(id)));
+        }
+    }
+    Ok(RoutePinsDocument {
+        revision: raw.revision,
+        pins,
+        lists: raw.lists,
+    })
+}
+
+fn pin_from_legacy(rule: DirectRule, outbound: Outbound) -> PinnedRoute {
+    PinnedRoute {
+        target: rule.target,
+        outbound,
+        list_id: None,
+        resolved_ips: rule.resolved_ips,
+        created_at: rule.created_at,
+        refreshed_at: rule.refreshed_at,
+    }
+}
+
+fn reject_pin_address(address: IpAddr, policy: PinPolicy) -> Result<(), RuleError> {
+    if matches!(policy, PinPolicy::LocalProxy) && is_private_or_local(address) {
+        return Err(RuleError::InvalidRule(
+            "private, loopback, and carrier-grade NAT addresses cannot be sent through a local proxy".into(),
+        ));
+    }
+    if matches!(policy, PinPolicy::OwnedSideTunnel) && is_loopback_only(address) {
+        return Err(RuleError::InvalidRule(
+            "loopback addresses cannot be sent through a side tunnel".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_loopback_only(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => address.is_loopback(),
+        IpAddr::V6(address) => address.is_loopback(),
+    }
 }
 
 fn backup_last_good(path: &Path) -> Result<(), RuleError> {
@@ -484,11 +919,26 @@ fn publish(path: &Path, document: &DirectRulesDocument) -> Result<(), RuleError>
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Outbound {
     Direct,
-    Vpn,
+    Client { client_id: ClientId },
+}
+
+impl Outbound {
+    #[must_use]
+    pub const fn client(client_id: ClientId) -> Self {
+        Self::Client { client_id }
+    }
+
+    #[must_use]
+    pub const fn client_id(self) -> Option<ClientId> {
+        match self {
+            Self::Direct => None,
+            Self::Client { client_id } => Some(client_id),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -511,46 +961,65 @@ pub struct RouteDecision {
 
 #[derive(Debug, Clone, Default)]
 pub struct RuleSet {
-    vpn_domains: HashSet<String>,
-    vpn_ips: HashSet<IpAddr>,
+    client_domains: HashMap<ClientId, HashSet<String>>,
+    client_ips: HashMap<ClientId, HashSet<IpAddr>>,
     custom_domains: HashSet<String>,
     custom_ips: HashSet<IpAddr>,
     iran_domains: HashSet<String>,
     business_domains: HashSet<String>,
     iran_cidrs: Vec<IpNet>,
+    default_outbound: Outbound,
+}
+
+impl Default for Outbound {
+    fn default() -> Self {
+        Self::Direct
+    }
 }
 
 impl RuleSet {
     pub fn from_sources(
-        custom: &DirectRulesDocument,
+        custom: &RoutePinsDocument,
         iran_domains: impl IntoIterator<Item = String>,
         iran_cidrs: impl IntoIterator<Item = IpNet>,
         business_domains: impl IntoIterator<Item = String>,
+        default_outbound: Outbound,
+        enabled_clients: &HashSet<ClientId>,
     ) -> Self {
         let mut set = Self {
             iran_domains: iran_domains.into_iter().collect(),
             business_domains: business_domains.into_iter().collect(),
             iran_cidrs: iran_cidrs.into_iter().collect(),
+            default_outbound,
             ..Self::default()
         };
-        for rule in &custom.rules {
-            match &rule.target {
-                DirectTarget::Domain(domain) => {
-                    set.custom_domains.insert(domain.clone());
+        for pin in &custom.pins {
+            match pin.outbound {
+                Outbound::Direct => match &pin.target {
+                    DirectTarget::Domain(domain) => {
+                        set.custom_domains.insert(domain.clone());
+                    }
+                    DirectTarget::Ip(address) => {
+                        set.custom_ips.insert(*address);
+                    }
+                },
+                Outbound::Client { client_id } if enabled_clients.contains(&client_id) => {
+                    match &pin.target {
+                        DirectTarget::Domain(domain) => {
+                            set.client_domains
+                                .entry(client_id)
+                                .or_default()
+                                .insert(domain.clone());
+                        }
+                        DirectTarget::Ip(address) => {
+                            set.client_ips
+                                .entry(client_id)
+                                .or_default()
+                                .insert(*address);
+                        }
+                    }
                 }
-                DirectTarget::Ip(address) => {
-                    set.custom_ips.insert(*address);
-                }
-            }
-        }
-        for rule in &custom.vpn_rules {
-            match &rule.target {
-                DirectTarget::Domain(domain) => {
-                    set.vpn_domains.insert(domain.clone());
-                }
-                DirectTarget::Ip(address) => {
-                    set.vpn_ips.insert(*address);
-                }
+                Outbound::Client { .. } => {}
             }
         }
         set
@@ -568,15 +1037,11 @@ impl RuleSet {
         }
         let domain = normalize_domain(target)?;
         let canonical = registrable_domain(&domain).unwrap_or_else(|_| domain.clone());
-        if let Some(pin) = self
-            .vpn_domains
-            .iter()
-            .find(|pin| domain_matches_pin(&domain, pin) || *pin == &canonical)
-        {
+        if let Some((client_id, pin)) = self.find_client_domain(&domain, &canonical) {
             return Ok(RouteDecision {
-                outbound: Outbound::Vpn,
+                outbound: Outbound::client(client_id),
                 reason: DecisionReason::VpnRule,
-                matched_rule: Some(pin.clone()),
+                matched_rule: Some(pin),
             });
         }
         if let Some(pin) = self
@@ -601,21 +1066,37 @@ impl RuleSet {
             return Ok(direct(DecisionReason::IranDomain, Some(rule.clone())));
         }
         Ok(RouteDecision {
-            outbound: Outbound::Vpn,
+            outbound: self.default_outbound,
             reason: DecisionReason::DefaultProxy,
             matched_rule: Some("MATCH".into()),
         })
     }
 
+    fn find_client_domain(&self, domain: &str, canonical: &str) -> Option<(ClientId, String)> {
+        for (client_id, pins) in &self.client_domains {
+            if let Some(pin) = pins
+                .iter()
+                .find(|pin| domain_matches_pin(domain, pin) || *pin == canonical)
+            {
+                return Some((*client_id, pin.clone()));
+            }
+        }
+        None
+    }
+
     fn decide_ip(&self, address: IpAddr) -> RouteDecision {
         // Loopback and LAN stay direct even under an exclusion; the generated
-        // config keeps private-networks ahead of the VPN rule sets too.
+        // config keeps private-networks ahead of the client rule sets too.
         if is_private_or_local(address) {
             return direct(DecisionReason::PrivateOrLocal, Some(address.to_string()));
         }
-        if self.vpn_ips.contains(&address) {
+        if let Some(client_id) = self
+            .client_ips
+            .iter()
+            .find_map(|(id, pins)| pins.contains(&address).then_some(*id))
+        {
             return RouteDecision {
-                outbound: Outbound::Vpn,
+                outbound: Outbound::client(client_id),
                 reason: DecisionReason::VpnRule,
                 matched_rule: Some(address.to_string()),
             };
@@ -631,7 +1112,7 @@ impl RuleSet {
             return direct(DecisionReason::IranCidr, Some(network.to_string()));
         }
         RouteDecision {
-            outbound: Outbound::Vpn,
+            outbound: self.default_outbound,
             reason: DecisionReason::DefaultProxy,
             matched_rule: Some("MATCH".into()),
         }
@@ -689,8 +1170,109 @@ mod tests {
         assert!(normalize_domain("*.example.com").is_err());
     }
 
-    fn iran_rule_set(custom: &DirectRulesDocument) -> RuleSet {
-        RuleSet::from_sources(custom, ["ir".to_owned()], [], [])
+    fn test_client() -> ClientId {
+        ClientId::parse("11111111-1111-1111-1111-111111111111").expect("uuid")
+    }
+
+    fn test_outbound() -> Outbound {
+        Outbound::client(test_client())
+    }
+
+    fn enabled_clients() -> HashSet<ClientId> {
+        HashSet::from([test_client()])
+    }
+
+    fn iran_rule_set(custom: &RoutePinsDocument) -> RuleSet {
+        RuleSet::from_sources(
+            custom,
+            ["ir".to_owned()],
+            [],
+            [],
+            test_outbound(),
+            &enabled_clients(),
+        )
+    }
+
+    #[tokio::test]
+    async fn named_lists_cover_create_pin_rebind_and_delete() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let manager = RuleManager::load(
+            directory.path().join("direct-rules.json"),
+            Arc::new(FixedResolver),
+        )
+        .expect("manager");
+
+        let document = manager
+            .create_list("Office", test_outbound(), 0)
+            .await
+            .expect("create");
+        let list_id = document.lists[0].id;
+        assert_eq!(document.lists[0].name, "Office");
+
+        let document = manager
+            .pin_to_list(
+                "office.example",
+                list_id,
+                PinPolicy::LocalProxy,
+                document.revision,
+            )
+            .await
+            .expect("pin to list");
+        assert_eq!(document.pins_in_list(list_id).len(), 1);
+        assert_eq!(document.pins[0].outbound, test_outbound());
+
+        // Re-binding the list moves its pins with it.
+        let document = manager
+            .set_list_outbound(
+                list_id,
+                Outbound::Direct,
+                PinPolicy::Direct,
+                document.revision,
+            )
+            .await
+            .expect("rebind");
+        assert_eq!(document.pins[0].outbound, Outbound::Direct);
+        assert_eq!(
+            document.list_meta(list_id).expect("list").outbound,
+            Outbound::Direct
+        );
+
+        // Unnamed pins land in an auto-created default list per outbound.
+        let document = manager
+            .pin_with_policy(
+                "auto.example",
+                test_outbound(),
+                PinPolicy::LocalProxy,
+                document.revision,
+            )
+            .await
+            .expect("pin default");
+        let auto = document
+            .pins
+            .iter()
+            .find(|pin| pin.target.display_value() == "auto.example")
+            .expect("pin");
+        let auto_list = auto.list_id.expect("list id");
+        assert_ne!(auto_list, list_id);
+        assert_eq!(
+            document.list_meta(auto_list).expect("auto list").outbound,
+            test_outbound()
+        );
+
+        // Deleting a list drops its pins only.
+        let document = manager
+            .delete_list(list_id, document.revision)
+            .await
+            .expect("delete");
+        assert!(document.list_meta(list_id).is_none());
+        assert_eq!(document.pins.len(), 1);
+        assert_eq!(document.pins[0].target.display_value(), "auto.example");
+
+        // Empty and oversized names are rejected.
+        assert!(manager
+            .create_list("   ", Outbound::Direct, document.revision)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -710,12 +1292,12 @@ mod tests {
         assert_eq!(decision.reason, DecisionReason::IranDomain);
 
         let pinned = manager
-            .pin("iran.ir", Outbound::Vpn, 0)
+            .pin("iran.ir", test_outbound(), 0)
             .await
             .expect("pin vpn");
-        assert_eq!(pinned.vpn_rules.len(), 1);
+        assert_eq!(pinned.count_for_client(test_client()), 1);
         let decision = iran_rule_set(&pinned).decide("iran.ir").expect("decide");
-        assert_eq!(decision.outbound, Outbound::Vpn);
+        assert_eq!(decision.outbound, test_outbound());
         assert_eq!(decision.reason, DecisionReason::VpnRule);
 
         // Removing the pin must restore the bundled decision, not delete `ir`.
@@ -723,7 +1305,7 @@ mod tests {
             .remove("iran.ir", pinned.revision)
             .await
             .expect("remove");
-        assert!(cleared.vpn_rules.is_empty());
+        assert_eq!(cleared.count_for_client(test_client()), 0);
         assert_eq!(
             iran_rule_set(&cleared)
                 .decide("iran.ir")
@@ -743,7 +1325,7 @@ mod tests {
         .expect("manager");
 
         let direct = manager.add("example.com", 0).await.expect("direct");
-        assert_eq!(direct.rules.len(), 1);
+        assert_eq!(direct.pins_for(&Outbound::Direct).len(), 1);
         assert_eq!(
             iran_rule_set(&direct)
                 .decide("example.com")
@@ -753,18 +1335,21 @@ mod tests {
         );
 
         let moved = manager
-            .pin("example.com", Outbound::Vpn, direct.revision)
+            .pin("example.com", test_outbound(), direct.revision)
             .await
             .expect("vpn");
-        assert!(moved.rules.is_empty(), "the direct pin must be dropped");
-        assert_eq!(moved.vpn_rules.len(), 1);
+        assert!(
+            moved.pins_for(&Outbound::Direct).is_empty(),
+            "the direct pin must be dropped"
+        );
+        assert_eq!(moved.count_for_client(test_client()), 1);
 
         let back = manager
             .pin("example.com", Outbound::Direct, moved.revision)
             .await
             .expect("direct again");
-        assert_eq!(back.rules.len(), 1);
-        assert!(back.vpn_rules.is_empty());
+        assert_eq!(back.pins_for(&Outbound::Direct).len(), 1);
+        assert_eq!(back.count_for_client(test_client()), 0);
     }
 
     #[tokio::test]
@@ -780,7 +1365,7 @@ mod tests {
         // for every address here.
         for address in ["192.168.1.1", "127.0.0.1", "100.64.0.1", "::1"] {
             let error = manager
-                .pin(address, Outbound::Vpn, 0)
+                .pin(address, test_outbound(), 0)
                 .await
                 .expect_err(address);
             assert!(matches!(error, RuleError::InvalidRule(_)), "{address}");
@@ -790,7 +1375,7 @@ mod tests {
             .pin("192.168.1.1", Outbound::Direct, 0)
             .await
             .expect("direct");
-        assert_eq!(pinned.rules.len(), 1);
+        assert_eq!(pinned.pins_for(&Outbound::Direct).len(), 1);
     }
 
     #[tokio::test]
@@ -803,14 +1388,14 @@ mod tests {
         .expect("manager");
         let direct = manager.add("direct.example", 0).await.expect("direct");
         let pinned = manager
-            .pin("vpn.example", Outbound::Vpn, direct.revision)
+            .pin("vpn.example", test_outbound(), direct.revision)
             .await
             .expect("vpn");
 
         let refreshed = manager.refresh().await.expect("refresh");
-        assert_eq!(refreshed.rules.len(), 1);
-        assert_eq!(refreshed.vpn_rules.len(), 1);
-        for rule in refreshed.rules.iter().chain(refreshed.vpn_rules.iter()) {
+        assert_eq!(refreshed.pins_for(&Outbound::Direct).len(), 1);
+        assert_eq!(refreshed.count_for_client(test_client()), 1);
+        for rule in &refreshed.pins {
             assert!(rule.refreshed_at.is_some());
             assert_eq!(
                 rule.resolved_ips,
@@ -830,29 +1415,33 @@ mod tests {
         .expect("manager");
         let added = manager.add("example.com", 0).await.expect("add");
         assert_eq!(added.revision, 1);
-        assert!(added.rules[0].resolved_ips.is_empty());
+        assert!(added.pins[0].resolved_ips.is_empty());
         assert!(manager.remove("example.com", 0).await.is_err());
         let removed = manager.remove("example.com", 1).await.expect("remove");
-        assert!(removed.rules.is_empty());
+        assert!(removed.pins.is_empty());
     }
 
     #[test]
     fn precedence_is_custom_then_private_then_iran_then_proxy() {
-        let custom = DirectRulesDocument {
+        let custom = RoutePinsDocument {
             revision: 1,
-            vpn_rules: Vec::new(),
-            rules: vec![DirectRule {
+            pins: vec![PinnedRoute {
                 target: DirectTarget::Domain("example.com".into()),
+                outbound: Outbound::Direct,
+                list_id: None,
                 resolved_ips: vec![],
                 created_at: Utc::now(),
                 refreshed_at: None,
             }],
+            lists: vec![],
         };
         let set = RuleSet::from_sources(
             &custom,
             ["digikala.com".into()],
             ["5.22.0.0/16".parse().expect("CIDR")],
             ["technolife.com".into()],
+            test_outbound(),
+            &enabled_clients(),
         );
         assert_eq!(
             set.decide("www.technolife.com").expect("catalog").reason,
@@ -887,7 +1476,7 @@ mod tests {
         );
         assert_eq!(
             set.decide("openai.com").expect("decision").outbound,
-            Outbound::Vpn
+            test_outbound()
         );
     }
 
@@ -896,7 +1485,14 @@ mod tests {
         let catalog = include_str!("../../../resources/rules/iran-business-domains.txt")
             .lines()
             .filter_map(|line| line.strip_prefix("+.").map(str::to_owned));
-        let set = RuleSet::from_sources(&DirectRulesDocument::default(), [], [], catalog);
+        let set = RuleSet::from_sources(
+            &RoutePinsDocument::default(),
+            [],
+            [],
+            catalog,
+            test_outbound(),
+            &enabled_clients(),
+        );
         let decision = set.decide("console.kavenegar.com").expect("decide");
         assert_eq!(decision.outbound, Outbound::Direct);
         assert_eq!(decision.reason, DecisionReason::IranDomain);
@@ -912,9 +1508,9 @@ mod tests {
         )
         .expect("manager");
         let added = manager.add("api.shop.example.com", 0).await.expect("add");
-        assert_eq!(added.rules.len(), 1);
+        assert_eq!(added.pins.len(), 1);
         assert_eq!(
-            added.rules[0].target,
+            added.pins[0].target,
             DirectTarget::Domain("example.com".into())
         );
         let set = iran_rule_set(&added);
@@ -928,20 +1524,20 @@ mod tests {
         );
         assert_eq!(
             set.decide("notexample.com").expect("sibling").outbound,
-            Outbound::Vpn
+            test_outbound()
         );
         let moved = manager
-            .pin("www.example.com", Outbound::Vpn, added.revision)
+            .pin("www.example.com", test_outbound(), added.revision)
             .await
             .expect("move");
-        assert!(moved.rules.is_empty());
-        assert_eq!(moved.vpn_rules.len(), 1);
+        assert!(moved.pins_for(&Outbound::Direct).is_empty());
+        assert_eq!(moved.count_for_client(test_client()), 1);
         assert_eq!(
             iran_rule_set(&moved)
                 .decide("cdn.example.com")
                 .expect("cdn")
                 .outbound,
-            Outbound::Vpn
+            test_outbound()
         );
     }
 
@@ -961,7 +1557,7 @@ mod tests {
         );
         assert_eq!(
             set.decide("other.github.io").expect("other").outbound,
-            Outbound::Vpn
+            test_outbound()
         );
     }
 
@@ -993,33 +1589,163 @@ mod tests {
     async fn load_migrates_exact_hosts_to_the_registrable_root() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("direct-rules.json");
-        let original = DirectRulesDocument {
-            revision: 4,
-            rules: vec![
-                DirectRule {
-                    target: DirectTarget::Domain("www.example.com".into()),
-                    resolved_ips: vec!["203.0.113.9".parse().expect("ip")],
-                    created_at: Utc::now(),
-                    refreshed_at: None,
+        let original = serde_json::json!({
+            "revision": 4,
+            "rules": [
+                {
+                    "target": { "kind": "domain", "value": "www.example.com" },
+                    "resolved_ips": ["203.0.113.9"],
+                    "created_at": Utc::now(),
+                    "refreshed_at": null
                 },
-                DirectRule {
-                    target: DirectTarget::Domain("api.example.com".into()),
-                    resolved_ips: vec![],
-                    created_at: Utc::now(),
-                    refreshed_at: None,
-                },
+                {
+                    "target": { "kind": "domain", "value": "api.example.com" },
+                    "resolved_ips": [],
+                    "created_at": Utc::now(),
+                    "refreshed_at": null
+                }
             ],
-            vpn_rules: Vec::new(),
-        };
+            "vpn_rules": []
+        });
         fs::write(&path, serde_json::to_vec_pretty(&original).expect("json")).expect("write");
         let manager = RuleManager::load(&path, Arc::new(FixedResolver)).expect("load");
         let loaded = manager.list().await;
-        assert_eq!(loaded.rules.len(), 1);
+        assert_eq!(loaded.pins.len(), 1);
         assert_eq!(
-            loaded.rules[0].target,
+            loaded.pins[0].target,
             DirectTarget::Domain("example.com".into())
         );
         assert_eq!(loaded.revision, 5);
         assert!(path.with_extension("json.last-good").is_file());
+    }
+
+    #[tokio::test]
+    async fn legacy_vpn_rules_migrate_onto_the_supplied_client() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("direct-rules.json");
+        let original = serde_json::json!({
+            "revision": 2,
+            "rules": [{
+                "target": { "kind": "domain", "value": "direct.example" },
+                "resolved_ips": [],
+                "created_at": Utc::now(),
+                "refreshed_at": null
+            }],
+            "vpn_rules": [{
+                "target": { "kind": "domain", "value": "vpn.example" },
+                "resolved_ips": [],
+                "created_at": Utc::now(),
+                "refreshed_at": null
+            }]
+        });
+        fs::write(&path, serde_json::to_vec_pretty(&original).expect("json")).expect("write");
+        let manager = RuleManager::load_with_legacy(
+            &path,
+            Arc::new(FixedResolver),
+            LegacyPinClients {
+                vpn: Some(test_client()),
+                openvpn: None,
+            },
+        )
+        .expect("load");
+        let loaded = manager.list().await;
+        assert_eq!(loaded.pins_for(&Outbound::Direct).len(), 1);
+        assert_eq!(loaded.count_for_client(test_client()), 1);
+    }
+
+    #[test]
+    fn match_follows_a_direct_default_route() {
+        let set = RuleSet::from_sources(
+            &RoutePinsDocument::default(),
+            [],
+            [],
+            [],
+            Outbound::Direct,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            set.decide("openai.com").expect("decide").outbound,
+            Outbound::Direct
+        );
+    }
+
+    #[test]
+    fn disabled_client_pins_are_not_decided() {
+        let other = ClientId::parse("22222222-2222-2222-2222-222222222222").expect("uuid");
+        let custom = RoutePinsDocument {
+            revision: 1,
+            pins: vec![PinnedRoute {
+                target: DirectTarget::Domain("office.example".into()),
+                outbound: Outbound::client(other),
+                list_id: None,
+                resolved_ips: vec![],
+                created_at: Utc::now(),
+                refreshed_at: None,
+            }],
+            lists: vec![],
+        };
+        let set = RuleSet::from_sources(&custom, [], [], [], test_outbound(), &enabled_clients());
+        assert_eq!(
+            set.decide("office.example").expect("decide").outbound,
+            test_outbound()
+        );
+    }
+
+    #[test]
+    fn pin_moves_across_clients_and_delete_drops_that_clients_pins() {
+        let mut document = RoutePinsDocument {
+            revision: 1,
+            pins: vec![PinnedRoute {
+                target: DirectTarget::Domain("office.example".into()),
+                outbound: Outbound::client(test_client()),
+                list_id: None,
+                resolved_ips: vec![],
+                created_at: Utc::now(),
+                refreshed_at: None,
+            }],
+            lists: vec![],
+        };
+        let other = ClientId::parse("22222222-2222-2222-2222-222222222222").expect("uuid");
+        assert_eq!(
+            document.move_client_pins(test_client(), Outbound::client(other)),
+            1
+        );
+        assert_eq!(document.count_for_client(test_client()), 0);
+        assert_eq!(document.count_for_client(other), 1);
+        assert_eq!(document.delete_client_pins(other), 1);
+        assert!(document.pins.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rfc1918_may_go_to_a_side_tunnel_but_not_a_local_proxy() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let manager = RuleManager::load(
+            directory.path().join("direct-rules.json"),
+            Arc::new(FixedResolver),
+        )
+        .expect("manager");
+        manager
+            .pin_with_policy("192.168.10.5", test_outbound(), PinPolicy::LocalProxy, 0)
+            .await
+            .expect_err("proxy");
+        let pinned = manager
+            .pin_with_policy(
+                "192.168.10.5",
+                test_outbound(),
+                PinPolicy::OwnedSideTunnel,
+                0,
+            )
+            .await
+            .expect("tunnel");
+        assert_eq!(pinned.count_for_client(test_client()), 1);
+        manager
+            .pin_with_policy(
+                "127.0.0.1",
+                test_outbound(),
+                PinPolicy::OwnedSideTunnel,
+                pinned.revision,
+            )
+            .await
+            .expect_err("loopback");
     }
 }

@@ -1,3 +1,5 @@
+mod clients;
+
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -9,14 +11,20 @@ use std::{
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub use clients::{
+    is_custom_client_generation_file, ClientConfig, ClientId, ClientInstance, DefaultRoute,
+    EgressKind, PresetId, PresetSpec, PresetStatus,
+};
+
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub schema_version: u32,
     pub revision: u64,
-    pub hiddify: HiddifyConfig,
+    pub clients: Vec<ClientInstance>,
+    pub default_route: DefaultRoute,
     pub mihomo: MihomoConfig,
     pub rules: RulesConfig,
     pub behavior: BehaviorConfig,
@@ -24,10 +32,12 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
+        let hiddify_id = ClientId::new();
         Self {
             schema_version: CURRENT_SCHEMA_VERSION,
             revision: 0,
-            hiddify: HiddifyConfig::default(),
+            clients: vec![ClientInstance::hiddify_default(hiddify_id)],
+            default_route: DefaultRoute::client(hiddify_id),
             mihomo: MihomoConfig::default(),
             rules: RulesConfig::default(),
             behavior: BehaviorConfig::default(),
@@ -35,25 +45,84 @@ impl Default for AppConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HiddifyConfig {
-    pub host: String,
-    pub port: u16,
-    pub executable: ExecutableSetting,
-    pub start_timeout_seconds: u64,
-    pub stop_with_stack: bool,
-}
+impl AppConfig {
+    /// First enabled Hiddify instance, if the user still has one.
+    #[must_use]
+    pub fn hiddify_client(&self) -> Option<&ClientInstance> {
+        self.clients
+            .iter()
+            .find(|client| client.preset == PresetId::Hiddify)
+    }
 
-impl Default for HiddifyConfig {
-    fn default() -> Self {
-        Self {
-            host: "127.0.0.1".into(),
-            port: 12_334,
-            executable: ExecutableSetting::Auto,
-            start_timeout_seconds: 45,
-            stop_with_stack: true,
+    /// Enabled instances that should be started and emitted into Mihomo.
+    #[must_use]
+    pub fn enabled_clients(&self) -> Vec<&ClientInstance> {
+        self.clients
+            .iter()
+            .filter(|client| client.enabled)
+            .collect()
+    }
+
+    #[must_use]
+    pub fn client(&self, id: ClientId) -> Option<&ClientInstance> {
+        self.clients.iter().find(|client| client.id == id)
+    }
+
+    /// Loopback SOCKS endpoint of the Hiddify instance, or the catalog default.
+    #[must_use]
+    pub fn hiddify_endpoint(&self) -> (String, u16) {
+        match self.hiddify_client().map(|client| &client.config) {
+            Some(ClientConfig::LocalProxy { host, port, .. }) => (host.clone(), *port),
+            _ => (
+                PresetId::Hiddify.spec().default_host.into(),
+                PresetId::Hiddify.spec().default_port.unwrap_or(12_334),
+            ),
         }
+    }
+
+    #[must_use]
+    pub fn hiddify_start_timeout(&self) -> u64 {
+        match self.hiddify_client().map(|client| &client.config) {
+            Some(ClientConfig::LocalProxy {
+                start_timeout_seconds,
+                ..
+            }) => *start_timeout_seconds,
+            _ => 45,
+        }
+    }
+
+    #[must_use]
+    pub fn hiddify_stop_with_stack(&self) -> bool {
+        match self.hiddify_client().map(|client| &client.config) {
+            Some(ClientConfig::LocalProxy {
+                stop_with_stack, ..
+            }) => *stop_with_stack,
+            _ => true,
+        }
+    }
+
+    #[must_use]
+    pub fn hiddify_executable(&self) -> ExecutableSetting {
+        match self.hiddify_client().map(|client| &client.config) {
+            Some(ClientConfig::LocalProxy { executable, .. }) => executable.clone(),
+            _ => ExecutableSetting::Auto,
+        }
+    }
+
+    /// Falls back to [`DefaultRoute::Direct`] when the MATCH target is gone or disabled.
+    pub fn sanitize_default_route(&mut self) -> bool {
+        let DefaultRoute::Client { client_id } = self.default_route else {
+            return false;
+        };
+        let usable = self
+            .clients
+            .iter()
+            .any(|client| client.id == client_id && client.enabled);
+        if usable {
+            return false;
+        }
+        self.default_route = DefaultRoute::Direct;
+        true
     }
 }
 
@@ -230,7 +299,6 @@ impl AppConfig {
     #[must_use]
     pub fn validate(&self) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
-        validate_loopback("hiddify.host", &self.hiddify.host, &mut issues);
         validate_loopback(
             "mihomo.controller_host",
             &self.mihomo.controller_host,
@@ -242,13 +310,6 @@ impl AppConfig {
                 "mihomo.controller_secret",
                 "SECRET_TOO_SHORT",
                 "controller secret must contain at least 32 characters",
-            ));
-        }
-        if self.hiddify.start_timeout_seconds == 0 || self.hiddify.start_timeout_seconds > 300 {
-            issues.push(issue(
-                "hiddify.start_timeout_seconds",
-                "OUT_OF_RANGE",
-                "start timeout must be between 1 and 300 seconds",
             ));
         }
         if self.rules.refresh_interval_minutes == 0 || self.rules.upstream_refresh_hours == 0 {
@@ -266,13 +327,21 @@ impl AppConfig {
             ));
         }
         validate_direct_dns(&self.mihomo, &mut issues);
+        clients::validate_clients(&self.clients, self.default_route, &mut issues);
 
-        let ports = [
-            ("hiddify.port", self.hiddify.port),
-            ("mihomo.controller_port", self.mihomo.controller_port),
-            ("mihomo.mixed_port", self.mihomo.mixed_port),
-            ("mihomo.dns_port", self.mihomo.dns_port),
+        let mut ports = vec![
+            (
+                "mihomo.controller_port".to_owned(),
+                self.mihomo.controller_port,
+            ),
+            ("mihomo.mixed_port".to_owned(), self.mihomo.mixed_port),
+            ("mihomo.dns_port".to_owned(), self.mihomo.dns_port),
         ];
+        for (index, client) in self.clients.iter().enumerate() {
+            if let ClientConfig::LocalProxy { port, .. } = client.config {
+                ports.push((format!("clients.{index}.port"), port));
+            }
+        }
         for (index, (field, port)) in ports.iter().enumerate() {
             if *port == 0 {
                 issues.push(issue(field, "INVALID_PORT", "port cannot be zero"));
@@ -292,10 +361,8 @@ impl AppConfig {
     pub fn redacted(&self) -> Self {
         let mut value = self.clone();
         value.mihomo.controller_secret = "[REDACTED]".into();
-        if let ExecutableSetting::Path(path) = &value.hiddify.executable {
-            if let Some(name) = path.file_name() {
-                value.hiddify.executable = ExecutableSetting::Path(PathBuf::from(name));
-            }
+        for client in &mut value.clients {
+            client.config = client.config.redacted();
         }
         value
     }
@@ -351,7 +418,7 @@ fn is_usable_direct_dns(address: IpAddr) -> bool {
     }
 }
 
-fn validate_loopback(field: &str, value: &str, issues: &mut Vec<ValidationIssue>) {
+pub(crate) fn validate_loopback(field: &str, value: &str, issues: &mut Vec<ValidationIssue>) {
     match value.parse::<IpAddr>() {
         Ok(address) if address.is_loopback() => {}
         _ => issues.push(issue(
@@ -362,7 +429,7 @@ fn validate_loopback(field: &str, value: &str, issues: &mut Vec<ValidationIssue>
     }
 }
 
-fn issue(field: &str, code: &str, message: &str) -> ValidationIssue {
+pub(crate) fn issue(field: &str, code: &str, message: &str) -> ValidationIssue {
     ValidationIssue {
         field: field.into(),
         code: code.into(),
@@ -530,11 +597,160 @@ fn migrate(value: &mut toml::Value, from: u32) -> Result<(), ConfigError> {
             }
         }
     }
+    if from < 3 {
+        migrate_clients_v3(table);
+    }
     table.insert(
         "schema_version".into(),
         toml::Value::Integer(i64::from(CURRENT_SCHEMA_VERSION)),
     );
     Ok(())
+}
+
+fn migrate_clients_v3(table: &mut toml::map::Map<String, toml::Value>) {
+    if table
+        .get("clients")
+        .and_then(toml::Value::as_array)
+        .is_some()
+    {
+        table.remove("hiddify");
+        table.remove("openvpn");
+        if !table.contains_key("default_route") {
+            table.insert("default_route".into(), default_route_direct());
+        }
+        return;
+    }
+
+    let mut clients = Vec::new();
+    let mut default_route = default_route_direct();
+
+    if let Some(hiddify) = table.remove("hiddify") {
+        let id = ClientId::new();
+        clients.push(toml::Value::Table(local_proxy_client_table(
+            id,
+            "hiddify",
+            hiddify.as_table(),
+        )));
+        default_route = default_route_client(id);
+    }
+
+    if let Some(openvpn) = table.remove("openvpn") {
+        let id = ClientId::new();
+        clients.push(toml::Value::Table(side_tunnel_client_table(
+            id,
+            "openvpn",
+            openvpn.as_table(),
+        )));
+        if clients.len() == 1 {
+            default_route = default_route_client(id);
+        }
+    }
+
+    if clients.is_empty() {
+        let id = ClientId::new();
+        clients.push(toml::Value::Table(local_proxy_client_table(
+            id, "hiddify", None,
+        )));
+        default_route = default_route_client(id);
+    }
+
+    table.insert("clients".into(), toml::Value::Array(clients));
+    table.insert("default_route".into(), default_route);
+}
+
+fn default_route_direct() -> toml::Value {
+    let mut table = toml::map::Map::new();
+    table.insert("kind".into(), toml::Value::String("direct".into()));
+    toml::Value::Table(table)
+}
+
+fn default_route_client(id: ClientId) -> toml::Value {
+    let mut table = toml::map::Map::new();
+    table.insert("kind".into(), toml::Value::String("client".into()));
+    table.insert("client_id".into(), toml::Value::String(id.as_hyphenated()));
+    toml::Value::Table(table)
+}
+
+fn local_proxy_client_table(
+    id: ClientId,
+    preset: &str,
+    source: Option<&toml::map::Map<String, toml::Value>>,
+) -> toml::map::Map<String, toml::Value> {
+    let spec = PresetId::Hiddify.spec();
+    let mut config = toml::map::Map::new();
+    config.insert("kind".into(), toml::Value::String("local_proxy".into()));
+    config.insert(
+        "host".into(),
+        source
+            .and_then(|table| table.get("host").cloned())
+            .unwrap_or_else(|| toml::Value::String(spec.default_host.into())),
+    );
+    config.insert(
+        "port".into(),
+        source
+            .and_then(|table| table.get("port").cloned())
+            .unwrap_or_else(|| toml::Value::Integer(i64::from(spec.default_port.unwrap_or(1080)))),
+    );
+    config.insert(
+        "executable".into(),
+        source
+            .and_then(|table| table.get("executable").cloned())
+            .unwrap_or_else(|| toml::Value::String("auto".into())),
+    );
+    config.insert(
+        "start_timeout_seconds".into(),
+        source
+            .and_then(|table| table.get("start_timeout_seconds").cloned())
+            .unwrap_or(toml::Value::Integer(45)),
+    );
+    config.insert(
+        "stop_with_stack".into(),
+        source
+            .and_then(|table| table.get("stop_with_stack").cloned())
+            .unwrap_or(toml::Value::Boolean(true)),
+    );
+    client_table(id, preset, config)
+}
+
+fn side_tunnel_client_table(
+    id: ClientId,
+    preset: &str,
+    source: Option<&toml::map::Map<String, toml::Value>>,
+) -> toml::map::Map<String, toml::Value> {
+    let mut config = toml::map::Map::new();
+    config.insert(
+        "kind".into(),
+        toml::Value::String("owned_side_tunnel".into()),
+    );
+    if let Some(path) = source.and_then(|table| table.get("profile_path").cloned()) {
+        config.insert("profile_path".into(), path);
+    }
+    config.insert(
+        "executable".into(),
+        source
+            .and_then(|table| table.get("executable").cloned())
+            .unwrap_or_else(|| toml::Value::String("auto".into())),
+    );
+    config.insert(
+        "start_timeout_seconds".into(),
+        source
+            .and_then(|table| table.get("start_timeout_seconds").cloned())
+            .unwrap_or(toml::Value::Integer(45)),
+    );
+    client_table(id, preset, config)
+}
+
+fn client_table(
+    id: ClientId,
+    preset: &str,
+    config: toml::map::Map<String, toml::Value>,
+) -> toml::map::Map<String, toml::Value> {
+    let mut table = toml::map::Map::new();
+    table.insert("id".into(), toml::Value::String(id.as_hyphenated()));
+    table.insert("preset".into(), toml::Value::String(preset.into()));
+    table.insert("enabled".into(), toml::Value::Boolean(true));
+    table.insert("config".into(), toml::Value::Table(config));
+    table
 }
 
 #[cfg(unix)]
@@ -616,8 +832,11 @@ mod tests {
         config.mihomo.direct_dns_preset = DirectDnsPreset::Shecan;
         fs::write(&path, toml::to_string(&config).expect("toml")).expect("write");
         let loaded = ConfigStore::new(&path).load().expect("load");
-        assert_eq!(loaded.schema_version, 2);
+        assert_eq!(loaded.schema_version, 3);
         assert_eq!(loaded.mihomo.direct_dns_preset, DirectDnsPreset::FakeIp);
+        assert_eq!(loaded.clients.len(), 1);
+        assert_eq!(loaded.clients[0].preset, PresetId::Hiddify);
+        assert!(matches!(loaded.default_route, DefaultRoute::Client { .. }));
     }
 
     #[test]
@@ -631,7 +850,7 @@ mod tests {
         config.mihomo.direct_dns_preset = DirectDnsPreset::Mokhaberat;
         fs::write(&path, toml::to_string(&config).expect("toml")).expect("write");
         let loaded = ConfigStore::new(&path).load().expect("load");
-        assert_eq!(loaded.schema_version, 2);
+        assert_eq!(loaded.schema_version, 3);
         assert_eq!(loaded.mihomo.direct_dns_preset, DirectDnsPreset::Mokhaberat);
     }
 
@@ -661,14 +880,137 @@ mod tests {
     #[test]
     fn redaction_removes_secret_and_parent_path() {
         let mut config = AppConfig::default();
-        config.hiddify.executable =
-            ExecutableSetting::Path(PathBuf::from("/home/alice/Hiddify.AppImage"));
+        if let Some(client) = config.clients.first_mut() {
+            client.config = ClientConfig::LocalProxy {
+                host: "127.0.0.1".into(),
+                port: 12_334,
+                executable: ExecutableSetting::Path(PathBuf::from("/home/alice/Hiddify.AppImage")),
+                start_timeout_seconds: 45,
+                stop_with_stack: true,
+            };
+        }
         let redacted = config.redacted();
         assert_eq!(redacted.mihomo.controller_secret, "[REDACTED]");
         assert_eq!(
-            redacted.hiddify.executable,
-            ExecutableSetting::Path(PathBuf::from("Hiddify.AppImage"))
+            redacted.clients[0].config,
+            ClientConfig::LocalProxy {
+                host: "127.0.0.1".into(),
+                port: 12_334,
+                executable: ExecutableSetting::Path(PathBuf::from("Hiddify.AppImage")),
+                start_timeout_seconds: 45,
+                stop_with_stack: true,
+            }
         );
+    }
+
+    #[test]
+    fn schema_v2_hiddify_migrates_to_a_client_match_default() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("config.toml");
+        let contents = r#"
+schema_version = 2
+revision = 4
+
+[hiddify]
+host = "127.0.0.1"
+port = 12334
+executable = "auto"
+start_timeout_seconds = 45
+stop_with_stack = true
+
+[mihomo]
+controller_host = "127.0.0.1"
+controller_port = 19090
+controller_secret = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+mixed_port = 17890
+dns_port = 1053
+tun_name = "clash-iran"
+log_level = "info"
+direct_dns_preset = "fake_ip"
+direct_dns_servers = []
+
+[rules]
+refresh_interval_minutes = 15
+upstream_refresh_hours = 24
+
+[behavior]
+launch_at_login = false
+connect_at_launch = false
+close_to_tray = true
+"#;
+        fs::write(&path, contents).expect("write");
+        let loaded = ConfigStore::new(&path).load().expect("load");
+        assert_eq!(loaded.schema_version, 3);
+        assert_eq!(loaded.clients.len(), 1);
+        assert_eq!(loaded.clients[0].preset, PresetId::Hiddify);
+        assert!(loaded.clients[0].enabled);
+        let DefaultRoute::Client { client_id } = loaded.default_route else {
+            panic!("expected MATCH to the migrated Hiddify instance");
+        };
+        assert_eq!(client_id, loaded.clients[0].id);
+    }
+
+    #[test]
+    fn schema_v2_openvpn_blob_becomes_a_side_tunnel_instance() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("config.toml");
+        let contents = r#"
+schema_version = 2
+revision = 1
+
+[hiddify]
+host = "127.0.0.1"
+port = 12334
+executable = "auto"
+start_timeout_seconds = 45
+stop_with_stack = true
+
+[openvpn]
+profile_path = "/tmp/office.ovpn"
+
+[mihomo]
+controller_host = "127.0.0.1"
+controller_port = 19090
+controller_secret = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+mixed_port = 17890
+dns_port = 1053
+tun_name = "clash-iran"
+log_level = "info"
+direct_dns_preset = "fake_ip"
+
+[rules]
+refresh_interval_minutes = 15
+upstream_refresh_hours = 24
+
+[behavior]
+close_to_tray = true
+"#;
+        fs::write(&path, contents).expect("write");
+        let loaded = ConfigStore::new(&path).load().expect("load");
+        assert_eq!(loaded.clients.len(), 2);
+        assert!(loaded
+            .clients
+            .iter()
+            .any(|client| client.preset == PresetId::Openvpn));
+        assert!(matches!(
+            loaded
+                .clients
+                .iter()
+                .find(|client| client.preset == PresetId::Openvpn)
+                .map(|client| &client.config),
+            Some(ClientConfig::OwnedSideTunnel { .. })
+        ));
+        assert!(matches!(loaded.default_route, DefaultRoute::Client { .. }));
+    }
+
+    #[test]
+    fn disabling_the_match_client_falls_back_to_direct() {
+        let mut config = AppConfig::default();
+        let id = config.clients[0].id;
+        assert_eq!(config.default_route, DefaultRoute::client(id));
+        config.clients[0].enabled = false;
+        assert!(config.sanitize_default_route());
+        assert_eq!(config.default_route, DefaultRoute::Direct);
     }
 
     #[cfg(unix)]

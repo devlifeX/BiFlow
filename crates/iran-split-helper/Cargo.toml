@@ -9,6 +9,9 @@ publish.workspace = true
 [dependencies]
 clap.workspace = true
 hex.workspace = true
+ipnet.workspace = true
+iran-split-clients = { path = "../iran-split-clients" }
+iran-split-config = { path = "../iran-split-config" }
 iran-split-ipc = { path = "../iran-split-ipc" }
 regex.workspace = true
 serde.workspace = true

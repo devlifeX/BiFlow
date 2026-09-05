@@ -12,7 +12,9 @@ mod version;
 mod window_state;
 
 use chrono::Utc;
-use iran_split_config::{AppConfig, ConfigStore, ValidationIssue};
+use iran_split_config::{
+    AppConfig, ClientId, ConfigStore, DefaultRoute, PresetId, ValidationIssue,
+};
 use iran_split_core::{
     ComponentPhase, Engine, LifecycleBusy, OperationAccepted, PlatformBackend, StackPhase,
     StackSnapshot,
@@ -686,15 +688,17 @@ async fn check_reachability(
             // Route VPN-path probes through Hiddify only while it is actually
             // serving; otherwise fall back to direct requests so the UI can
             // say "connect first" instead of showing a phantom proxy failure.
-            let hiddify_running =
-                services.engine.snapshot().hiddify.phase == ComponentPhase::Running;
-            let proxy = if hiddify_running {
+            let snapshot = services.engine.snapshot();
+            let proxy_running = snapshot.clients.iter().any(|client| {
+                client.preset == PresetId::Hiddify && client.status.phase == ComponentPhase::Running
+            });
+            let proxy = if proxy_running {
                 let config = services
                     .config_store
                     .load()
                     .or_else(|_| services.config_store.load_or_create())
                     .map_err(|error| error.to_string())?;
-                Some((config.hiddify.host.clone(), config.hiddify.port))
+                Some(config.hiddify_endpoint())
             } else {
                 None
             };
@@ -1045,7 +1049,12 @@ async fn save_settings(
             .config_store
             .load_or_create()
             .map_err(|error| error.to_string())?;
-        draft.mihomo.controller_secret = current.mihomo.controller_secret;
+        restore_redacted_secrets(&current, &mut draft);
+        draft
+            .mihomo
+            .controller_secret
+            .clone_from(&current.mihomo.controller_secret);
+        draft.sanitize_default_route();
         let saved = services
             .config_store
             .save(draft, expected_revision)
@@ -1066,6 +1075,76 @@ async fn save_settings(
 }
 
 #[tauri::command]
+async fn discard_client_pins(
+    id: String,
+    expected_revision: u64,
+    app: AppHandle,
+) -> Result<DirectRulesDocument, String> {
+    diagnostics::trace_action(
+        "rules",
+        "tauri_command",
+        "discard_client_pins",
+        async move {
+            let client_id = ClientId::parse(&id).map_err(|error| error.to_string())?;
+            let services = services(&app)?;
+            let mut document = services.rules.list().await;
+            if document.revision != expected_revision {
+                return Err(format!(
+                    "rule revision conflict: expected {expected_revision}, found {}",
+                    document.revision
+                ));
+            }
+            if document.delete_client_pins(client_id) > 0 {
+                document.revision = document.revision.saturating_add(1);
+                services
+                    .rules
+                    .restore(document.clone())
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(document)
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+async fn reassign_client_pins(
+    from: String,
+    to: String,
+    expected_revision: u64,
+    app: AppHandle,
+) -> Result<DirectRulesDocument, String> {
+    diagnostics::trace_action(
+        "rules",
+        "tauri_command",
+        "reassign_client_pins",
+        async move {
+            let from_id = ClientId::parse(&from).map_err(|error| error.to_string())?;
+            let to_outbound = parse_outbound(&to)?;
+            let services = services(&app)?;
+            let mut document = services.rules.list().await;
+            if document.revision != expected_revision {
+                return Err(format!(
+                    "rule revision conflict: expected {expected_revision}, found {}",
+                    document.revision
+                ));
+            }
+            if document.move_client_pins(from_id, to_outbound) > 0 {
+                document.revision = document.revision.saturating_add(1);
+                services
+                    .rules
+                    .restore(document.clone())
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(document)
+        },
+    )
+    .await
+}
+
+#[tauri::command]
 async fn list_direct_rules(app: AppHandle) -> Result<DirectRulesDocument, String> {
     diagnostics::trace_action("rules", "tauri_command", "list_direct_rules", async move {
         Ok(services(&app)?.rules.list().await)
@@ -1081,11 +1160,9 @@ async fn pin_route(
     app: AppHandle,
 ) -> Result<DirectRulesDocument, String> {
     diagnostics::trace_action("rules", "tauri_command", "pin_route", async move {
-        let outbound = match outbound.as_str() {
-            "direct" => iran_split_rules::Outbound::Direct,
-            "vpn" => iran_split_rules::Outbound::Vpn,
-            other => return Err(format!("unknown outbound: {other}")),
-        };
+        let services = services(&app)?;
+        let outbound = parse_outbound(&outbound)?;
+        let policy = pin_policy_for(services, outbound)?;
         info!(
             expected_revision,
             outbound = ?outbound,
@@ -1096,11 +1173,10 @@ async fn pin_route(
             },
             "pinning a host to one outbound without logging its value"
         );
-        let services = services(&app)?;
         let previous = services.rules.list().await;
         let next = services
             .rules
-            .pin(&input, outbound, expected_revision)
+            .pin_with_policy(&input, outbound, policy, expected_revision)
             .await;
         persist_and_apply_rules(&app, previous, next).await
     })
@@ -1174,6 +1250,239 @@ async fn persist_and_apply_rules(
         return Err(cause.to_string());
     }
     Ok(next)
+}
+
+#[tauri::command]
+async fn create_rule_list(
+    name: String,
+    outbound: String,
+    expected_revision: u64,
+    app: AppHandle,
+) -> Result<DirectRulesDocument, String> {
+    diagnostics::trace_action("rules", "tauri_command", "create_rule_list", async move {
+        let outbound = parse_outbound(&outbound)?;
+        services(&app)?
+            .rules
+            .create_list(&name, outbound, expected_revision)
+            .await
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn rename_rule_list(
+    list_id: String,
+    name: String,
+    expected_revision: u64,
+    app: AppHandle,
+) -> Result<DirectRulesDocument, String> {
+    diagnostics::trace_action("rules", "tauri_command", "rename_rule_list", async move {
+        let list_id = parse_list_id(&list_id)?;
+        services(&app)?
+            .rules
+            .rename_list(list_id, &name, expected_revision)
+            .await
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_rule_list(
+    list_id: String,
+    expected_revision: u64,
+    app: AppHandle,
+) -> Result<DirectRulesDocument, String> {
+    diagnostics::trace_action("rules", "tauri_command", "delete_rule_list", async move {
+        let list_id = parse_list_id(&list_id)?;
+        let services = services(&app)?;
+        let previous = services.rules.list().await;
+        let next = services.rules.delete_list(list_id, expected_revision).await;
+        persist_and_apply_rules(&app, previous, next).await
+    })
+    .await
+}
+
+#[tauri::command]
+async fn set_rule_list_outbound(
+    list_id: String,
+    outbound: String,
+    expected_revision: u64,
+    app: AppHandle,
+) -> Result<DirectRulesDocument, String> {
+    diagnostics::trace_action(
+        "rules",
+        "tauri_command",
+        "set_rule_list_outbound",
+        async move {
+            let list_id = parse_list_id(&list_id)?;
+            let outbound = parse_outbound(&outbound)?;
+            let services = services(&app)?;
+            let policy = pin_policy_for(services, outbound)?;
+            let previous = services.rules.list().await;
+            let next = services
+                .rules
+                .set_list_outbound(list_id, outbound, policy, expected_revision)
+                .await;
+            persist_and_apply_rules(&app, previous, next).await
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+async fn pin_to_rule_list(
+    input: String,
+    list_id: String,
+    expected_revision: u64,
+    app: AppHandle,
+) -> Result<DirectRulesDocument, String> {
+    diagnostics::trace_action("rules", "tauri_command", "pin_to_rule_list", async move {
+        let list_id = parse_list_id(&list_id)?;
+        let services = services(&app)?;
+        let document = services.rules.list().await;
+        let outbound = document
+            .list_meta(list_id)
+            .map(|list| list.outbound)
+            .ok_or_else(|| "unknown list".to_owned())?;
+        let policy = pin_policy_for(services, outbound)?;
+        info!(
+            expected_revision,
+            input_kind = if input.parse::<std::net::IpAddr>().is_ok() {
+                "ip"
+            } else {
+                "domain"
+            },
+            "pinning a host into a named list without logging its value"
+        );
+        let previous = services.rules.list().await;
+        let next = services
+            .rules
+            .pin_to_list(&input, list_id, policy, expected_revision)
+            .await;
+        persist_and_apply_rules(&app, previous, next).await
+    })
+    .await
+}
+
+fn parse_list_id(value: &str) -> Result<uuid::Uuid, String> {
+    value
+        .parse::<uuid::Uuid>()
+        .map_err(|_| format!("unknown list id: {value}"))
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ListCheckEntry {
+    target: String,
+    status: &'static str,
+    latency_ms: Option<u64>,
+    detail: Option<String>,
+}
+
+const LIST_CHECK_SLOW_MS: u128 = 1_500;
+
+#[tauri::command]
+async fn check_rule_list(list_id: String, app: AppHandle) -> Result<Vec<ListCheckEntry>, String> {
+    diagnostics::trace_action("rules", "tauri_command", "check_rule_list", async move {
+        let list_id = parse_list_id(&list_id)?;
+        let services = services(&app)?;
+        let document = services.rules.list().await;
+        let outbound = document
+            .list_meta(list_id)
+            .map(|list| list.outbound)
+            .ok_or_else(|| "unknown list".to_owned())?;
+        let domains: Vec<String> = document
+            .pins_in_list(list_id)
+            .into_iter()
+            .filter_map(|pin| match &pin.target {
+                iran_split_rules::DirectTarget::Domain(domain) => Some(domain.clone()),
+                iran_split_rules::DirectTarget::Ip(_) => None,
+            })
+            .take(3)
+            .collect();
+        if domains.is_empty() {
+            return Ok(Vec::new());
+        }
+        let config = services
+            .config_store
+            .load_or_create()
+            .map_err(|error| error.to_string())?;
+        let snapshot = services.engine.snapshot();
+        let stack_running = matches!(snapshot.phase, StackPhase::Running | StackPhase::Degraded);
+        // With the stack up, probe through Mihomo's mixed port so the real
+        // routing rules decide the path. Otherwise a LocalProxy list can be
+        // probed straight through its client's SOCKS endpoint.
+        let proxy_url = if stack_running {
+            format!("http://127.0.0.1:{}", config.mihomo.mixed_port)
+        } else {
+            let client_id = match outbound {
+                Outbound::Client { client_id } => Some(client_id),
+                Outbound::Direct => None,
+            };
+            let endpoint = client_id
+                .and_then(|id| config.client(id))
+                .filter(|client| client.enabled)
+                .and_then(iran_split_clients::local_proxy_endpoint);
+            let Some((host, port)) = endpoint else {
+                return Err("connect first, or bind the list to a local proxy client".into());
+            };
+            format!("socks5h://{host}:{port}")
+        };
+        let mut results = Vec::with_capacity(domains.len());
+        for domain in domains {
+            results.push(probe_list_entry(&proxy_url, &domain).await);
+        }
+        Ok(results)
+    })
+    .await
+}
+
+async fn probe_list_entry(proxy_url: &str, domain: &str) -> ListCheckEntry {
+    let build = || -> Result<reqwest::Client, reqwest::Error> {
+        reqwest::Client::builder()
+            .no_proxy()
+            .proxy(reqwest::Proxy::all(proxy_url)?)
+            .connect_timeout(Duration::from_secs(4))
+            .timeout(Duration::from_secs(8))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+    };
+    let client = match build() {
+        Ok(client) => client,
+        Err(error) => {
+            return ListCheckEntry {
+                target: domain.to_owned(),
+                status: "fail",
+                latency_ms: None,
+                detail: Some(error.without_url().to_string()),
+            };
+        }
+    };
+    let started = std::time::Instant::now();
+    // Any HTTP status counts as "the host answered through this egress";
+    // only transport errors are failures.
+    match client.head(format!("https://{domain}/")).send().await {
+        Ok(_) => {
+            let elapsed = started.elapsed().as_millis();
+            ListCheckEntry {
+                target: domain.to_owned(),
+                status: if elapsed > LIST_CHECK_SLOW_MS {
+                    "slow"
+                } else {
+                    "ok"
+                },
+                latency_ms: u64::try_from(elapsed).ok(),
+                detail: None,
+            }
+        }
+        Err(error) => ListCheckEntry {
+            target: domain.to_owned(),
+            status: "fail",
+            latency_ms: None,
+            detail: Some(error.without_url().to_string()),
+        },
+    }
 }
 
 #[tauri::command]
@@ -1339,9 +1648,30 @@ async fn test_route(target: String, app: AppHandle) -> Result<RouteTestResult, S
                     .map_err(|error| format!("invalid bundled CIDR: {error}"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let decision = RuleSet::from_sources(&document, domains, cidrs, business)
-            .decide(&target)
+        let config = services
+            .config_store
+            .load()
+            .or_else(|_| services.config_store.load_or_create())
             .map_err(|error| error.to_string())?;
+        let enabled = config
+            .enabled_clients()
+            .into_iter()
+            .map(|client| client.id)
+            .collect();
+        let default_outbound = match config.default_route {
+            DefaultRoute::Direct => iran_split_rules::Outbound::Direct,
+            DefaultRoute::Client { client_id } => iran_split_rules::Outbound::client(client_id),
+        };
+        let decision = RuleSet::from_sources(
+            &document,
+            domains,
+            cidrs,
+            business,
+            default_outbound,
+            &enabled,
+        )
+        .decide(&target)
+        .map_err(|error| error.to_string())?;
         info!(
             outbound = ?decision.outbound,
             reason = ?decision.reason,
@@ -2152,6 +2482,60 @@ async fn install_update(app: AppHandle) -> Result<OperationAccepted, String> {
     .await
 }
 
+fn restore_redacted_secrets(current: &AppConfig, draft: &mut AppConfig) {
+    for draft_client in &mut draft.clients {
+        let Some(current_client) = current.client(draft_client.id) else {
+            continue;
+        };
+        if let (
+            iran_split_config::ClientConfig::OwnedSideTunnel {
+                password: Some(password),
+                ..
+            },
+            iran_split_config::ClientConfig::OwnedSideTunnel {
+                password: current_password,
+                ..
+            },
+        ) = (&draft_client.config, &current_client.config)
+        {
+            if password == "[REDACTED]" {
+                if let iran_split_config::ClientConfig::OwnedSideTunnel { password: dest, .. } =
+                    &mut draft_client.config
+                {
+                    dest.clone_from(current_password);
+                }
+            }
+        }
+    }
+}
+
+fn pin_policy_for(
+    services: &AppServices,
+    outbound: iran_split_rules::Outbound,
+) -> Result<iran_split_rules::PinPolicy, String> {
+    let iran_split_rules::Outbound::Client { client_id } = outbound else {
+        return Ok(iran_split_rules::PinPolicy::Direct);
+    };
+    let config = services
+        .config_store
+        .load()
+        .or_else(|_| services.config_store.load_or_create())
+        .map_err(|error| error.to_string())?;
+    Ok(config
+        .client(client_id)
+        .map_or(iran_split_rules::PinPolicy::LocalProxy, |client| {
+            iran_split_rules::PinPolicy::for_kind(client.spec().kind)
+        }))
+}
+
+fn parse_outbound(value: &str) -> Result<iran_split_rules::Outbound, String> {
+    if value == "direct" {
+        return Ok(iran_split_rules::Outbound::Direct);
+    }
+    let client_id = ClientId::parse(value).map_err(|_| format!("unknown outbound: {value}"))?;
+    Ok(iran_split_rules::Outbound::client(client_id))
+}
+
 fn read_snapshot_lines(path: &Path) -> Result<Vec<String>, String> {
     let source = fs::read_to_string(path).map_err(|error| error.to_string())?;
     Ok(source
@@ -2188,6 +2572,14 @@ fn create_services(app: &AppHandle) -> Result<AppServices, String> {
     let config = config_store
         .load_or_create()
         .map_err(|error| error.to_string())?;
+    let legacy_pins = iran_split_rules::LegacyPinClients {
+        vpn: config.hiddify_client().map(|client| client.id),
+        openvpn: config
+            .clients
+            .iter()
+            .find(|client| client.preset == PresetId::Openvpn)
+            .map(|client| client.id),
+    };
     let rules_cache = paths.cache.join("rules");
     fs::create_dir_all(&rules_cache).map_err(|error| error.to_string())?;
     let bundled_rules = open_bundled_rules_dir(&paths)?;
@@ -2256,9 +2648,10 @@ fn create_services(app: &AppHandle) -> Result<AppServices, String> {
     };
     let runtime = tauri::async_runtime::handle();
     let engine = Engine::new(Arc::clone(&backend), runtime.inner());
-    let rules = RuleManager::load(
+    let rules = RuleManager::load_with_legacy(
         paths.data.join("direct-rules.json"),
         Arc::new(DohResolver::default()),
+        legacy_pins,
     )
     .map_err(|error| error.to_string())?;
     let cloud_rules = CloudRuleStore::load(bundled_rules, rules_cache);
@@ -2870,10 +3263,18 @@ pub fn run() {
             get_settings,
             validate_settings,
             save_settings,
+            discard_client_pins,
+            reassign_client_pins,
             list_direct_rules,
             add_direct_rule,
             pin_route,
             remove_direct_rule,
+            create_rule_list,
+            rename_rule_list,
+            delete_rule_list,
+            set_rule_list_outbound,
+            pin_to_rule_list,
+            check_rule_list,
             refresh_direct_rules,
             get_cloud_rules_status,
             sync_cloud_rules,

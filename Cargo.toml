@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/iran-split-config",
+  "crates/iran-split-clients",
   "crates/iran-split-core",
   "crates/iran-split-ipc",
   "crates/iran-split-mihomo",
@@ -15,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "4.7.2"
+version = "4.9.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 rust-version = "1.88"

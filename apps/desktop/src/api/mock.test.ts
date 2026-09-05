@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MOCK_HIDDIFY_ID } from "../lib/outbound";
 import { APP_VERSION } from "../version";
 import { mockApi, resetMockState } from "./mock";
 
@@ -42,37 +43,44 @@ describe("mock transport", () => {
 
   it("routes .ir hosts direct and other hosts through the vpn", async () => {
     await expect(mockApi.testRoute("digikala.ir")).resolves.toMatchObject({
-      outbound: "direct",
+      outbound: { kind: "direct" },
     });
     await expect(mockApi.testRoute("openai.com")).resolves.toMatchObject({
-      outbound: "vpn",
+      outbound: { kind: "client", client_id: MOCK_HIDDIFY_ID },
       matched_rule: "MATCH",
     });
   });
 
   it("canonicalizes subdomain pins to the registrable root", async () => {
     const first = await mockApi.addRule("api.shop.example.com", 1);
-    expect(first.rules.map((item) => item.target.value)).toEqual(
+    expect(first.pins.map((item) => item.target.value)).toEqual(
       expect.arrayContaining(["example.ir", "example.com"]),
     );
     expect(
-      first.rules.find((item) => item.target.value === "example.com")
+      first.pins.find((item) => item.target.value === "example.com")
         ?.resolved_ips,
     ).toEqual([]);
     const moved = await mockApi.pinRoute(
       "www.example.com",
-      "vpn",
+      MOCK_HIDDIFY_ID,
       first.revision,
     );
-    expect(moved.rules.map((item) => item.target.value)).toEqual([
-      "example.ir",
-    ]);
-    expect(moved.vpn_rules[0]?.target.value).toBe("example.com");
+    expect(
+      moved.pins
+        .filter((item) => item.outbound.kind === "direct")
+        .map((item) => item.target.value),
+    ).toEqual(["example.ir"]);
+    expect(
+      moved.pins.find((item) => item.outbound.kind === "client")?.target.value,
+    ).toBe("example.com");
     await expect(
       mockApi.testRoute("api.shop.example.com"),
-    ).resolves.toMatchObject({ outbound: "vpn", matched_rule: "example.com" });
+    ).resolves.toMatchObject({
+      outbound: { kind: "client", client_id: MOCK_HIDDIFY_ID },
+      matched_rule: "example.com",
+    });
     await expect(mockApi.testRoute("notexample.com")).resolves.toMatchObject({
-      outbound: "vpn",
+      outbound: { kind: "client", client_id: MOCK_HIDDIFY_ID },
       matched_rule: "MATCH",
     });
   });
@@ -80,7 +88,7 @@ describe("mock transport", () => {
   it("keeps github.io tenants separate and routes curated businesses direct", async () => {
     const pinned = await mockApi.addRule("user.github.io", 1);
     expect(
-      pinned.rules.some((item) => item.target.value === "user.github.io"),
+      pinned.pins.some((item) => item.target.value === "user.github.io"),
     ).toBe(true);
     await expect(mockApi.addRule("github.io", pinned.revision)).rejects.toThrow(
       /public suffixes/i,
@@ -88,16 +96,16 @@ describe("mock transport", () => {
     await expect(
       mockApi.testRoute("www.technolife.com"),
     ).resolves.toMatchObject({
-      outbound: "direct",
+      outbound: { kind: "direct" },
       matched_rule: "technolife.com",
     });
     await expect(
       mockApi.testRoute("selleracademy.technolife.com"),
-    ).resolves.toMatchObject({ outbound: "direct" });
+    ).resolves.toMatchObject({ outbound: { kind: "direct" } });
     await expect(
       mockApi.testRoute("console.kavenegar.com"),
     ).resolves.toMatchObject({
-      outbound: "direct",
+      outbound: { kind: "direct" },
       matched_rule: "kavenegar.com",
     });
   });
@@ -142,7 +150,7 @@ describe("mock transport", () => {
     });
     unsubscribe();
     expect(stages).toContain("preparing");
-    expect(stages).toContain("starting_hiddify");
+    expect(stages).toContain("starting_client");
     expect(stages).toContain("starting_core");
     expect(stages).toContain("checking_readiness");
   });
@@ -164,7 +172,7 @@ describe("mock transport", () => {
       {
         host: "openai.com",
         destination_ip: "104.18.1.1",
-        outbound: "vpn",
+        outbound: MOCK_HIDDIFY_ID,
         rule: "MATCH",
       },
     ]);
@@ -203,5 +211,39 @@ describe("mock transport", () => {
     expect(issues.some((issue) => issue.code === "DIRECT_DNS_REQUIRED")).toBe(
       true,
     );
+  });
+
+  it("follows MATCH Direct and keeps disabled-client pins out of decide", async () => {
+    const settings = await mockApi.getSettings();
+    await mockApi.saveSettings(
+      { ...settings, default_route: { kind: "direct" } },
+      settings.revision,
+    );
+    await expect(mockApi.testRoute("openai.com")).resolves.toMatchObject({
+      outbound: { kind: "direct" },
+      matched_rule: "MATCH",
+    });
+    const pinned = await mockApi.pinRoute("openai.com", MOCK_HIDDIFY_ID, 1);
+    const disabled = await mockApi.getSettings();
+    await mockApi.saveSettings(
+      {
+        ...disabled,
+        clients: disabled.clients.map((client) => ({
+          ...client,
+          enabled: false,
+        })),
+      },
+      disabled.revision,
+    );
+    await expect(mockApi.testRoute("openai.com")).resolves.toMatchObject({
+      outbound: { kind: "direct" },
+      matched_rule: "MATCH",
+    });
+    expect(
+      pinned.pins.some(
+        (pin) =>
+          pin.target.value === "openai.com" && pin.outbound.kind === "client",
+      ),
+    ).toBe(true);
   });
 });

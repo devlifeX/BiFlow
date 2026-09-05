@@ -6,7 +6,9 @@ import { ACTION_TIMEOUT_MS, controlsLocked } from "../lib/lifecycle";
 import type {
   AppConfig,
   BootstrapResult,
+  ClientConfig,
   CloudRulesStatus,
+  DefaultRoute,
   DependencyStatus,
   DiagnosticsReport,
   DirectRulesDocument,
@@ -17,6 +19,12 @@ import type {
   UpdateProgress,
   UpdateStatus,
 } from "../api/models";
+import {
+  canAddPreset,
+  createClientInstance,
+  sanitizeDefaultRoute,
+} from "../lib/clients";
+import { presetById, type PresetId } from "../lib/presets";
 
 type Page = "dashboard" | "rules" | "diagnostics" | "settings" | "about";
 
@@ -57,7 +65,21 @@ interface AppStore {
   cancel: () => Promise<void>;
   saveSettings: (draft: AppConfig) => Promise<void>;
   addRule: (input: string) => Promise<void>;
-  pinRoute: (input: string, outbound: "direct" | "vpn") => Promise<void>;
+  pinRoute: (input: string, outbound: string) => Promise<void>;
+  createList: (name: string, outbound: string) => Promise<void>;
+  renameList: (id: string, name: string) => Promise<void>;
+  deleteList: (id: string) => Promise<void>;
+  setListOutbound: (id: string, outbound: string) => Promise<void>;
+  pinToList: (input: string, listId: string) => Promise<void>;
+  discardClientPins: (id: string) => Promise<void>;
+  reassignClientPins: (from: string, to: string) => Promise<void>;
+  addClient: (preset: PresetId) => Promise<void>;
+  deleteClient: (id: string, moveTo?: string) => Promise<void>;
+  setClientEnabled: (id: string, enabled: boolean) => Promise<void>;
+  updateClient: (id: string, config: ClientConfig) => Promise<void>;
+  setDefaultRoute: (route: DefaultRoute) => Promise<void>;
+  routeFallbackNotice: string | null;
+  clearRouteFallbackNotice: () => void;
   removeRule: (input: string) => Promise<void>;
   refreshRules: () => Promise<void>;
   syncCloudRules: () => Promise<void>;
@@ -136,6 +158,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   trafficRefreshing: false,
   diagnostics: null,
   error: null,
+  routeFallbackNotice: null,
   installGuide: null,
   update: initialUpdateProgress(),
   setPage: (page) => set({ page }),
@@ -239,8 +262,16 @@ export const useAppStore = create<AppStore>((set, get) => ({
     if (!current) return;
     set({ actionPending: true, error: null });
     try {
-      const settings = await desktop.saveSettings(draft, current.revision);
-      set({ settings, actionPending: false });
+      const sanitized = sanitizeDefaultRoute(draft);
+      const fallback =
+        draft.default_route.kind === "client" &&
+        sanitized.default_route.kind === "direct";
+      const settings = await desktop.saveSettings(sanitized, current.revision);
+      set({
+        settings,
+        actionPending: false,
+        routeFallbackNotice: fallback ? "defaultRouteFallback" : null,
+      });
     } catch (error) {
       set({ actionPending: false, error: message(error) });
     }
@@ -273,6 +304,157 @@ export const useAppStore = create<AppStore>((set, get) => ({
       throw error;
     }
   },
+  createList: async (name, outbound) => {
+    const rules = get().rules;
+    if (!rules) return;
+    set({ actionPending: true, error: null });
+    try {
+      const next = await desktop.createRuleList(name, outbound, rules.revision);
+      set({ rules: next, actionPending: false });
+    } catch (error) {
+      set({ actionPending: false, error: message(error) });
+      throw error;
+    }
+  },
+  renameList: async (id, name) => {
+    const rules = get().rules;
+    if (!rules) return;
+    set({ actionPending: true, error: null });
+    try {
+      const next = await desktop.renameRuleList(id, name, rules.revision);
+      set({ rules: next, actionPending: false });
+    } catch (error) {
+      set({ actionPending: false, error: message(error) });
+      throw error;
+    }
+  },
+  deleteList: async (id) => {
+    const rules = get().rules;
+    if (!rules) return;
+    set({ actionPending: true, error: null });
+    try {
+      const next = await desktop.deleteRuleList(id, rules.revision);
+      set({ rules: next, actionPending: false });
+    } catch (error) {
+      set({ actionPending: false, error: message(error) });
+      throw error;
+    }
+  },
+  setListOutbound: async (id, outbound) => {
+    const rules = get().rules;
+    if (!rules) return;
+    set({ actionPending: true, error: null });
+    try {
+      const next = await desktop.setRuleListOutbound(
+        id,
+        outbound,
+        rules.revision,
+      );
+      set({ rules: next, actionPending: false });
+    } catch (error) {
+      set({ actionPending: false, error: message(error) });
+      throw error;
+    }
+  },
+  pinToList: async (input, listId) => {
+    const rules = get().rules;
+    if (!rules) return;
+    const host = extractHost(input);
+    if (!host) return;
+    set({ actionPending: true, error: null });
+    try {
+      const next = await desktop.pinToRuleList(host, listId, rules.revision);
+      set({ rules: next, actionPending: false });
+    } catch (error) {
+      set({ actionPending: false, error: message(error) });
+      throw error;
+    }
+  },
+  discardClientPins: async (id) => {
+    const rules = get().rules;
+    if (!rules) return;
+    set({ actionPending: true, error: null });
+    try {
+      const next = await desktop.discardClientPins(id, rules.revision);
+      set({ rules: next, actionPending: false });
+    } catch (error) {
+      set({ actionPending: false, error: message(error) });
+      throw error;
+    }
+  },
+  reassignClientPins: async (from, to) => {
+    const rules = get().rules;
+    if (!rules) return;
+    set({ actionPending: true, error: null });
+    try {
+      const next = await desktop.reassignClientPins(from, to, rules.revision);
+      set({ rules: next, actionPending: false });
+    } catch (error) {
+      set({ actionPending: false, error: message(error) });
+      throw error;
+    }
+  },
+  addClient: async (preset) => {
+    const current = get().settings;
+    if (!current) return;
+    if (!canAddPreset(preset, current.clients)) {
+      throw new Error("that client is already added or is not available yet");
+    }
+    const instance = createClientInstance(preset);
+    const next = {
+      ...current,
+      clients: [...current.clients, instance],
+    };
+    await get().saveSettings(next);
+    // Every client starts with its own named list so the pin flow has an
+    // obvious destination. Best-effort: the client itself is already saved.
+    try {
+      await get().createList(presetById(preset).title, instance.id);
+    } catch {
+      // The registry stays usable without the list; the user can add one.
+    }
+  },
+  deleteClient: async (id, moveTo) => {
+    if (moveTo) {
+      await get().reassignClientPins(id, moveTo);
+    } else {
+      await get().discardClientPins(id);
+    }
+    const current = get().settings;
+    if (!current) return;
+    await get().saveSettings({
+      ...current,
+      clients: current.clients.filter((client) => client.id !== id),
+    });
+  },
+  setClientEnabled: async (id, enabled) => {
+    const current = get().settings;
+    if (!current) return;
+    const next = {
+      ...current,
+      clients: current.clients.map((client) =>
+        client.id === id ? { ...client, enabled } : client,
+      ),
+    };
+    await get().saveSettings(next);
+  },
+  updateClient: async (id, config) => {
+    const current = get().settings;
+    if (!current) return;
+    const next = {
+      ...current,
+      clients: current.clients.map((client) =>
+        client.id === id ? { ...client, config } : client,
+      ),
+    };
+    await get().saveSettings(next);
+  },
+  setDefaultRoute: async (route) => {
+    const current = get().settings;
+    if (!current) return;
+    await get().saveSettings({ ...current, default_route: route });
+  },
+  clearRouteFallbackNotice: () => set({ routeFallbackNotice: null }),
   removeRule: async (input) => {
     const rules = get().rules;
     if (!rules) return;
@@ -476,7 +658,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   openRepository: async () => {
     await desktop.openUrl("https://github.com/devlifeX/BiFlow");
   },
-  clearError: () => set({ error: null }),
+  clearError: () => set({ error: null, routeFallbackNotice: null }),
   clearInstallGuide: () => set({ installGuide: null, error: null }),
 }));
 

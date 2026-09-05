@@ -1,0 +1,21 @@
+[package]
+name = "iran-split-clients"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+iran-split-config = { path = "../iran-split-config" }
+ipnet.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

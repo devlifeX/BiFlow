@@ -1,7 +1,7 @@
 # Alternate VPN clients as the Mihomo upstream
 
-**Status:** considering (assessment only; no product change)  
-**Date:** 2026-08-15
+**Status:** implemented-in-part (ADR 0068 client registry; ADR 0067 side-tunnel invariants)  
+**Date:** 2026-09-05
 
 BiFlow is already a two-layer stack. Mihomo owns split routing and the system
 TUN. Hiddify is only the **upstream SOCKS5 egress**. Another client can take

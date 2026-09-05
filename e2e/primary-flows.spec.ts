@@ -149,7 +149,7 @@ test.describe("primary BiFlow flows", () => {
       return window.__BIFLOW_STAGE_SEEN ?? [];
     });
     expect(stages).toEqual(
-      expect.arrayContaining(["Start Hiddify", "Start Mihomo"]),
+      expect.arrayContaining(["Start client", "Start Mihomo"]),
     );
   });
 
@@ -199,9 +199,9 @@ test.describe("primary BiFlow flows", () => {
     page,
   }) => {
     await openFresh(page);
-    await page.getByRole("button", { name: "Direct rules" }).click();
+    await page.getByRole("button", { name: "List Management" }).click();
     await expect(
-      page.getByRole("heading", { name: "Direct rules" }),
+      page.getByRole("heading", { name: "List Management" }),
     ).toBeVisible();
     await expect(
       page.getByText("62,828").or(page.getByText("62828")),
@@ -217,7 +217,9 @@ test.describe("primary BiFlow flows", () => {
 
     await page.getByLabel("Domain or IP").fill("aparat.com");
     await page.getByRole("button", { name: "Add rule" }).click();
-    await expect(page.getByText("aparat.com")).toBeVisible();
+    await expect(
+      page.getByRole("cell", { name: "aparat.com", exact: true }),
+    ).toBeVisible();
   });
 
   test("diagnoses whether a host is direct or vpn", async ({ page }) => {
@@ -225,7 +227,7 @@ test.describe("primary BiFlow flows", () => {
     await page.getByRole("button", { name: "Diagnostics" }).click();
     await page.getByLabel("Test IP or domain").fill("openai.com");
     await page.getByRole("button", { name: "Test flow" }).click();
-    await expect(page.getByText("openai.com → VPN")).toBeVisible();
+    await expect(page.getByText("openai.com → Hiddify")).toBeVisible();
 
     await page.getByLabel("Test IP or domain").fill("example.ir");
     await page.getByRole("button", { name: "Test flow" }).click();
@@ -313,7 +315,7 @@ test.describe("primary BiFlow flows", () => {
     await expect(shell).not.toHaveClass(/connection-glow\b/);
   });
 
-  test("pins an Iran host onto the VPN and back to direct", async ({
+  test("pins an Iran host onto Hiddify and back to direct", async ({
     page,
   }) => {
     await openFresh(page);
@@ -321,22 +323,24 @@ test.describe("primary BiFlow flows", () => {
     await page.getByLabel("Test IP or domain").fill("https://www.rade.ir/");
     await page.getByRole("button", { name: "Test flow" }).click();
     // The bundled Iran list keeps every .ir host direct until it is pinned.
-    await expect(page.getByText("www.rade.ir → DIRECT")).toBeVisible();
+    const flow = page.locator('[role="status"]').filter({
+      hasText: "www.rade.ir",
+    });
+    await expect(flow.getByText("www.rade.ir → DIRECT")).toBeVisible();
 
-    await page
-      .getByRole("button", { name: /Add www\.rade\.ir to VPN/ })
-      .click();
-    await expect(page.getByText("www.rade.ir → VPN")).toBeVisible();
+    await flow.locator("select").selectOption({ label: "Hiddify" });
+    await expect(flow.getByText("www.rade.ir → Hiddify")).toBeVisible();
 
-    // The pin shows on the rules page as a table row with a VPN badge.
-    await page.getByRole("button", { name: "Direct rules" }).click();
+    await page.getByRole("button", { name: "List Management" }).click();
     const pinned = page.getByRole("row").filter({
       has: page.getByText("rade.ir", { exact: true }),
     });
-    await expect(pinned).toContainText("VPN");
+    await expect(pinned.locator("select")).toHaveValue(
+      "11111111-1111-1111-1111-111111111111",
+    );
 
-    // Moving it back leaves the bundled list to decide again.
-    await pinned.getByTitle(/to direct/).click();
+    await pinned.locator("select").selectOption("direct");
+    await expect(pinned.locator("select")).toHaveValue("direct");
     await page.getByRole("button", { name: "Diagnostics" }).click();
     await page.getByLabel("Test IP or domain").fill("www.rade.ir");
     await page.getByRole("button", { name: "Test flow" }).click();
@@ -365,13 +369,42 @@ test.describe("primary BiFlow flows", () => {
     await expect(page.getByText(/Backup: .*hiddify-/)).toBeVisible();
   });
 
+  test("adds a catalog client, pins a host, and sets MATCH Direct", async ({
+    page,
+  }) => {
+    await openFresh(page);
+    await page.getByRole("button", { name: "Add client" }).click();
+    await expect(page.getByTestId("client-catalog")).toBeVisible();
+    await page.getByRole("button", { name: /v2rayN/ }).click();
+    await expect(page.getByTestId("client-card-v2rayn")).toBeVisible();
+    const card = page.getByTestId("client-card-v2rayn");
+    await card.getByPlaceholder("example.com").fill("openai.com");
+    await card.getByRole("button", { name: "Pin" }).click();
+    await expect(card.getByText("openai.com")).toBeVisible();
+    await page.getByTestId("default-route").selectOption("direct");
+    await card.getByRole("button", { name: "Delete" }).click();
+    const confirm = card.getByRole("dialog");
+    await expect(confirm).toContainText(
+      "Delete v2rayN? This affects 1 pinned hosts.",
+    );
+    await expect(confirm.getByText("Move pins to")).toBeVisible();
+    await confirm.locator("select").selectOption({ label: "Hiddify" });
+    await confirm.getByRole("button", { name: "Delete" }).click();
+    await expect(page.getByTestId("client-card-v2rayn")).toHaveCount(0);
+
+    await connectButton(page).click();
+    await expect(
+      page.getByRole("heading", { name: "Protected split routing is active" }),
+    ).toBeVisible();
+  });
+
   test("keeps the fixed viewport free of document overflow in English and Persian", async ({
     page,
   }) => {
     await openFresh(page);
     await walkAdvancedPages(page, [
       "Dashboard",
-      "Direct rules",
+      "List Management",
       "Diagnostics",
       "Settings",
       "About",
@@ -384,7 +417,7 @@ test.describe("primary BiFlow flows", () => {
     await expect(page.getByText("BiFlow")).toBeVisible();
     await walkAdvancedPages(page, [
       "داشبورد",
-      "قوانین مستقیم",
+      "مدیریت لیست‌ها",
       "عیب‌یابی",
       "تنظیمات",
       "درباره",
@@ -397,7 +430,7 @@ test.describe("primary BiFlow flows", () => {
     await openFresh(page, "basic");
     await expect(connectButton(page)).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Direct rules" }),
+      page.getByRole("button", { name: "List Management" }),
     ).toHaveCount(0);
     await expectNoDocumentOverflow(page);
 
@@ -412,7 +445,7 @@ test.describe("primary BiFlow flows", () => {
       page.getByRole("heading", { name: "Ready when you are" }),
     ).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Direct rules" }),
+      page.getByRole("button", { name: "List Management" }),
     ).toBeVisible();
   });
 
@@ -423,7 +456,7 @@ test.describe("primary BiFlow flows", () => {
     await page.getByRole("radio", { name: "Basic" }).click();
     await expect(connectButton(page)).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Direct rules" }),
+      page.getByRole("button", { name: "List Management" }),
     ).toHaveCount(0);
     await expectNoDocumentOverflow(page);
 
@@ -447,7 +480,7 @@ test.describe("primary BiFlow flows", () => {
       page.getByRole("heading", { name: "Ready when you are" }),
     ).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Direct rules" }),
+      page.getByRole("button", { name: "List Management" }),
     ).toBeVisible();
   });
 
@@ -498,7 +531,7 @@ test.describe("primary BiFlow flows", () => {
     await expect(diagnosticsField).toHaveValue("pasted.example.ir");
 
     await page.evaluate(() => navigator.clipboard.writeText("kavenegar.com"));
-    await page.getByRole("button", { name: "Direct rules" }).click();
+    await page.getByRole("button", { name: "List Management" }).click();
     const ruleField = page.getByLabel("Domain or IP");
     await ruleField.click({ button: "right" });
     await page.getByRole("menuitem", { name: "Paste" }).click();
@@ -516,18 +549,18 @@ test.describe("primary BiFlow flows", () => {
     await page.getByRole("button", { name: "Diagnostics" }).click();
     const card = page.getByTestId("live-connections");
     await expect(card).toBeVisible();
-    // The actions column renders the opposite route as a button label, so
-    // assert the route badge inside each host's own row: the DIRECT row's
-    // only "DIRECT" cell is its badge (its action reads "VPN"), and vice
-    // versa for the VPN row.
+    // The actions column is an outbound <select> that also lists DIRECT, so
+    // assert the route badge span rather than every cell named DIRECT.
     const directRow = card.getByRole("row").filter({
       has: page.getByText("digikala.ir"),
     });
-    await expect(directRow.getByRole("cell", { name: "DIRECT" })).toBeVisible();
+    await expect(
+      directRow.locator("span", { hasText: "DIRECT" }),
+    ).toBeVisible();
     const vpnRow = card.getByRole("row").filter({
       has: page.getByText("openai.com"),
     });
-    await expect(vpnRow.getByRole("cell", { name: "VPN" })).toBeVisible();
+    await expect(vpnRow.locator("span", { hasText: "Hiddify" })).toBeVisible();
   });
 
   test("blocks the document context menu", async ({ page }) => {
@@ -568,7 +601,7 @@ test.describe("primary BiFlow flows", () => {
     page,
   }) => {
     await openFresh(page);
-    await page.getByRole("button", { name: "Direct rules" }).click();
+    await page.getByRole("button", { name: "List Management" }).click();
     await page.getByLabel("Domain or IP").fill("api.shop.example.com");
     await page.getByRole("button", { name: "Add rule" }).click();
     await expect(page.getByText("example.com").first()).toBeVisible();

@@ -2,7 +2,9 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { desktop } from "../api/desktop";
+import { MOCK_HIDDIFY_ID } from "../lib/outbound";
 import { useAppStore } from "../store/app";
+import { baseSettings, baseSnapshot } from "../test/fixtures";
 import { Diagnostics } from "./Diagnostics";
 
 vi.mock("../api/desktop", () => ({
@@ -22,7 +24,10 @@ vi.mock("../api/desktop", () => ({
     }),
     testRoute: vi.fn().mockResolvedValue({
       target: "openai.com",
-      outbound: "vpn",
+      outbound: {
+        kind: "client",
+        client_id: "11111111-1111-1111-1111-111111111111",
+      },
       reason: "default_proxy",
       matched_rule: "MATCH",
       reachable: true,
@@ -76,7 +81,11 @@ describe("Diagnostics", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(desktop.listActiveConnections).mockResolvedValue([]);
-    useAppStore.setState({ snapshot: null, actionPending: false });
+    useAppStore.setState({
+      snapshot: null,
+      settings: baseSettings(),
+      actionPending: false,
+    });
   });
 
   it("tests whether a host is direct or vpn", async () => {
@@ -87,7 +96,7 @@ describe("Diagnostics", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "Test flow" }));
     expect(await screen.findByRole("status")).toHaveTextContent(
-      "openai.com → VPN",
+      "openai.com → Hiddify",
     );
   });
 
@@ -125,11 +134,10 @@ describe("Diagnostics", () => {
       );
       await userEvent.click(screen.getByRole("button", { name: "Test flow" }));
 
-      // openai.com resolves to VPN, so the offer is to pin it direct.
-      const move = await screen.findByRole("button", {
-        name: /Add openai\.com to direct/,
-      });
-      await userEvent.click(move);
+      const status = await screen.findByRole("status");
+      const picker = status.querySelector("select");
+      expect(picker).not.toBeNull();
+      await userEvent.selectOptions(picker!, "direct");
 
       expect(pinRoute).toHaveBeenCalledWith("openai.com", "direct");
       const { desktop } = await import("../api/desktop");
@@ -147,7 +155,7 @@ describe("Diagnostics", () => {
     const { desktop } = await import("../api/desktop");
     vi.mocked(desktop.testRoute).mockResolvedValueOnce({
       target: "iran.ir",
-      outbound: "direct",
+      outbound: { kind: "direct" },
       reason: "iran_domain",
       matched_rule: "ir",
       reachable: true,
@@ -161,11 +169,11 @@ describe("Diagnostics", () => {
       );
       await userEvent.click(screen.getByRole("button", { name: "Test flow" }));
 
-      const move = await screen.findByRole("button", {
-        name: /Add iran\.ir to VPN/,
-      });
-      await userEvent.click(move);
-      expect(pinRoute).toHaveBeenCalledWith("iran.ir", "vpn");
+      const status = await screen.findByRole("status");
+      const picker = status.querySelector("select");
+      expect(picker).not.toBeNull();
+      await userEvent.selectOptions(picker!, MOCK_HIDDIFY_ID);
+      expect(pinRoute).toHaveBeenCalledWith("iran.ir", MOCK_HIDDIFY_ID);
     } finally {
       useAppStore.setState({ pinRoute: previous });
     }
@@ -175,7 +183,7 @@ describe("Diagnostics", () => {
     const { desktop } = await import("../api/desktop");
     vi.mocked(desktop.testRoute).mockResolvedValueOnce({
       target: "192.168.1.1",
-      outbound: "direct",
+      outbound: { kind: "direct" },
       reason: "private_or_local",
       matched_rule: "192.168.1.1",
       reachable: true,
@@ -197,7 +205,7 @@ describe("Diagnostics", () => {
     const { desktop } = await import("../api/desktop");
     vi.mocked(desktop.testRoute).mockResolvedValueOnce({
       target: "example.ir",
-      outbound: "direct",
+      outbound: { kind: "direct" },
       reason: "custom_rule",
       matched_rule: "example.ir",
       reachable: true,
@@ -210,9 +218,11 @@ describe("Diagnostics", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "Test flow" }));
 
-    expect(
-      await screen.findByRole("button", { name: /Add example\.ir to VPN/ }),
-    ).toBeVisible();
+    const status = await screen.findByRole("status");
+    const picker = status.querySelector("select");
+    expect(picker).not.toBeNull();
+    expect(picker).toHaveValue("direct");
+    expect(picker?.querySelector("option[value='direct']")).not.toBeNull();
   });
 
   it("restarts Hiddify on clean state and reports the backup", async () => {
@@ -267,17 +277,23 @@ describe("Diagnostics", () => {
       {
         host: "openai.com",
         destination_ip: "104.18.1.1",
-        outbound: "vpn",
+        outbound: MOCK_HIDDIFY_ID,
         rule: "MATCH",
       },
     ]);
     useAppStore.setState({
-      snapshot: {
-        revision: 1,
+      settings: baseSettings(),
+      snapshot: baseSnapshot({
         phase: "running",
-        operation_id: null,
         helper: { phase: "running", message: null, since: "now" },
-        hiddify: { phase: "running", message: null, since: "now" },
+        clients: [
+          {
+            id: MOCK_HIDDIFY_ID,
+            preset: "hiddify",
+            enabled: true,
+            status: { phase: "running", message: null, since: "now" },
+          },
+        ],
         mihomo: { phase: "running", message: null, since: "now" },
         tun: { phase: "running", message: null, since: "now" },
         dns: { phase: "running", message: null, since: "now" },
@@ -288,10 +304,7 @@ describe("Diagnostics", () => {
           last_refresh: null,
         },
         exit_ip: "203.0.113.42",
-        backend: "external_hiddify",
-        last_error: null,
-        updated_at: "now",
-      },
+      }),
     });
     render(<Diagnostics report={null} />);
     expect(
@@ -305,13 +318,13 @@ describe("Diagnostics", () => {
       .getAllByRole("cell", { name: "DIRECT" })
       .filter((cell) => cell.querySelector("span"));
     const vpn = screen
-      .getAllByRole("cell", { name: "VPN" })
+      .getAllByRole("cell", { name: "Hiddify" })
       .filter((cell) => cell.querySelector("span"));
     expect(direct).toHaveLength(1);
     expect(vpn).toHaveLength(1);
-    // Each row offers a button that moves the host to the opposite route.
-    expect(screen.getByTitle("Add digikala.ir to VPN")).toBeVisible();
-    expect(screen.getByTitle("Add openai.com to direct")).toBeVisible();
+    expect(
+      screen.getByTestId("live-connections").querySelectorAll("select").length,
+    ).toBeGreaterThanOrEqual(3);
   });
 
   it("filters live connections by route and rule and searches host or IP", async () => {
@@ -325,17 +338,23 @@ describe("Diagnostics", () => {
       {
         host: "openai.com",
         destination_ip: "104.18.1.1",
-        outbound: "vpn",
+        outbound: MOCK_HIDDIFY_ID,
         rule: "MATCH",
       },
     ]);
     useAppStore.setState({
-      snapshot: {
-        revision: 1,
+      settings: baseSettings(),
+      snapshot: baseSnapshot({
         phase: "running",
-        operation_id: null,
         helper: { phase: "running", message: null, since: "now" },
-        hiddify: { phase: "running", message: null, since: "now" },
+        clients: [
+          {
+            id: MOCK_HIDDIFY_ID,
+            preset: "hiddify",
+            enabled: true,
+            status: { phase: "running", message: null, since: "now" },
+          },
+        ],
         mihomo: { phase: "running", message: null, since: "now" },
         tun: { phase: "running", message: null, since: "now" },
         dns: { phase: "running", message: null, since: "now" },
@@ -346,16 +365,16 @@ describe("Diagnostics", () => {
           last_refresh: null,
         },
         exit_ip: "203.0.113.42",
-        backend: "external_hiddify",
-        last_error: null,
-        updated_at: "now",
-      },
+      }),
     });
     render(<Diagnostics report={null} />);
     await screen.findByText("digikala.ir");
 
     // Route filter narrows to VPN rows only.
-    await userEvent.selectOptions(screen.getByLabelText("Route"), "vpn");
+    await userEvent.selectOptions(
+      screen.getByLabelText("Route"),
+      MOCK_HIDDIFY_ID,
+    );
     expect(screen.queryByText("digikala.ir")).toBeNull();
     expect(screen.getByText("openai.com")).toBeVisible();
     await userEvent.selectOptions(screen.getByLabelText("Route"), "all");

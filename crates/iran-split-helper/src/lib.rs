@@ -1,3 +1,5 @@
+mod openvpn;
+
 use iran_split_ipc::{CleanupReport, ProcessStatus, ServiceLogEntry};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -21,7 +23,7 @@ use uuid::Uuid;
 const PROCESS_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const MIHOMO_STAY_ALIVE: Duration = Duration::from_millis(400);
 const MAX_LOG_ENTRIES: usize = 2_000;
-const GENERATION_FILES: [&str; 9] = [
+const FIXED_GENERATION_FILES: [&str; 7] = [
     "config.yaml",
     "private.txt",
     "iran-domains.txt",
@@ -29,9 +31,14 @@ const GENERATION_FILES: [&str; 9] = [
     "iran-networks.txt",
     "custom-direct-domains.txt",
     "custom-direct-ips.txt",
-    "custom-vpn-domains.txt",
-    "custom-vpn-ips.txt",
 ];
+
+fn is_allowed_generation_file(name: &str) -> bool {
+    FIXED_GENERATION_FILES.contains(&name)
+        || name == "custom-vpn-domains.txt"
+        || name == "custom-vpn-ips.txt"
+        || iran_split_config::is_custom_client_generation_file(name)
+}
 
 #[derive(Debug, Error)]
 pub enum HelperServiceError {
@@ -54,6 +61,8 @@ pub enum HelperServiceError {
     Install(String),
     #[error("IPC failed: {0}")]
     Protocol(#[from] iran_split_ipc::ProtocolError),
+    #[error("side tunnel failed: {0}")]
+    SideTunnel(String),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -161,6 +170,7 @@ pub struct Supervisor {
     child: Mutex<Option<ManagedChild>>,
     registered: Mutex<HashMap<Uuid, String>>,
     logs: Arc<Mutex<VecDeque<ServiceLogEntry>>>,
+    pub(crate) side_tunnels: Mutex<HashMap<Uuid, openvpn::RunningSideTunnel>>,
 }
 
 impl Supervisor {
@@ -171,6 +181,7 @@ impl Supervisor {
             child: Mutex::new(None),
             registered: Mutex::new(HashMap::new()),
             logs: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_LOG_ENTRIES))),
+            side_tunnels: Mutex::new(HashMap::new()),
         }
     }
 
@@ -238,9 +249,9 @@ impl Supervisor {
         set_directory_permissions(&temporary_root)?;
         #[cfg(not(unix))]
         set_directory_permissions(&temporary_root);
-        for name in GENERATION_FILES {
-            let source = checked_generation_file(&source_root_canonical, name)?;
-            let destination = temporary_root.join(name);
+        for name in collect_generation_files(&source_root_canonical)? {
+            let source = checked_generation_file(&source_root_canonical, &name)?;
+            let destination = temporary_root.join(&name);
             copy_new_file(&source, &destination)?;
         }
         let destination_root = generations_root.join(generation_id.to_string());
@@ -368,6 +379,7 @@ impl Supervisor {
     ///
     /// Returns an error when the process or network cleanup fails.
     pub async fn cleanup(&self) -> Result<CleanupReport, HelperServiceError> {
+        self.stop_all_side_tunnels().await;
         let process_stopped = !self.stop().await?.running;
         let interface_path = Path::new("/sys/class/net").join(&self.settings.tun_name);
         if interface_path.exists() {
@@ -420,7 +432,12 @@ impl Supervisor {
         Ok(())
     }
 
-    async fn push_log(&self, level: &str, event: &str, fields: BTreeMap<String, String>) {
+    pub(crate) async fn push_log(
+        &self,
+        level: &str,
+        event: &str,
+        fields: BTreeMap<String, String>,
+    ) {
         let mut logs = self.logs.lock().await;
         if logs.len() == MAX_LOG_ENTRIES {
             logs.pop_front();
@@ -535,8 +552,34 @@ async fn stop_managed_child(managed: &mut ManagedChild) -> Result<(), HelperServ
     Ok(())
 }
 
+fn collect_generation_files(root: &Path) -> Result<Vec<String>, HelperServiceError> {
+    let mut names: Vec<String> = FIXED_GENERATION_FILES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    let entries = fs::read_dir(root)?;
+    for entry in entries {
+        let name = entry?.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.contains('/') || name.contains('\\') || name.contains("..") {
+            continue;
+        }
+        if is_allowed_generation_file(name) && !names.iter().any(|existing| existing == name) {
+            names.push(name.to_owned());
+        }
+    }
+    Ok(names)
+}
+
 fn checked_generation_file(root: &Path, name: &str) -> Result<PathBuf, HelperServiceError> {
-    if !GENERATION_FILES.contains(&name) {
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(HelperServiceError::InvalidGeneration(
+            "file is not in the runtime allowlist".into(),
+        ));
+    }
+    if !is_allowed_generation_file(name) {
         return Err(HelperServiceError::InvalidGeneration(
             "file is not in the runtime allowlist".into(),
         ));
@@ -1062,6 +1105,19 @@ tun_name = "clash-iran"
         let other = directory.path().join("other.bin");
         copy_file_unless_same(&path, &other).expect("distinct copy");
         assert_eq!(fs::read(&other).expect("copied"), b"payload");
+    }
+
+    #[test]
+    fn generation_allowlist_accepts_client_uuid_files_and_rejects_paths() {
+        let id = "11111111-1111-1111-1111-111111111111";
+        assert!(is_allowed_generation_file("config.yaml"));
+        assert!(is_allowed_generation_file(&format!(
+            "custom-{id}-domains.txt"
+        )));
+        assert!(is_allowed_generation_file(&format!("custom-{id}-ips.txt")));
+        assert!(!is_allowed_generation_file("custom-not-a-uuid-domains.txt"));
+        assert!(!is_allowed_generation_file("../config.yaml"));
+        assert!(!is_allowed_generation_file("custom/evil-domains.txt"));
     }
 
     // A Windows counterpart belongs here, but every assertion about Windows

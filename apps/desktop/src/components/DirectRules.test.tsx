@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { DirectRulesDocument } from "../api/models";
 import { useAppStore } from "../store/app";
+import { baseSettings } from "../test/fixtures";
 import { DirectRules } from "./DirectRules";
 
 vi.mock("../api/desktop", () => ({
@@ -20,27 +21,34 @@ vi.mock("../api/desktop", () => ({
 
 const rules: DirectRulesDocument = {
   revision: 1,
-  rules: [
+  pins: [
     {
       target: { kind: "domain", value: "example.ir" },
+      outbound: { kind: "direct" },
+      list_id: null,
       resolved_ips: ["203.0.113.8"],
       created_at: new Date().toISOString(),
       refreshed_at: new Date().toISOString(),
     },
-  ],
-  vpn_rules: [
     {
       target: { kind: "domain", value: "pinned.ir" },
+      outbound: {
+        kind: "client",
+        client_id: "11111111-1111-1111-1111-111111111111",
+      },
+      list_id: null,
       resolved_ips: ["203.0.113.20"],
       created_at: new Date().toISOString(),
       refreshed_at: new Date().toISOString(),
     },
   ],
+  lists: [],
 };
 
 describe("DirectRules", () => {
   it("shows cloud domain and IP counts and last sync", () => {
     useAppStore.setState({
+      settings: baseSettings(),
       rules,
       actionPending: false,
       cloudRules: {
@@ -63,6 +71,7 @@ describe("DirectRules", () => {
   it("adds a custom direct rule without leaving the page", async () => {
     const addRule = vi.fn().mockResolvedValue(undefined);
     useAppStore.setState({
+      settings: baseSettings(),
       rules,
       actionPending: false,
       cloudRules: {
@@ -84,6 +93,7 @@ describe("DirectRules", () => {
   it("keeps the input when adding a rule fails", async () => {
     const addRule = vi.fn().mockRejectedValue(new Error("rules changed"));
     useAppStore.setState({
+      settings: baseSettings(),
       rules,
       actionPending: false,
       cloudRules: {

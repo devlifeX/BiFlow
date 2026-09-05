@@ -22,19 +22,18 @@ no-op and the UI had to explain that exclusions were unsupported.
   `resolved_ips` into IP providers (CDN addresses must not leak onto DIRECT).
 - `RuleManager::load` migrates exact-host documents to canonical roots, merges
   duplicates, bumps `revision` once, and keeps `direct-rules.json.last-good`.
-- `DirectRulesDocument.vpn_rules` holds VPN pins, `#[serde(default)]` so
-  documents written before this change still load.
-- A host lives in at most one user list. `RuleManager::pin(input, outbound,
-revision)` adds to one list and drops the target from the other;
-  `remove` clears it from whichever list holds it. `add` stays as the DIRECT
-  shorthand.
+- Schema 3 stores one list: `RoutePinsDocument.pins` with
+  `Outbound::Direct | Client { client_id }`. Legacy `rules` / `vpn_rules`
+  migrate through `RuleManager::load_with_legacy`.
+- A host lives in at most one pin. `RuleManager::pin(input, outbound,
+revision)` moves it. `add` stays as the DIRECT shorthand.
 - Precedence, identical in `RuleSet::decide` and the generated Mihomo rules:
   1. process bypass, localhost, private/LAN/CGNAT → DIRECT
-  2. user VPN pins
+  2. enabled client pins
   3. user DIRECT pins
   4. bundled Iran domains and CIDRs → DIRECT
   5. curated `iran-business-domains` → DIRECT
-  6. `MATCH` → VPN
+  6. `MATCH` → `default_route` (a client group or DIRECT)
 - Private, loopback, and CGNAT addresses are rejected from the VPN list with a
   clear error rather than silently ignored: routing them through the tunnel
   cuts the machine off from its own network. `decide_ip` checks that range

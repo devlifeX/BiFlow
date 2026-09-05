@@ -20,7 +20,9 @@ import { controlsLocked, isOperating } from "../lib/lifecycle";
 import { useAppStore } from "../store/app";
 import { AppButton, BUTTON_ICON_PX } from "./AppButton";
 import { ConnectionActionButton } from "./ConnectionActionButton";
+import { ClientRegistry } from "./ClientRegistry";
 import { StatusPill } from "./StatusPill";
+import { presetById, type PresetId } from "../lib/presets";
 
 export function Dashboard({ snapshot }: { snapshot: StackSnapshot }) {
   const { t } = useTranslation();
@@ -42,7 +44,7 @@ export function Dashboard({ snapshot }: { snapshot: StackSnapshot }) {
   const operating = isOperating(snapshot);
   const needsAttention = [
     snapshot.helper,
-    snapshot.hiddify,
+    ...snapshot.clients.map((client) => client.status),
     snapshot.mihomo,
     snapshot.tun,
     snapshot.dns,
@@ -144,7 +146,7 @@ export function Dashboard({ snapshot }: { snapshot: StackSnapshot }) {
         <Metric
           icon={<Network aria-hidden />}
           label={t("backend")}
-          value="External Hiddify"
+          value={t("clientsTitle")}
         />
         <Metric
           icon={<Gauge aria-hidden />}
@@ -163,7 +165,13 @@ export function Dashboard({ snapshot }: { snapshot: StackSnapshot }) {
           className="grid grid-cols-5 gap-2 rounded-2xl border border-ink/10 bg-surface p-3 shadow-card md:hidden"
         >
           <StatusLight name={t("helper")} phase={snapshot.helper.phase} />
-          <StatusLight name="Hiddify" phase={snapshot.hiddify.phase} />
+          {snapshot.clients.map((client) => (
+            <StatusLight
+              key={client.id}
+              name={presetById(client.preset as PresetId).title}
+              phase={client.status.phase}
+            />
+          ))}
           <StatusLight name="Mihomo" phase={snapshot.mihomo.phase} />
           <StatusLight name="TUN" phase={snapshot.tun.phase} />
           <StatusLight name="DNS" phase={snapshot.dns.phase} />
@@ -180,16 +188,28 @@ export function Dashboard({ snapshot }: { snapshot: StackSnapshot }) {
             installing={installingId === "helper"}
             onInstall={() => void installHelper()}
           />
-          <Component
-            name="Hiddify"
-            status={snapshot.hiddify}
-            icon={<CircleDot />}
-            installed={
-              dependencies.find((item) => item.id === "hiddify")?.installed
-            }
-            installing={installingId === "hiddify"}
-            onInstall={() => void installDependency("hiddify")}
-          />
+          {snapshot.clients.map((client) => (
+            <Component
+              key={client.id}
+              name={presetById(client.preset as PresetId).title}
+              status={client.status}
+              icon={<CircleDot />}
+              installed={
+                client.preset === "hiddify"
+                  ? dependencies.find((item) => item.id === "hiddify")
+                      ?.installed
+                  : true
+              }
+              installing={
+                client.preset === "hiddify" && installingId === "hiddify"
+              }
+              onInstall={
+                client.preset === "hiddify"
+                  ? () => void installDependency("hiddify")
+                  : undefined
+              }
+            />
+          ))}
           <Component
             name="Mihomo"
             status={snapshot.mihomo}
@@ -204,6 +224,8 @@ export function Dashboard({ snapshot }: { snapshot: StackSnapshot }) {
           <Component name="DNS" status={snapshot.dns} icon={<Network />} />
         </div>
       </div>
+
+      <ClientRegistry />
 
       {active ? <TrafficFlow /> : null}
 

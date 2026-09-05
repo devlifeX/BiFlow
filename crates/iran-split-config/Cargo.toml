@@ -13,6 +13,7 @@ serde.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

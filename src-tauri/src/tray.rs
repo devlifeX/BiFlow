@@ -63,7 +63,7 @@ mod tests {
         for phase in [
             StackPhase::Uninitialized,
             StackPhase::Stopped,
-            StackPhase::StartingHiddify,
+            StackPhase::StartingClient,
             StackPhase::PreparingRuntime,
             StackPhase::ValidatingConfig,
             StackPhase::StartingCore,

@@ -10,6 +10,7 @@ publish.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 hex.workspace = true
+iran-split-clients = { path = "../iran-split-clients" }
 iran-split-config = { path = "../iran-split-config" }
 iran-split-core = { path = "../iran-split-core" }
 iran-split-ipc = { path = "../iran-split-ipc" }

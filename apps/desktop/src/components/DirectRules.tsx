@@ -1,8 +1,7 @@
 import {
-  ArrowLeftRight,
   CloudDownload,
+  ListChecks,
   LoaderCircle,
-  Minus,
   Plus,
   RefreshCw,
   Route,
@@ -13,16 +12,20 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { desktop } from "../api/desktop";
 import type {
-  DirectRule,
+  ClientInstance,
   DirectRulesDocument,
+  ListCheckEntry,
+  PinnedRoute,
   RouteTestResult,
+  RuleListMeta,
 } from "../api/models";
+import { outboundKey, outboundLabel } from "../lib/outbound";
 import type { SortState } from "../lib/tableSort";
 import { sortRows, toggleSort } from "../lib/tableSort";
 import { useAppStore } from "../store/app";
 import { SortHeader } from "./SortHeader";
 
-type PinnedRow = { rule: DirectRule; outbound: "direct" | "vpn" };
+type PinnedRow = { rule: PinnedRoute };
 type PinnedSortKey = "target" | "kind" | "outbound";
 
 const PINNED_SORT_ACCESSORS: Record<
@@ -31,7 +34,7 @@ const PINNED_SORT_ACCESSORS: Record<
 > = {
   target: (row) => row.rule.target.value,
   kind: (row) => row.rule.target.kind,
-  outbound: (row) => row.outbound,
+  outbound: (row) => outboundKey(row.rule.outbound),
 };
 
 export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
@@ -44,7 +47,10 @@ export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
     syncCloudRules,
     cloudRules,
     actionPending,
+    settings,
   } = useAppStore();
+  const clients = settings?.clients ?? [];
+  const enabled = clients.filter((client) => client.enabled);
   const [input, setInput] = useState("");
   const [search, setSearch] = useState("");
   const [route, setRoute] = useState<RouteTestResult | null>(null);
@@ -55,12 +61,11 @@ export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
   });
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    const rows: PinnedRow[] = [
-      ...rules.rules.map((rule) => ({ rule, outbound: "direct" as const })),
-      ...rules.vpn_rules.map((rule) => ({ rule, outbound: "vpn" as const })),
-    ].filter(({ rule }) => rule.target.value.includes(needle));
+    const rows: PinnedRow[] = rules.pins
+      .filter((rule) => rule.target.value.includes(needle))
+      .map((rule) => ({ rule }));
     return sortRows(rows, sort, PINNED_SORT_ACCESSORS);
-  }, [rules.rules, rules.vpn_rules, search, sort]);
+  }, [rules.pins, search, sort]);
   const synced = cloudRules?.last_synced_at
     ? new Date(cloudRules.last_synced_at).toLocaleString()
     : t("neverSynced");
@@ -81,10 +86,12 @@ export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
     <section aria-labelledby="rules-title" className="flex flex-col gap-4 pb-2">
       <header className="shrink-0">
         <h1 id="rules-title" className="text-2xl font-semibold tracking-tight">
-          Direct rules
+          {t("listManagementTitle")}
         </h1>
-        <p className="mt-1 text-sm text-muted">{t("directRulesHelp")}</p>
+        <p className="mt-1 text-sm text-muted">{t("listManagementHelp")}</p>
       </header>
+
+      <RuleLists rules={rules} clients={enabled} allClients={clients} />
 
       <div className="rounded-2xl border border-ink/10 bg-surface p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -131,11 +138,9 @@ export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
             .catch(() => undefined);
         }}
       >
-        <label className="sr-only" htmlFor="rule-input">
-          {t("directRuleInput")}
-        </label>
         <input
           id="rule-input"
+          aria-label={t("directRuleInput")}
           value={input}
           onChange={(event) => setInput(event.target.value)}
           required
@@ -150,6 +155,7 @@ export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
         </button>
       </form>
 
+      <h2 className="mt-2 font-semibold">{t("allPins")}</h2>
       <div className="flex flex-col gap-3 sm:flex-row">
         <label className="relative flex-1">
           <span className="sr-only">Search rules</span>
@@ -212,76 +218,74 @@ export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-ink/10">
-                {filtered.map(({ rule, outbound }) => (
-                  <tr
-                    key={`${outbound}:${rule.target.kind}:${rule.target.value}`}
-                    className="hover:bg-canvas/60"
-                  >
-                    <td className="px-3 py-2 font-medium break-all">
-                      {rule.target.value}
-                    </td>
-                    <td className="px-3 py-2 font-mono text-xs text-muted">
-                      {rule.target.kind.toUpperCase()}
-                    </td>
-                    <td className="px-3 py-2">
-                      <span
-                        className={`rounded-md px-2 py-0.5 text-xs font-semibold ${
-                          outbound === "vpn"
-                            ? "bg-brand/10 text-brand"
-                            : "bg-success/10 text-success"
-                        }`}
-                      >
-                        {outbound === "vpn" ? t("vpn") : t("direct")}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2 font-mono text-xs text-muted break-all">
-                      {rule.resolved_ips.join(", ") || "—"}
-                    </td>
-                    <td className="px-3 py-2">
-                      <div className="flex gap-1.5">
-                        <button
-                          type="button"
-                          disabled={actionPending}
-                          onClick={() =>
-                            void pinRoute(
-                              rule.target.value,
-                              outbound === "vpn" ? "direct" : "vpn",
-                            ).catch(() => undefined)
-                          }
-                          className="inline-flex items-center gap-1 rounded-lg border border-ink/15 px-2 py-1 text-xs font-semibold text-muted hover:text-brand disabled:opacity-50"
-                          title={
-                            outbound === "vpn"
-                              ? t("moveToDirect", { target: rule.target.value })
-                              : t("moveToVpn", { target: rule.target.value })
-                          }
-                        >
-                          <ArrowLeftRight size={14} aria-hidden />
-                          {outbound === "vpn" ? t("direct") : t("vpn")}
-                        </button>
-                        <button
-                          type="button"
-                          disabled={testing}
-                          onClick={() => void test(rule.target.value)}
-                          className="rounded-lg border border-ink/15 p-1.5 text-muted hover:text-brand"
-                          title={`Test route for ${rule.target.value}`}
-                          aria-label={`Test route for ${rule.target.value}`}
-                        >
-                          <Route size={16} aria-hidden />
-                        </button>
-                        <button
-                          type="button"
-                          disabled={actionPending}
-                          onClick={() => void removeRule(rule.target.value)}
-                          className="rounded-lg border border-ink/15 p-1.5 text-muted hover:text-danger"
-                          title={`Remove ${rule.target.value}`}
-                          aria-label={`Remove ${rule.target.value}`}
-                        >
-                          <Trash2 size={16} aria-hidden />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                {filtered.map(({ rule }) => {
+                  const clientId =
+                    rule.outbound.kind === "client"
+                      ? rule.outbound.client_id
+                      : null;
+                  const disabledClient =
+                    clientId !== null &&
+                    !enabled.some((client) => client.id === clientId);
+                  return (
+                    <tr
+                      key={`${outboundKey(rule.outbound)}:${rule.target.kind}:${rule.target.value}`}
+                      className={`hover:bg-canvas/60 ${disabledClient ? "opacity-50" : ""}`}
+                    >
+                      <td className="px-3 py-2 font-medium break-all">
+                        {rule.target.value}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs text-muted">
+                        {rule.target.kind.toUpperCase()}
+                      </td>
+                      <td className="px-3 py-2">
+                        {disabledClient ? (
+                          <span className="text-xs font-semibold text-muted">
+                            {outboundLabel(rule.outbound, clients)} (
+                            {t("disabled")})
+                          </span>
+                        ) : (
+                          <OutboundSelect
+                            value={outboundKey(rule.outbound)}
+                            clients={enabled}
+                            onChange={(next) =>
+                              void pinRoute(rule.target.value, next).catch(
+                                () => undefined,
+                              )
+                            }
+                            disabled={actionPending}
+                          />
+                        )}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs text-muted break-all">
+                        {rule.resolved_ips.join(", ") || "—"}
+                      </td>
+                      <td className="px-3 py-2">
+                        <div className="flex gap-1.5">
+                          <button
+                            type="button"
+                            disabled={testing}
+                            onClick={() => void test(rule.target.value)}
+                            className="rounded-lg border border-ink/15 p-1.5 text-muted hover:text-brand"
+                            title={`Test route for ${rule.target.value}`}
+                            aria-label={`Test route for ${rule.target.value}`}
+                          >
+                            <Route size={16} aria-hidden />
+                          </button>
+                          <button
+                            type="button"
+                            disabled={actionPending}
+                            onClick={() => void removeRule(rule.target.value)}
+                            className="rounded-lg border border-ink/15 p-1.5 text-muted hover:text-danger"
+                            title={`Remove ${rule.target.value}`}
+                            aria-label={`Remove ${rule.target.value}`}
+                          >
+                            <Trash2 size={16} aria-hidden />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -290,6 +294,323 @@ export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
 
       {route ? <FlowResult route={route} /> : null}
     </section>
+  );
+}
+
+function RuleLists({
+  rules,
+  clients,
+  allClients,
+}: {
+  rules: DirectRulesDocument;
+  clients: ClientInstance[];
+  allClients: ClientInstance[];
+}) {
+  const { t } = useTranslation();
+  const { createList, actionPending } = useAppStore();
+  const [name, setName] = useState("");
+  const [outbound, setOutbound] = useState("direct");
+
+  return (
+    <div data-testid="rule-lists" className="flex flex-col gap-3">
+      <form
+        className="flex flex-col gap-2 rounded-2xl border border-ink/10 bg-surface p-4 sm:flex-row sm:items-center"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!name.trim()) return;
+          void createList(name, outbound)
+            .then(() => setName(""))
+            .catch(() => undefined);
+        }}
+      >
+        <input
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          required
+          placeholder={t("newListName")}
+          className="min-w-0 flex-1 rounded-xl border-ink/15 bg-canvas"
+        />
+        <OutboundSelect
+          value={outbound}
+          clients={clients}
+          onChange={setOutbound}
+          disabled={actionPending}
+        />
+        <button
+          disabled={actionPending}
+          className="inline-flex items-center justify-center gap-2 rounded-xl bg-brand px-4 py-2.5 font-semibold text-white disabled:opacity-50"
+        >
+          <Plus size={18} aria-hidden />
+          {t("newList")}
+        </button>
+      </form>
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        {rules.lists.map((list) => (
+          <RuleListCard
+            key={list.id}
+            list={list}
+            pins={rules.pins.filter((pin) => pin.list_id === list.id)}
+            clients={clients}
+            allClients={allClients}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RuleListCard({
+  list,
+  pins,
+  clients,
+  allClients,
+}: {
+  list: RuleListMeta;
+  pins: PinnedRoute[];
+  clients: ClientInstance[];
+  allClients: ClientInstance[];
+}) {
+  const { t } = useTranslation();
+  const {
+    renameList,
+    deleteList,
+    setListOutbound,
+    pinToList,
+    removeRule,
+    actionPending,
+    snapshot,
+  } = useAppStore();
+  const [entry, setEntry] = useState("");
+  const [editedName, setEditedName] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [checkResults, setCheckResults] = useState<ListCheckEntry[] | null>(
+    null,
+  );
+  const clientId =
+    list.outbound.kind === "client" ? list.outbound.client_id : null;
+  const boundClient = allClients.find((client) => client.id === clientId);
+  const disabledClient = clientId !== null && !boundClient?.enabled;
+  const running = snapshot?.phase === "running";
+  const hasDomains = pins.some((pin) => pin.target.kind === "domain");
+  const checkable =
+    hasDomains &&
+    (running ||
+      (boundClient !== undefined &&
+        boundClient.enabled &&
+        boundClient.config.kind === "local_proxy"));
+
+  async function check() {
+    setChecking(true);
+    setCheckResults(null);
+    try {
+      setCheckResults(await desktop.checkRuleList(list.id));
+    } catch {
+      setCheckResults([]);
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  return (
+    <article
+      data-testid={`rule-list-${list.id}`}
+      className="rounded-2xl border border-ink/10 bg-surface p-4"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <form
+          className="flex min-w-0 items-center gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (editedName !== null && editedName.trim() !== list.name) {
+              void renameList(list.id, editedName).catch(() => undefined);
+            }
+            setEditedName(null);
+          }}
+        >
+          <input
+            value={editedName ?? list.name}
+            aria-label={t("renameList")}
+            onChange={(event) => setEditedName(event.target.value)}
+            onBlur={(event) => {
+              if (
+                editedName !== null &&
+                editedName.trim() &&
+                editedName.trim() !== list.name
+              ) {
+                void renameList(list.id, event.target.value).catch(
+                  () => undefined,
+                );
+              }
+              setEditedName(null);
+            }}
+            className="min-w-0 rounded-lg border-transparent bg-transparent font-semibold hover:border-ink/15 focus:border-ink/15 focus:bg-canvas"
+          />
+        </form>
+        <span className="text-xs text-muted">
+          {t("listEntries", { count: pins.length })}
+        </span>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium text-muted">
+          {t("listOutbound")}
+        </span>
+        {disabledClient ? (
+          <span className="text-xs font-semibold text-muted">
+            {outboundLabel(list.outbound, allClients)} ({t("disabled")})
+          </span>
+        ) : (
+          <OutboundSelect
+            value={outboundKey(list.outbound)}
+            clients={clients}
+            onChange={(next) =>
+              void setListOutbound(list.id, next).catch(() => undefined)
+            }
+            disabled={actionPending}
+          />
+        )}
+        <button
+          type="button"
+          disabled={!checkable || checking}
+          onClick={() => void check()}
+          title={
+            hasDomains ? t("checkListNeedsStack") : t("checkListNeedsDomains")
+          }
+          className="ms-auto inline-flex items-center gap-1.5 rounded-lg border border-ink/15 px-2.5 py-1.5 text-xs font-semibold disabled:opacity-40"
+        >
+          {checking ? (
+            <LoaderCircle className="animate-spin" size={14} aria-hidden />
+          ) : (
+            <ListChecks size={14} aria-hidden />
+          )}
+          {checking ? t("checkingList") : t("checkList")}
+        </button>
+      </div>
+
+      {pins.length === 0 ? (
+        <p className="mt-3 text-xs text-muted">{t("listEmptyHint")}</p>
+      ) : (
+        <ul className="mt-3 space-y-1">
+          {pins.map((pin) => (
+            <li
+              key={`${pin.target.kind}:${pin.target.value}`}
+              className="flex items-center justify-between gap-2 text-sm"
+            >
+              <span className="break-all">{pin.target.value}</span>
+              <button
+                type="button"
+                disabled={actionPending}
+                onClick={() =>
+                  void removeRule(pin.target.value).catch(() => undefined)
+                }
+                className="text-xs font-semibold text-muted hover:text-danger"
+              >
+                {t("remove")}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {checkResults ? (
+        <ul className="mt-3 space-y-1 rounded-xl bg-canvas p-3">
+          {checkResults.length === 0 ? (
+            <li className="text-xs text-muted">{t("checkListNeedsStack")}</li>
+          ) : (
+            checkResults.map((result) => (
+              <li
+                key={result.target}
+                className="flex items-center justify-between gap-2 text-xs"
+              >
+                <span className="break-all">{result.target}</span>
+                <span
+                  className={`font-semibold ${
+                    result.status === "ok"
+                      ? "text-success"
+                      : result.status === "fail"
+                        ? "text-danger"
+                        : "text-muted"
+                  }`}
+                >
+                  {result.status}
+                  {result.latency_ms !== null
+                    ? ` · ${result.latency_ms}ms`
+                    : ""}
+                </span>
+              </li>
+            ))
+          )}
+        </ul>
+      ) : null}
+
+      <form
+        className="mt-3 flex gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!entry.trim()) return;
+          void pinToList(entry, list.id)
+            .then(() => setEntry(""))
+            .catch(() => undefined);
+        }}
+      >
+        <input
+          value={entry}
+          onChange={(event) => setEntry(event.target.value)}
+          placeholder={t("entryPlaceholder")}
+          className="min-w-0 flex-1 rounded-xl border-ink/15 bg-canvas text-sm"
+        />
+        <button
+          disabled={actionPending}
+          className="rounded-xl border border-ink/15 px-3 py-2 text-xs font-semibold"
+        >
+          {t("addEntry")}
+        </button>
+      </form>
+
+      <div className="mt-3 border-t border-ink/10 pt-3">
+        {deleting ? (
+          <div className="space-y-2 text-sm" role="dialog">
+            <p>
+              {t("deleteListConfirm", {
+                name: list.name,
+                count: pins.length,
+              })}
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  void deleteList(list.id)
+                    .then(() => setDeleting(false))
+                    .catch(() => setDeleting(false))
+                }
+                className="rounded-lg bg-danger px-3 py-1.5 text-xs font-semibold text-white"
+              >
+                {t("deleteList")}
+              </button>
+              <button
+                type="button"
+                onClick={() => setDeleting(false)}
+                className="rounded-lg border border-ink/15 px-3 py-1.5 text-xs font-semibold"
+              >
+                {t("close")}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setDeleting(true)}
+            className="inline-flex items-center gap-1 text-xs font-semibold text-muted hover:text-danger"
+          >
+            <Trash2 size={14} aria-hidden />
+            {t("deleteList")}
+          </button>
+        )}
+      </div>
+    </article>
   );
 }
 
@@ -308,18 +629,14 @@ export function FlowResult({
   moving = false,
 }: {
   route: RouteTestResult;
-  /** Sends the host the other way: to direct when it is on the VPN, and back
-   * to the VPN when it is a direct rule. Omitted where there is nothing to
-   * act on. */
-  onMove?: (target: string, to: "direct" | "vpn") => void;
+  onMove?: (target: string, to: string) => void;
   moving?: boolean;
 }) {
   const { t } = useTranslation();
-  const vpn = route.outbound === "vpn";
-  const destination = vpn ? "direct" : "vpn";
-  // Both directions are real pins now, so the only host that cannot move is a
-  // loopback/LAN/CGNAT address: forcing those through the tunnel would cut the
-  // machine off from its own network.
+  const clients = useAppStore((state) => state.settings?.clients ?? []);
+  const enabled = clients.filter((client) => client.enabled);
+  const current = outboundKey(route.outbound);
+  const vpn = current !== "direct";
   const actionable = route.reason !== "private_or_local";
   return (
     <div
@@ -328,26 +645,20 @@ export function FlowResult({
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="min-w-0 break-all font-semibold">
-          {route.target} → {route.outbound.toUpperCase()}
+          {route.target} → {outboundLabel(route.outbound, clients)}
         </p>
         {onMove && actionable ? (
-          <button
-            type="button"
-            disabled={moving}
-            onClick={() => onMove(route.target, destination)}
-            className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-ink/15 px-3 py-2 text-sm font-semibold disabled:opacity-50"
-          >
+          <div className="flex items-center gap-2">
             {moving ? (
               <LoaderCircle className="animate-spin" size={16} aria-hidden />
-            ) : vpn ? (
-              <Plus size={16} aria-hidden />
-            ) : (
-              <Minus size={16} aria-hidden />
-            )}
-            {vpn
-              ? t("moveToDirect", { target: route.target })
-              : t("moveToVpn", { target: route.target })}
-          </button>
+            ) : null}
+            <OutboundSelect
+              value={current}
+              clients={enabled}
+              onChange={(next) => onMove(route.target, next)}
+              disabled={moving}
+            />
+          </div>
         ) : null}
       </div>
       <p className="mt-1 text-sm text-muted">
@@ -358,5 +669,34 @@ export function FlowResult({
         <p className="mt-2 text-sm text-muted">{t("moveLocalUnavailable")}</p>
       ) : null}
     </div>
+  );
+}
+
+export function OutboundSelect({
+  value,
+  clients,
+  onChange,
+  disabled,
+}: {
+  value: string;
+  clients: ClientInstance[];
+  onChange: (next: string) => void;
+  disabled?: boolean;
+}) {
+  const { t } = useTranslation();
+  return (
+    <select
+      value={value}
+      disabled={disabled}
+      onChange={(event) => onChange(event.target.value)}
+      className="max-w-[390px] rounded-lg border border-ink/15 bg-canvas px-2 py-1 text-xs font-semibold"
+    >
+      <option value="direct">{t("direct")}</option>
+      {clients.map((client) => (
+        <option key={client.id} value={client.id}>
+          {outboundLabel(client.id, clients)}
+        </option>
+      ))}
+    </select>
   );
 }

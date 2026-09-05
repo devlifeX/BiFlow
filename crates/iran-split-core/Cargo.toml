@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
+iran-split-config = { path = "../iran-split-config" }
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

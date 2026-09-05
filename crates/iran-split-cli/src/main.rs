@@ -6,8 +6,8 @@ use iran_split_core::{
     PlatformBackend, ProcessStatus, ProviderSummary, ReadinessReport, RuntimeGeneration,
     RuntimeHealth, StackPhase, TunStatus,
 };
-use iran_split_rules::{DirectRulesDocument, RuleSet};
-use std::{sync::Arc, time::Duration};
+use iran_split_rules::{Outbound, RoutePinsDocument, RuleSet};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -57,8 +57,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .filter(|line| !line.is_empty() && !line.starts_with('#'))
                 .map(str::parse)
                 .collect::<Result<Vec<_>, _>>()?;
-            let rules =
-                RuleSet::from_sources(&DirectRulesDocument::default(), domains, cidrs, catalog);
+            let rules = RuleSet::from_sources(
+                &RoutePinsDocument::default(),
+                domains,
+                cidrs,
+                catalog,
+                Outbound::Direct,
+                &HashSet::new(),
+            );
             println!("{}", serde_json::to_string_pretty(&rules.decide(&target)?)?);
         }
     }
@@ -108,7 +114,7 @@ impl PlatformBackend for DemoBackend {
         let running = *self.running.lock().await;
         RuntimeHealth {
             helper: ComponentStatus::new(ComponentPhase::Running, Some("Helper demo".into())),
-            hiddify: ComponentStatus::new(ComponentPhase::Running, Some("Demo proxy".into())),
+            clients: Vec::new(),
             mihomo: ComponentStatus::new(
                 if running {
                     ComponentPhase::Running

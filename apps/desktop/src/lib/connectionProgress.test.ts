@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { StackSnapshot } from "../api/models";
+import { baseSnapshot } from "../test/fixtures";
 import {
   connectionButtonProgress,
   resolveOperationStage,
@@ -7,24 +8,8 @@ import {
 
 const now = new Date().toISOString();
 
-const base = (overrides: Partial<StackSnapshot> = {}): StackSnapshot => ({
-  revision: 1,
-  phase: "stopped",
-  busy: null,
-  operation_stage: null,
-  operation_id: null,
-  helper: { phase: "running", message: null, since: now },
-  hiddify: { phase: "stopped", message: null, since: now },
-  mihomo: { phase: "stopped", message: null, since: now },
-  tun: { phase: "stopped", message: null, since: now },
-  dns: { phase: "stopped", message: null, since: now },
-  providers: { ready: 0, total: 0, rules_loaded: 0, last_refresh: null },
-  exit_ip: null,
-  backend: "external_hiddify",
-  last_error: null,
-  updated_at: now,
-  ...overrides,
-});
+const base = (overrides: Partial<StackSnapshot> = {}): StackSnapshot =>
+  baseSnapshot({ updated_at: now, ...overrides });
 
 describe("connectionButtonProgress", () => {
   it("keeps idle labels until a matching operation starts", () => {
@@ -42,12 +27,12 @@ describe("connectionButtonProgress", () => {
   it("follows Connect stages from backend milestones", () => {
     const start = base({
       busy: "connecting",
-      operation_stage: "starting_hiddify",
-      phase: "starting_hiddify",
+      operation_stage: "starting_client",
+      phase: "starting_client",
       operation_id: "op-1",
     });
     expect(connectionButtonProgress(start, "connect")).toEqual({
-      labelKey: "stages.startHiddify",
+      labelKey: "stages.startClient",
       percent: 25,
       processing: true,
     });
@@ -81,7 +66,10 @@ describe("connectionButtonProgress", () => {
       phase: "stopping",
       busy: "disconnecting",
       operation_stage: "stopping_proxy",
-      hiddify: { phase: "running", message: null, since: now },
+      clients: base().clients.map((client) => ({
+        ...client,
+        status: { phase: "running", message: null, since: now },
+      })),
     });
     expect(connectionButtonProgress(disconnecting, "disconnect")).toEqual({
       labelKey: "stages.stopHiddify",

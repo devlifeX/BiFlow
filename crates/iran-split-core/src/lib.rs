@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use iran_split_config::{ClientId, PresetId};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use thiserror::Error;
@@ -14,7 +15,7 @@ pub enum StackPhase {
     #[default]
     Uninitialized,
     Stopped,
-    StartingHiddify,
+    StartingClient,
     PreparingRuntime,
     ValidatingConfig,
     StartingCore,
@@ -154,7 +155,7 @@ impl LifecycleBusy {
 #[serde(rename_all = "snake_case")]
 pub enum OperationStage {
     Preparing,
-    StartingHiddify,
+    StartingClient,
     PreparingRuntime,
     ValidatingConfig,
     StartingCore,
@@ -168,7 +169,7 @@ pub enum OperationStage {
 impl OperationStage {
     const fn from_phase(phase: StackPhase) -> Option<Self> {
         match phase {
-            StackPhase::StartingHiddify => Some(Self::StartingHiddify),
+            StackPhase::StartingClient => Some(Self::StartingClient),
             StackPhase::PreparingRuntime => Some(Self::PreparingRuntime),
             StackPhase::ValidatingConfig => Some(Self::ValidatingConfig),
             StackPhase::StartingCore => Some(Self::StartingCore),
@@ -186,6 +187,20 @@ impl OperationStage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationClient {
+    pub preset: PresetId,
+    pub client_id: ClientId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientComponentStatus {
+    pub id: ClientId,
+    pub preset: PresetId,
+    pub enabled: bool,
+    pub status: ComponentStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackSnapshot {
     pub revision: u64,
     pub phase: StackPhase,
@@ -193,9 +208,12 @@ pub struct StackSnapshot {
     pub busy: Option<LifecycleBusy>,
     #[serde(default)]
     pub operation_stage: Option<OperationStage>,
+    #[serde(default)]
+    pub operation_client: Option<OperationClient>,
     pub operation_id: Option<Uuid>,
     pub helper: ComponentStatus,
-    pub hiddify: ComponentStatus,
+    #[serde(default)]
+    pub clients: Vec<ClientComponentStatus>,
     pub mihomo: ComponentStatus,
     pub tun: ComponentStatus,
     pub dns: ComponentStatus,
@@ -213,9 +231,10 @@ impl Default for StackSnapshot {
             phase: StackPhase::Uninitialized,
             busy: None,
             operation_stage: None,
+            operation_client: None,
             operation_id: None,
             helper: ComponentStatus::default(),
-            hiddify: ComponentStatus::default(),
+            clients: Vec::new(),
             mihomo: ComponentStatus::default(),
             tun: ComponentStatus::default(),
             dns: ComponentStatus::default(),
@@ -286,7 +305,7 @@ pub struct ReadinessReport {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeHealth {
     pub helper: ComponentStatus,
-    pub hiddify: ComponentStatus,
+    pub clients: Vec<ClientComponentStatus>,
     pub mihomo: ComponentStatus,
     pub tun: ComponentStatus,
     pub dns: ComponentStatus,
@@ -442,6 +461,9 @@ pub trait PlatformBackend: Send + Sync + 'static {
     async fn runtime_health(&self) -> RuntimeHealth;
     async fn helper_status(&self) -> Result<HelperStatus, CoreError>;
     async fn ensure_hiddify(&self, cancel: CancellationToken) -> Result<(), CoreError>;
+    async fn ensure_clients(&self, cancel: CancellationToken) -> Result<(), CoreError> {
+        self.ensure_hiddify(cancel).await
+    }
     async fn prepare_runtime(&self) -> Result<RuntimeGeneration, CoreError>;
     async fn validate_runtime(&self, generation: &RuntimeGeneration) -> Result<(), CoreError>;
     async fn start_core(&self, generation: &RuntimeGeneration) -> Result<(), CoreError>;
@@ -1135,6 +1157,40 @@ impl<B: PlatformBackend> Engine<B> {
         Ok(())
     }
 
+    async fn start_enabled_clients(
+        &self,
+        operation_id: Uuid,
+        cancel: &CancellationToken,
+    ) -> Result<(), CoreError> {
+        self.announce(StackPhase::StartingClient, operation_id)
+            .await;
+        self.update(|snapshot| {
+            snapshot.operation_client =
+                snapshot
+                    .clients
+                    .iter()
+                    .find(|client| client.enabled)
+                    .map(|client| OperationClient {
+                        preset: client.preset,
+                        client_id: client.id,
+                    });
+            for client in &mut snapshot.clients {
+                if client.enabled {
+                    client.status = ComponentStatus::new(ComponentPhase::Starting, None);
+                }
+            }
+        });
+        self.backend.ensure_clients(cancel.clone()).await?;
+        check_cancelled(cancel)?;
+        // An optional client may have failed alone; take the backend's view
+        // instead of assuming every instance is running.
+        let health = self.backend.runtime_health().await;
+        self.update(|snapshot| {
+            snapshot.clients = health.clients;
+        });
+        Ok(())
+    }
+
     async fn start_steps(
         &self,
         operation_id: Uuid,
@@ -1155,16 +1211,7 @@ impl<B: PlatformBackend> Engine<B> {
             );
         });
 
-        self.announce(StackPhase::StartingHiddify, operation_id)
-            .await;
-        self.update(|snapshot| {
-            snapshot.hiddify = ComponentStatus::new(ComponentPhase::Starting, None);
-        });
-        self.backend.ensure_hiddify(cancel.clone()).await?;
-        check_cancelled(cancel)?;
-        self.update(|snapshot| {
-            snapshot.hiddify = ComponentStatus::new(ComponentPhase::Running, None);
-        });
+        self.start_enabled_clients(operation_id, cancel).await?;
 
         self.announce(StackPhase::PreparingRuntime, operation_id)
             .await;
@@ -1529,7 +1576,7 @@ impl<B: PlatformBackend> Engine<B> {
 
 fn apply_health(snapshot: &mut StackSnapshot, health: RuntimeHealth) {
     snapshot.helper = health.helper;
-    snapshot.hiddify = health.hiddify;
+    snapshot.clients = health.clients;
     snapshot.mihomo = health.mihomo;
     snapshot.tun = health.tun;
     snapshot.dns = health.dns;
@@ -1593,7 +1640,12 @@ mod tests {
             let tun = self.tun.load(Ordering::SeqCst);
             RuntimeHealth {
                 helper,
-                hiddify,
+                clients: vec![ClientComponentStatus {
+                    id: ClientId::parse("11111111-1111-1111-1111-111111111111").expect("uuid"),
+                    preset: PresetId::Hiddify,
+                    enabled: true,
+                    status: hiddify,
+                }],
                 mihomo: ComponentStatus::new(
                     if running {
                         ComponentPhase::Running
@@ -1756,7 +1808,10 @@ mod tests {
             .expect("paused");
 
         assert!(!backend.tun.load(Ordering::SeqCst));
-        assert_eq!(engine.snapshot().hiddify.phase, ComponentPhase::Running);
+        assert_eq!(
+            engine.snapshot().clients[0].status.phase,
+            ComponentPhase::Running
+        );
         assert_eq!(backend.cleanups.load(Ordering::SeqCst), 1);
         assert_eq!(backend.proxy_stops.load(Ordering::SeqCst), 0);
         // one clear when start completed, one during pause
@@ -1828,7 +1883,10 @@ mod tests {
         .await
         .expect("paused with error");
         assert_eq!(engine.snapshot().phase, StackPhase::Paused);
-        assert_eq!(engine.snapshot().hiddify.phase, ComponentPhase::Running);
+        assert_eq!(
+            engine.snapshot().clients[0].status.phase,
+            ComponentPhase::Running
+        );
         assert!(!backend.tun.load(Ordering::SeqCst));
         assert_eq!(backend.proxy_stops.load(Ordering::SeqCst), 0);
         assert_eq!(backend.proxy_restores.load(Ordering::SeqCst), 0);
@@ -2003,7 +2061,7 @@ mod tests {
             .expect("stopped");
 
         assert_eq!(snapshot.helper.phase, ComponentPhase::Unavailable);
-        assert_eq!(snapshot.hiddify.phase, ComponentPhase::Running);
+        assert_eq!(snapshot.clients[0].status.phase, ComponentPhase::Running);
         assert_eq!(snapshot.mihomo.phase, ComponentPhase::Stopped);
         assert_eq!(snapshot.tun.phase, ComponentPhase::Stopped);
         assert_eq!(snapshot.dns.phase, ComponentPhase::Stopped);
@@ -2050,7 +2108,7 @@ mod tests {
         let start = engine.start_stack();
         let (stages, accepted) = tokio::join!(collect, start);
         accepted.expect("start accepted");
-        assert!(stages.contains(&OperationStage::StartingHiddify));
+        assert!(stages.contains(&OperationStage::StartingClient));
         assert!(stages.contains(&OperationStage::StartingCore));
         assert!(stages.contains(&OperationStage::CheckingReadiness));
 

@@ -39,8 +39,12 @@ describe("App", () => {
       2,
     );
 
-    await userEvent.click(screen.getByRole("button", { name: "Direct rules" }));
-    expect(screen.getByRole("heading", { name: "Direct rules" })).toBeVisible();
+    await userEvent.click(
+      screen.getByRole("button", { name: "List Management" }),
+    );
+    expect(
+      screen.getByRole("heading", { name: "List Management" }),
+    ).toBeVisible();
     expect(
       screen.getByRole("button", { name: /update from cloud/i }),
     ).toBeEnabled();
@@ -70,7 +74,7 @@ describe("App", () => {
       await screen.findByRole("heading", { name: "Ready when you are" }),
     ).toBeVisible();
     expect(
-      screen.queryByRole("button", { name: "Direct rules" }),
+      screen.queryByRole("button", { name: "List Management" }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Connect" })).toBeVisible();
   });
@@ -83,7 +87,7 @@ describe("App", () => {
 
     await userEvent.click(screen.getByRole("radio", { name: "Basic" }));
     expect(
-      screen.queryByRole("button", { name: "Direct rules" }),
+      screen.queryByRole("button", { name: "List Management" }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("status")).toBeVisible();
     expect(screen.getByRole("button", { name: "Connect" })).toBeVisible();

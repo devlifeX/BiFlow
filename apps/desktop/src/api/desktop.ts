@@ -13,6 +13,7 @@ import type {
   FreshStartReport,
   InstallGuide,
   InstallResult,
+  ListCheckEntry,
   LogEntry,
   NetworkStatus,
   OperationAccepted,
@@ -101,15 +102,81 @@ export const desktop = {
   },
   pinRoute(
     input: string,
-    outbound: "direct" | "vpn",
+    outbound: string,
     expectedRevision: number,
   ): Promise<DirectRulesDocument> {
     return native
       ? invoke("pin_route", { input, outbound, expectedRevision })
       : mockApi.pinRoute(input, outbound, expectedRevision);
   },
+  discardClientPins(
+    id: string,
+    expectedRevision: number,
+  ): Promise<DirectRulesDocument> {
+    return native
+      ? invoke("discard_client_pins", { id, expectedRevision })
+      : mockApi.discardClientPins(id, expectedRevision);
+  },
+  reassignClientPins(
+    from: string,
+    to: string,
+    expectedRevision: number,
+  ): Promise<DirectRulesDocument> {
+    return native
+      ? invoke("reassign_client_pins", { from, to, expectedRevision })
+      : mockApi.reassignClientPins(from, to, expectedRevision);
+  },
   refreshRules(): Promise<DirectRulesDocument> {
     return native ? invoke("refresh_direct_rules") : mockApi.refreshRules();
+  },
+  createRuleList(
+    name: string,
+    outbound: string,
+    expectedRevision: number,
+  ): Promise<DirectRulesDocument> {
+    return native
+      ? invoke("create_rule_list", { name, outbound, expectedRevision })
+      : mockApi.createRuleList(name, outbound, expectedRevision);
+  },
+  renameRuleList(
+    listId: string,
+    name: string,
+    expectedRevision: number,
+  ): Promise<DirectRulesDocument> {
+    return native
+      ? invoke("rename_rule_list", { listId, name, expectedRevision })
+      : mockApi.renameRuleList(listId, name, expectedRevision);
+  },
+  deleteRuleList(
+    listId: string,
+    expectedRevision: number,
+  ): Promise<DirectRulesDocument> {
+    return native
+      ? invoke("delete_rule_list", { listId, expectedRevision })
+      : mockApi.deleteRuleList(listId, expectedRevision);
+  },
+  setRuleListOutbound(
+    listId: string,
+    outbound: string,
+    expectedRevision: number,
+  ): Promise<DirectRulesDocument> {
+    return native
+      ? invoke("set_rule_list_outbound", { listId, outbound, expectedRevision })
+      : mockApi.setRuleListOutbound(listId, outbound, expectedRevision);
+  },
+  pinToRuleList(
+    input: string,
+    listId: string,
+    expectedRevision: number,
+  ): Promise<DirectRulesDocument> {
+    return native
+      ? invoke("pin_to_rule_list", { input, listId, expectedRevision })
+      : mockApi.pinToRuleList(input, listId, expectedRevision);
+  },
+  checkRuleList(listId: string): Promise<ListCheckEntry[]> {
+    return native
+      ? invoke("check_rule_list", { listId })
+      : mockApi.checkRuleList(listId);
   },
   getCloudRules(): Promise<CloudRulesStatus> {
     return native ? invoke("get_cloud_rules_status") : mockApi.getCloudRules();

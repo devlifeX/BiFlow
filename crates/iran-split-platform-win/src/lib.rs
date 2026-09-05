@@ -8,20 +8,26 @@
 //! sequence so both platforms fail in the same places for the same reasons.
 
 use async_trait::async_trait;
-use iran_split_config::{AppConfig, ExecutableSetting};
+use iran_split_clients::{
+    local_proxy_endpoint, synthesized_local_handle, ClientDriver, EgressHandle, OpenVpnDriver,
+};
+use iran_split_config::{
+    AppConfig, ClientConfig, ClientInstance, EgressKind, ExecutableSetting, PresetId,
+};
 use iran_split_core::{
-    CleanupReport, ComponentPhase, ComponentStatus, CoreError, HelperStatus, PlatformBackend,
-    ProcessStatus, ProviderSummary, ReadinessReport, RuntimeGeneration, RuntimeHealth, TunStatus,
+    CleanupReport, ClientComponentStatus, ComponentPhase, ComponentStatus, CoreError, HelperStatus,
+    PlatformBackend, ProcessStatus, ProviderSummary, ReadinessReport, RuntimeGeneration,
+    RuntimeHealth, TunStatus,
 };
 use iran_split_ipc::{
     read_frame, validate_envelope, write_frame, Envelope, HelperCommand, HelperReply,
     PROTOCOL_VERSION,
 };
 use iran_split_mihomo::{
-    generate_config, probe_hiddify_egress, validate_with_binary, ControllerClient, MihomoError,
-    Platform, RuntimePaths,
+    generate_config_with_handles, probe_hiddify_egress, validate_with_binary, ControllerClient,
+    MihomoError, Platform, RuntimePaths,
 };
-use iran_split_rules::{DirectRulesDocument, DirectTarget};
+use iran_split_rules::{DirectTarget, Outbound, RoutePinsDocument};
 use std::{
     fs,
     io::{self, Write},
@@ -255,7 +261,9 @@ pub struct WindowsBackend {
     paths: WindowsPaths,
     prepared: Mutex<Option<PreparedGeneration>>,
     launched_hiddify: Mutex<Option<Child>>,
-    hiddify_exit_ip: Mutex<Option<String>>,
+    egress_exit_ip: Mutex<Option<String>>,
+    egress_handles: Mutex<Vec<EgressHandle>>,
+    side_tunnel_auth_files: Mutex<Vec<NamedTempFile>>,
 }
 
 impl WindowsBackend {
@@ -267,7 +275,9 @@ impl WindowsBackend {
             paths,
             prepared: Mutex::new(None),
             launched_hiddify: Mutex::new(None),
-            hiddify_exit_ip: Mutex::new(None),
+            egress_exit_ip: Mutex::new(None),
+            egress_handles: Mutex::new(Vec::new()),
+            side_tunnel_auth_files: Mutex::new(Vec::new()),
         }
     }
 
@@ -304,8 +314,108 @@ impl WindowsBackend {
             .map_err(|error| CoreError::Platform(error.to_string()))
     }
 
+    async fn start_openvpn_client(
+        &self,
+        client: &ClientInstance,
+        cancel: CancellationToken,
+    ) -> Result<EgressHandle, CoreError> {
+        let mut handle = OpenVpnDriver
+            .ensure(client, cancel)
+            .await
+            .map_err(|error| CoreError::ConfigInvalid(error.to_string()))?;
+        let ClientConfig::OwnedSideTunnel {
+            profile_path,
+            executable,
+            username,
+            password,
+            start_timeout_seconds,
+        } = &client.config
+        else {
+            return Err(CoreError::ConfigInvalid(
+                "openvpn instance is not a side tunnel".into(),
+            ));
+        };
+        let profile = profile_path
+            .clone()
+            .ok_or_else(|| CoreError::ConfigInvalid("openvpn profile path is missing".into()))?;
+        let executable = match executable {
+            ExecutableSetting::Auto => None,
+            ExecutableSetting::Path(path) => Some(path.clone()),
+        };
+        let auth_file = write_side_tunnel_auth(username.as_deref(), password.as_deref())?;
+        let result = self
+            .helper_request(HelperCommand::StartSideTunnel {
+                driver: "openvpn".into(),
+                client_id: client.id.into(),
+                profile,
+                executable,
+                auth_file: auth_file.as_ref().map(|file| file.path().to_path_buf()),
+                timeout_seconds: *start_timeout_seconds,
+            })
+            .await?;
+        // OpenVPN re-reads the auth file on soft restarts, so it must outlive
+        // the start call; it is dropped (deleted) on cleanup.
+        if let Some(file) = auth_file {
+            self.side_tunnel_auth_files.lock().await.push(file);
+        }
+        match result {
+            HelperReply::SideTunnel(status) if status.running => {
+                if let Some(outbound) = handle.outbound.as_mut() {
+                    outbound.interface_name = status.device;
+                    outbound.routing_mark = status.routing_mark;
+                }
+                handle.ready = true;
+                Ok(handle)
+            }
+            HelperReply::SideTunnel(_) => {
+                Err(CoreError::Platform("side tunnel did not start".into()))
+            }
+            _ => Err(CoreError::Platform("unexpected side tunnel reply".into())),
+        }
+    }
+
+    async fn ensure_enabled_clients(&self, cancel: CancellationToken) -> Result<(), CoreError> {
+        let config = self.config.read().await.clone();
+        *self.egress_exit_ip.lock().await = None;
+        let mut handles = Vec::new();
+        for client in config.enabled_clients() {
+            let required = config.default_route.client_id() == Some(client.id);
+            let started = if client.preset == PresetId::Hiddify {
+                self.start_hiddify_client(client, required, &cancel).await
+            } else {
+                match client.spec().kind {
+                    EgressKind::LocalProxy => self.start_local_proxy_client(client, required).await,
+                    EgressKind::OwnedSideTunnel => {
+                        self.start_openvpn_client(client, cancel.clone()).await
+                    }
+                    EgressKind::Unsupported => Err(CoreError::ConfigInvalid(
+                        "this catalog entry cannot be started".into(),
+                    )),
+                }
+            };
+            match started {
+                Ok(handle) => handles.push(handle),
+                Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
+                Err(error) if !required => {
+                    warn!(
+                        event = "client.ensure_failed",
+                        section = "clients",
+                        initiator = "ensure_clients",
+                        cause = %error,
+                        trace_route = "engine_operation->windows_platform_backend->ensure_clients",
+                        "optional client failed; connect continues"
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        *self.egress_handles.lock().await = handles;
+        Ok(())
+    }
+
     async fn hiddify_listening(config: &AppConfig) -> bool {
-        Self::tcp_listening(&config.hiddify.host, config.hiddify.port).await
+        let (host, port) = config.hiddify_endpoint();
+        Self::tcp_listening(&host, port).await
     }
 
     async fn tcp_listening(host: &str, port: u16) -> bool {
@@ -316,7 +426,7 @@ impl WindowsBackend {
 
     #[must_use]
     pub fn discover_hiddify(config: &AppConfig, data: &Path) -> Option<PathBuf> {
-        if let ExecutableSetting::Path(path) = &config.hiddify.executable {
+        if let ExecutableSetting::Path(path) = &config.hiddify_executable() {
             return path.is_file().then(|| path.clone());
         }
         Self::hiddify_candidates(data)
@@ -381,7 +491,8 @@ impl WindowsBackend {
                 ComponentPhase::Running,
                 Some(format!(
                     "Listening on {}:{}",
-                    config.hiddify.host, config.hiddify.port
+                    config.hiddify_endpoint().0,
+                    config.hiddify_endpoint().1
                 )),
             )
         } else if let Some(path) = executable {
@@ -550,24 +661,132 @@ impl WindowsBackend {
             .ok_or_else(|| CoreError::ConfigInvalid("runtime has not been prepared".into()))
     }
 
+    async fn launch_hiddify_if_needed(
+        &self,
+        config: &AppConfig,
+        cancel: &CancellationToken,
+    ) -> Result<(), CoreError> {
+        if Self::hiddify_listening(config).await {
+            return Ok(());
+        }
+        let executable = Self::discover_hiddify(config, &self.paths.user_data_dir)
+            .ok_or(CoreError::HiddifyNotFound)?;
+        let child = Command::new(executable)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(false)
+            .spawn()
+            .map_err(|error| CoreError::Platform(error.to_string()))?;
+        *self.launched_hiddify.lock().await = Some(child);
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(config.hiddify_start_timeout());
+        loop {
+            if Self::hiddify_listening(config).await {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(CoreError::HiddifyEgressUnavailable);
+            }
+            tokio::select! {
+                () = cancel.cancelled() => return Err(CoreError::Cancelled),
+                () = tokio::time::sleep(Duration::from_millis(250)) => {}
+            }
+        }
+    }
+
+    async fn client_component(
+        client: &ClientInstance,
+        handles: &[EgressHandle],
+    ) -> ComponentStatus {
+        if !client.enabled {
+            return ComponentStatus::new(ComponentPhase::Unavailable, None);
+        }
+        match client.spec().kind {
+            EgressKind::LocalProxy => match local_proxy_endpoint(client) {
+                Some((host, port)) if Self::tcp_listening(&host, port).await => {
+                    ComponentStatus::new(
+                        ComponentPhase::Running,
+                        Some(format!("Listening on {host}:{port}")),
+                    )
+                }
+                _ => ComponentStatus::new(
+                    ComponentPhase::Stopped,
+                    Some("local proxy is not listening".into()),
+                ),
+            },
+            EgressKind::OwnedSideTunnel => {
+                if handles
+                    .iter()
+                    .any(|handle| handle.client_id == client.id && handle.ready)
+                {
+                    ComponentStatus::new(ComponentPhase::Running, None)
+                } else {
+                    ComponentStatus::new(ComponentPhase::Stopped, None)
+                }
+            }
+            EgressKind::Unsupported => ComponentStatus::new(ComponentPhase::Unavailable, None),
+        }
+    }
+
+    async fn start_hiddify_client(
+        &self,
+        client: &ClientInstance,
+        required: bool,
+        cancel: &CancellationToken,
+    ) -> Result<EgressHandle, CoreError> {
+        let config = self.config.read().await.clone();
+        self.launch_hiddify_if_needed(&config, cancel).await?;
+        let exit_ip = self
+            .probe_hiddify_until_ready(&config, cancel.clone())
+            .await?;
+        if required {
+            *self.egress_exit_ip.lock().await = Some(exit_ip);
+        }
+        synthesized_local_handle(client)
+            .ok_or_else(|| CoreError::ConfigInvalid("hiddify handle is missing".into()))
+    }
+
+    async fn start_local_proxy_client(
+        &self,
+        client: &ClientInstance,
+        required: bool,
+    ) -> Result<EgressHandle, CoreError> {
+        let Some((host, port)) = local_proxy_endpoint(client) else {
+            return Err(CoreError::ConfigInvalid(
+                "local proxy handle is missing".into(),
+            ));
+        };
+        // ADR 0018: every local-proxy egress is verified before the TUN starts,
+        // so pinned or MATCH traffic cannot blackhole into a dead proxy.
+        let exit_ip = probe_hiddify_egress(&host, port, Duration::from_secs(3))
+            .await
+            .map_err(|error| {
+                CoreError::Platform(format!(
+                    "{} egress probe failed on {host}:{port}: {error}",
+                    client.spec().id
+                ))
+            })?;
+        if required {
+            *self.egress_exit_ip.lock().await = Some(exit_ip);
+        }
+        synthesized_local_handle(client)
+            .ok_or_else(|| CoreError::ConfigInvalid("local proxy handle is missing".into()))
+    }
+
     async fn probe_hiddify_until_ready(
         &self,
         config: &AppConfig,
         cancel: CancellationToken,
-    ) -> Result<(), CoreError> {
+    ) -> Result<String, CoreError> {
         let deadline = tokio::time::Instant::now() + EGRESS_PROBE_BUDGET;
         let mut last_cause;
         loop {
             if cancel.is_cancelled() {
                 return Err(CoreError::Cancelled);
             }
-            match probe_hiddify_egress(
-                &config.hiddify.host,
-                config.hiddify.port,
-                Duration::from_secs(2),
-            )
-            .await
-            {
+            let (host, port) = config.hiddify_endpoint();
+            match probe_hiddify_egress(&host, port, Duration::from_secs(2)).await {
                 Ok(exit_ip) => {
                     info!(
                         event = "hiddify.egress_ready",
@@ -577,8 +796,7 @@ impl WindowsBackend {
                         trace_route = "desktop_engine->windows_platform_backend->hiddify_egress",
                         "Hiddify SOCKS egress is reachable"
                     );
-                    *self.hiddify_exit_ip.lock().await = Some(exit_ip);
-                    return Ok(());
+                    return Ok(exit_ip);
                 }
                 Err(error) => {
                     last_cause = error.to_string();
@@ -641,9 +859,25 @@ impl PlatformBackend for WindowsBackend {
         );
         let dns = Self::dns_component(config.mihomo.dns_port, dns_listening);
 
+        let handles = self.egress_handles.lock().await.clone();
+        let mut clients = Vec::new();
+        for client in &config.clients {
+            let status = if client.preset == PresetId::Hiddify {
+                hiddify.clone()
+            } else {
+                Self::client_component(client, &handles).await
+            };
+            clients.push(ClientComponentStatus {
+                id: client.id,
+                preset: client.preset,
+                enabled: client.enabled,
+                status,
+            });
+        }
+
         RuntimeHealth {
             helper,
-            hiddify,
+            clients,
             mihomo,
             tun,
             dns,
@@ -669,33 +903,14 @@ impl PlatformBackend for WindowsBackend {
 
     async fn ensure_hiddify(&self, cancel: CancellationToken) -> Result<(), CoreError> {
         let config = self.config.read().await.clone();
-        if !Self::hiddify_listening(&config).await {
-            let executable = Self::discover_hiddify(&config, &self.paths.user_data_dir)
-                .ok_or(CoreError::HiddifyNotFound)?;
-            let child = Command::new(executable)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .kill_on_drop(false)
-                .spawn()
-                .map_err(|error| CoreError::Platform(error.to_string()))?;
-            *self.launched_hiddify.lock().await = Some(child);
-            let deadline = tokio::time::Instant::now()
-                + Duration::from_secs(config.hiddify.start_timeout_seconds);
-            loop {
-                if Self::hiddify_listening(&config).await {
-                    break;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(CoreError::HiddifyEgressUnavailable);
-                }
-                tokio::select! {
-                    () = cancel.cancelled() => return Err(CoreError::Cancelled),
-                    () = tokio::time::sleep(Duration::from_millis(250)) => {}
-                }
-            }
-        }
-        self.probe_hiddify_until_ready(&config, cancel).await
+        self.launch_hiddify_if_needed(&config, &cancel).await?;
+        let exit_ip = self.probe_hiddify_until_ready(&config, cancel).await?;
+        *self.egress_exit_ip.lock().await = Some(exit_ip);
+        Ok(())
+    }
+
+    async fn ensure_clients(&self, cancel: CancellationToken) -> Result<(), CoreError> {
+        self.ensure_enabled_clients(cancel).await
     }
 
     async fn prepare_runtime(&self) -> Result<RuntimeGeneration, CoreError> {
@@ -713,18 +928,23 @@ impl PlatformBackend for WindowsBackend {
             iran_networks: PathBuf::from("iran-networks.txt"),
             custom_direct_domains: PathBuf::from("custom-direct-domains.txt"),
             custom_direct_ips: PathBuf::from("custom-direct-ips.txt"),
-            custom_vpn_domains: PathBuf::from("custom-vpn-domains.txt"),
-            custom_vpn_ips: PathBuf::from("custom-vpn-ips.txt"),
         };
         let rules_path = self.paths.user_data_dir.join("direct-rules.json");
-        let custom: DirectRulesDocument = if rules_path.exists() {
+        let custom: RoutePinsDocument = if rules_path.exists() {
             serde_json::from_slice(&fs::read(rules_path).map_err(|error| platform_error(&error))?)
                 .map_err(|error| CoreError::ConfigInvalid(error.to_string()))?
         } else {
-            DirectRulesDocument::default()
+            RoutePinsDocument::default()
         };
-        let generated = generate_config(&config, Platform::Windows, &runtime_paths, &custom)
-            .map_err(|error| CoreError::ConfigInvalid(error.to_string()))?;
+        let handles = self.egress_handles.lock().await.clone();
+        let generated = generate_config_with_handles(
+            &config,
+            Platform::Windows,
+            &runtime_paths,
+            &custom,
+            &handles,
+        )
+        .map_err(|error| CoreError::ConfigInvalid(error.to_string()))?;
         for name in [
             "private.txt",
             "iran-domains.txt",
@@ -738,7 +958,7 @@ impl PlatformBackend for WindowsBackend {
                 name,
             )?;
         }
-        write_custom_provider_files(&staging_root, &custom)?;
+        write_custom_provider_files(&staging_root, &custom, &config)?;
         write_atomic(&staging_root.join("config.yaml"), generated.yaml.as_bytes())?;
         let generation = RuntimeGeneration {
             generation_id,
@@ -814,7 +1034,7 @@ impl PlatformBackend for WindowsBackend {
 
     async fn stop_user_proxy(&self) -> Result<(), CoreError> {
         let config = self.config.read().await.clone();
-        if !config.hiddify.stop_with_stack {
+        if !config.hiddify_stop_with_stack() {
             return Ok(());
         }
         if let Some(mut child) = self.launched_hiddify.lock().await.take() {
@@ -868,7 +1088,8 @@ impl PlatformBackend for WindowsBackend {
     async fn clear_hiddify_system_proxy(&self) -> Result<bool, CoreError> {
         let config = self.config.read().await.clone();
         let persist = system_proxy::snapshot_path(&self.paths.user_data_dir);
-        system_proxy::clear_if_hiddify(&config.hiddify.host, config.hiddify.port, &persist)
+        let (host, port) = config.hiddify_endpoint();
+        system_proxy::clear_if_hiddify(&host, port, &persist)
             .await
             .map(|cleared| cleared.is_some())
     }
@@ -909,7 +1130,7 @@ impl PlatformBackend for WindowsBackend {
         let controller = ControllerClient::new(
             &config.mihomo.controller_host,
             config.mihomo.controller_port,
-            config.mihomo.controller_secret,
+            config.mihomo.controller_secret.clone(),
         )
         .map_err(|error| CoreError::ConfigInvalid(error.to_string()))?;
         info!(
@@ -953,15 +1174,23 @@ impl PlatformBackend for WindowsBackend {
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
-        let exit_ip = self.hiddify_exit_ip.lock().await.clone();
-        if exit_ip.is_none() {
+        let exit_ip = self.egress_exit_ip.lock().await.clone();
+        // The pre-TUN egress probe is only mandatory when unmatched traffic
+        // goes to a local proxy; a Direct or side-tunnel default has no
+        // loopback egress to confirm.
+        let default_is_local_proxy = config.default_route.client_id().is_some_and(|client_id| {
+            config.enabled_clients().into_iter().any(|client| {
+                client.id == client_id && client.spec().kind == EgressKind::LocalProxy
+            })
+        });
+        if default_is_local_proxy && exit_ip.is_none() {
             error!(
                 event = "hiddify.egress_missing_after_tun",
                 section = "runtime_health",
                 initiator = "windows_platform_backend",
                 cause = "pre_tun_probe_missing",
                 trace_route = "desktop_engine->windows_platform_backend->hiddify_egress",
-                "Hiddify egress was not confirmed before TUN start"
+                "default local-proxy egress was not confirmed before TUN start"
             );
             return Err(CoreError::HiddifyEgressUnavailable);
         }
@@ -979,6 +1208,9 @@ impl PlatformBackend for WindowsBackend {
     }
 
     async fn cleanup_owned_state(&self) -> Result<CleanupReport, CoreError> {
+        self.egress_handles.lock().await.clear();
+        *self.egress_exit_ip.lock().await = None;
+        self.side_tunnel_auth_files.lock().await.clear();
         match self
             .helper_request(HelperCommand::CleanupOwnedNetworkState)
             .await?
@@ -1033,6 +1265,26 @@ fn platform_error(error: &io::Error) -> CoreError {
     CoreError::Platform(error.to_string())
 }
 
+/// Writes `username\npassword` to a private temp file for `--auth-user-pass`.
+/// Returns `None` when the instance has no credentials.
+fn write_side_tunnel_auth(
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Result<Option<NamedTempFile>, CoreError> {
+    let (Some(username), Some(password)) = (username, password) else {
+        return Ok(None);
+    };
+    if username.is_empty() {
+        return Ok(None);
+    }
+    let mut file = NamedTempFile::new().map_err(|error| platform_error(&error))?;
+    writeln!(file, "{username}")
+        .and_then(|()| writeln!(file, "{password}"))
+        .and_then(|()| file.flush())
+        .map_err(|error| platform_error(&error))?;
+    Ok(Some(file))
+}
+
 fn readiness_error(error: MihomoError) -> CoreError {
     match error {
         MihomoError::Cancelled => CoreError::Cancelled,
@@ -1060,25 +1312,26 @@ fn copy_rule_file(
 
 fn write_custom_provider_files(
     staging: &Path,
-    document: &DirectRulesDocument,
+    document: &RoutePinsDocument,
+    config: &AppConfig,
 ) -> Result<(), CoreError> {
-    let (domains, ips) = split_targets(&document.rules);
+    let (domains, ips) = split_pins(document, Outbound::Direct);
     write_lines(&staging.join("custom-direct-domains.txt"), &domains)?;
     write_lines(&staging.join("custom-direct-ips.txt"), &ips)?;
-    // The VPN providers are always written, empty included: Mihomo fails to
-    // load a rule-set whose file is missing, and an empty one is treated as
-    // ready by OPTIONAL_RULE_PROVIDERS.
-    let (vpn_domains, vpn_ips) = split_targets(&document.vpn_rules);
-    write_lines(&staging.join("custom-vpn-domains.txt"), &vpn_domains)?;
-    write_lines(&staging.join("custom-vpn-ips.txt"), &vpn_ips)?;
+    for client in config.enabled_clients() {
+        let (client_domains, client_ips) = split_pins(document, Outbound::client(client.id));
+        let [domains_file, ips_file] = client.provider_files();
+        write_lines(&staging.join(domains_file), &client_domains)?;
+        write_lines(&staging.join(ips_file), &client_ips)?;
+    }
     Ok(())
 }
 
-fn split_targets(rules: &[iran_split_rules::DirectRule]) -> (Vec<String>, Vec<String>) {
+fn split_pins(document: &RoutePinsDocument, outbound: Outbound) -> (Vec<String>, Vec<String>) {
     let mut domains = Vec::new();
     let mut ips = Vec::new();
-    for rule in rules {
-        match &rule.target {
+    for pin in document.pins.iter().filter(|pin| pin.outbound == outbound) {
+        match &pin.target {
             DirectTarget::Domain(domain) => domains.push(format!("+.{domain}")),
             DirectTarget::Ip(address) => ips.push(host_cidr(*address)),
         }
@@ -1245,10 +1498,20 @@ mod tests {
             .map(|entry| entry.expect("entry").file_name())
             .collect::<std::collections::HashSet<_>>();
 
-        // config.yaml, four bundled providers, two custom-direct, two custom-vpn.
+        // config.yaml, four bundled providers, two custom-direct, two per-client.
         assert_eq!(names.len(), 9);
-        assert!(names.contains(std::ffi::OsStr::new("custom-vpn-domains.txt")));
-        assert!(names.contains(std::ffi::OsStr::new("custom-vpn-ips.txt")));
+        assert!(names.iter().any(|name| {
+            let name = name.to_string_lossy();
+            name.starts_with("custom-")
+                && name.ends_with("-domains.txt")
+                && name != "custom-direct-domains.txt"
+        }));
+        assert!(names.iter().any(|name| {
+            let name = name.to_string_lossy();
+            name.starts_with("custom-")
+                && name.ends_with("-ips.txt")
+                && name != "custom-direct-ips.txt"
+        }));
         assert!(names.contains(std::ffi::OsStr::new("config.yaml")));
         let config = fs::read_to_string(root.join("config.yaml")).expect("config");
         assert!(config.contains("path: private.txt"));

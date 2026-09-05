@@ -266,8 +266,6 @@ describe("Tauri frontend contract", () => {
       "iran-business-domains.txt",
       "custom-direct-domains.txt",
       "custom-direct-ips.txt",
-      "custom-vpn-domains.txt",
-      "custom-vpn-ips.txt",
       "config.yaml",
     ];
     for (const name of providers) {
@@ -277,10 +275,24 @@ describe("Tauri frontend contract", () => {
         `${name} missing from the Windows backend`,
       );
     }
+    assert.ok(
+      linux.includes("provider_files"),
+      "Linux backend must emit per-client provider files",
+    );
+    assert.ok(
+      windows.includes("provider_files"),
+      "Windows backend must emit per-client provider files",
+    );
     // Each backend must pin its own Platform value or the generated config
     // silently loses the Windows-only strict-route flag.
-    assert.match(linux, /generate_config\(&config, Platform::Linux,/);
-    assert.match(windows, /generate_config\(&config, Platform::Windows,/);
+    assert.match(
+      linux,
+      /generate_config_with_handles\(\s*&config,\s*Platform::Linux,/,
+    );
+    assert.match(
+      windows,
+      /generate_config_with_handles\(\s*&config,\s*Platform::Windows,/,
+    );
     // A readiness timeout used to be CoreError::Platform, which the UI maps
     // to "An internal error occurred." Keep both backends on the typed error.
     assert.match(linux, /fn readiness_error/);

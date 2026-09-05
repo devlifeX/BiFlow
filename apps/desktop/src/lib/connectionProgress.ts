@@ -17,7 +17,7 @@ const STAGE_META: Record<
   { percent: number; labelKey: string }
 > = {
   preparing: { percent: 10, labelKey: "stages.preparing" },
-  starting_hiddify: { percent: 25, labelKey: "stages.startHiddify" },
+  starting_client: { percent: 25, labelKey: "stages.startClient" },
   preparing_runtime: { percent: 40, labelKey: "stages.prepareRuntime" },
   validating_config: { percent: 55, labelKey: "stages.validateConfig" },
   starting_core: { percent: 70, labelKey: "stages.startMihomo" },
@@ -74,8 +74,8 @@ function derivedStage(
   const busy = snapshot.busy ?? null;
   if (busy === "connecting" || busy === "resuming") {
     switch (snapshot.phase) {
-      case "starting_hiddify":
-        return STAGE_META.starting_hiddify;
+      case "starting_client":
+        return STAGE_META.starting_client;
       case "preparing_runtime":
         return STAGE_META.preparing_runtime;
       case "validating_config":
@@ -99,7 +99,7 @@ function derivedStage(
     if (snapshot.mihomo.phase !== "stopped") {
       return STAGE_META.stopping_core;
     }
-    if (snapshot.hiddify.phase !== "stopped") {
+    if (snapshot.clients.some((client) => client.status.phase !== "stopped")) {
       return STAGE_META.stopping_proxy;
     }
     return STAGE_META.cleaning_up;

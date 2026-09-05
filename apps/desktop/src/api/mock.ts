@@ -7,8 +7,10 @@ import type {
   DiagnosticStep,
   DiagnosticsReport,
   DebugLogStatus,
-  DirectRule,
   DirectRulesDocument,
+  ListCheckEntry,
+  Outbound,
+  PinnedRoute,
   ExportResult,
   FreshStartReport,
   InstallGuide,
@@ -29,6 +31,8 @@ import type {
   ValidationIssue,
 } from "./models";
 import { validateDirectDns } from "../lib/directDns";
+import { sanitizeDefaultRoute } from "../lib/clients";
+import { MOCK_HIDDIFY_ID, outboundFromKey } from "../lib/outbound";
 
 const now = () => new Date().toISOString();
 const component = (
@@ -61,7 +65,14 @@ function initialSnapshot(): StackSnapshot {
           message: "Mock helper is ready",
           since: now(),
         },
-    hiddify: component("stopped", "Hiddify proxy is not listening"),
+    clients: [
+      {
+        id: MOCK_HIDDIFY_ID,
+        preset: "hiddify",
+        enabled: true,
+        status: component("stopped", "Hiddify proxy is not listening"),
+      },
+    ],
     mihomo: component("stopped", "Mihomo controller is not listening"),
     tun: component("stopped", "TUN interface is absent"),
     dns: component("stopped", "DNS listener is inactive"),
@@ -75,15 +86,24 @@ function initialSnapshot(): StackSnapshot {
 
 function initialSettings(): AppConfig {
   return {
-    schema_version: 1,
+    schema_version: 3,
     revision: 0,
-    hiddify: {
-      host: "127.0.0.1",
-      port: 12334,
-      executable: "auto",
-      start_timeout_seconds: 45,
-      stop_with_stack: true,
-    },
+    clients: [
+      {
+        id: MOCK_HIDDIFY_ID,
+        preset: "hiddify",
+        enabled: true,
+        config: {
+          kind: "local_proxy",
+          host: "127.0.0.1",
+          port: 12334,
+          executable: "auto",
+          start_timeout_seconds: 45,
+          stop_with_stack: true,
+        },
+      },
+    ],
+    default_route: { kind: "client", client_id: MOCK_HIDDIFY_ID },
     mihomo: {
       controller_host: "127.0.0.1",
       controller_port: 19090,
@@ -104,19 +124,55 @@ function initialSettings(): AppConfig {
   };
 }
 
+const MOCK_DIRECT_LIST_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
 function initialDirectRules(): DirectRulesDocument {
   return {
     revision: 1,
-    rules: [
+    pins: [
       {
         target: { kind: "domain", value: "example.ir" },
+        outbound: { kind: "direct" },
+        list_id: MOCK_DIRECT_LIST_ID,
         resolved_ips: ["203.0.113.8"],
         created_at: now(),
         refreshed_at: now(),
       },
     ],
-    vpn_rules: [],
+    lists: [
+      {
+        id: MOCK_DIRECT_LIST_ID,
+        name: "Direct",
+        outbound: { kind: "direct" },
+      },
+    ],
   };
+}
+
+function mockUuid(): string {
+  return "xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx".replaceAll(/x/g, () =>
+    Math.floor(Math.random() * 16).toString(16),
+  );
+}
+
+function ensureListFor(outbound: Outbound): string {
+  const existing = directRules.lists.find(
+    (list) => JSON.stringify(list.outbound) === JSON.stringify(outbound),
+  );
+  if (existing) return existing.id;
+  const id = mockUuid();
+  directRules = {
+    ...directRules,
+    lists: [
+      ...directRules.lists,
+      {
+        id,
+        name: outbound.kind === "direct" ? "Direct" : "Client pins",
+        outbound,
+      },
+    ],
+  };
+  return id;
 }
 
 function initialCloudRules(): CloudRulesStatus {
@@ -303,16 +359,31 @@ function domainMatchesPin(host: string, pin: string): boolean {
   return host === pin || host.endsWith(`.${pin}`);
 }
 
-function ruleMatchesHost(item: DirectRule, host: string): boolean {
+function pinMatchesHost(item: PinnedRoute, host: string): boolean {
   if (item.target.kind === "ip") {
     return item.target.value === host;
   }
   return domainMatchesPin(host, item.target.value);
 }
 
+function enabledClientIds(): Set<string> {
+  return new Set(
+    settings.clients
+      .filter((client) => client.enabled)
+      .map((client) => client.id),
+  );
+}
+
+function matchOutbound(): Outbound {
+  const route = settings.default_route;
+  if (route.kind === "direct") return { kind: "direct" };
+  if (enabledClientIds().has(route.client_id)) return route;
+  return { kind: "direct" };
+}
+
 function route(
   target: string,
-  outbound: "direct" | "vpn",
+  outbound: Outbound,
   reason: string,
   matched: string,
 ): RouteTestResult {
@@ -465,6 +536,10 @@ function emit(
     phase,
     busy,
     operation_stage: operationStage,
+    operation_client:
+      operationStage === "starting_client"
+        ? { preset: "hiddify", client_id: MOCK_HIDDIFY_ID }
+        : null,
     operation_id: operationId,
     updated_at: now(),
   };
@@ -488,7 +563,7 @@ function operation(): OperationAccepted {
 
 async function runStart(accepted: OperationAccepted) {
   const phases: Array<[StackPhase, OperationStage]> = [
-    ["starting_hiddify", "starting_hiddify"],
+    ["starting_client", "starting_client"],
     ["preparing_runtime", "preparing_runtime"],
     ["validating_config", "validating_config"],
     ["starting_core", "starting_core"],
@@ -500,7 +575,10 @@ async function runStart(accepted: OperationAccepted) {
   }
   snapshot = {
     ...snapshot,
-    hiddify: component("running", "Hiddify proxy is listening"),
+    clients: snapshot.clients.map((client) => ({
+      ...client,
+      status: component("running", `${client.preset} is ready`),
+    })),
     mihomo: component("running", "Mihomo controller is ready"),
     tun: component("running", "TUN interface is active"),
     dns: component("running", "DNS listener is active"),
@@ -575,7 +653,7 @@ export const mockApi = {
       {
         host: "openai.com",
         destination_ip: "104.18.1.1",
-        outbound: "vpn",
+        outbound: MOCK_HIDDIFY_ID,
         rule: "MATCH",
       },
     ];
@@ -617,7 +695,10 @@ export const mockApi = {
     window.setTimeout(() => {
       snapshot = {
         ...snapshot,
-        hiddify: component("stopped", "Hiddify proxy is not listening"),
+        clients: snapshot.clients.map((client) => ({
+          ...client,
+          status: component("stopped", `${client.preset} is stopped`),
+        })),
         mihomo: component("stopped", "Mihomo controller is not listening"),
         tun: component("stopped", "TUN interface is absent"),
         dns: component("stopped", "DNS listener is inactive"),
@@ -648,7 +729,10 @@ export const mockApi = {
     window.setTimeout(() => {
       snapshot = {
         ...snapshot,
-        hiddify: component("running", "Hiddify proxy is listening"),
+        clients: snapshot.clients.map((client) => ({
+          ...client,
+          status: component("running", `${client.preset} is ready`),
+        })),
         mihomo: component("stopped", "Mihomo controller is not listening"),
         tun: component("stopped", "TUN interface is absent"),
         dns: component("stopped", "DNS listener is inactive"),
@@ -689,7 +773,9 @@ export const mockApi = {
   },
   async validateSettings(draft: AppConfig): Promise<ValidationIssue[]> {
     const ports = [
-      draft.hiddify.port,
+      ...draft.clients.flatMap((client) =>
+        client.config.kind === "local_proxy" ? [client.config.port] : [],
+      ),
       draft.mihomo.controller_port,
       draft.mihomo.mixed_port,
       draft.mihomo.dns_port,
@@ -702,20 +788,31 @@ export const mockApi = {
         message: "Ports must be unique",
       });
     }
-    if (draft.hiddify.host !== "127.0.0.1") {
-      issues.push({
-        field: "hiddify.host",
-        code: "LOOPBACK_REQUIRED",
-        message: "Hiddify must listen on loopback",
-      });
-    }
     issues.push(...validateDirectDns(draft.mihomo));
     return issues;
   },
   async saveSettings(draft: AppConfig, expectedRevision: number) {
     if (expectedRevision !== settings.revision)
       throw new Error("Settings changed in another window");
-    settings = { ...structuredClone(draft), revision: settings.revision + 1 };
+    const next = sanitizeDefaultRoute(structuredClone(draft));
+    settings = { ...next, revision: settings.revision + 1 };
+    snapshot = {
+      ...snapshot,
+      revision: snapshot.revision + 1,
+      clients: settings.clients.map((client) => {
+        const existing = snapshot.clients.find((item) => item.id === client.id);
+        return {
+          id: client.id,
+          preset: client.preset,
+          enabled: client.enabled,
+          status:
+            existing?.status ??
+            component("stopped", `${client.preset} is stopped`),
+        };
+      }),
+      updated_at: now(),
+    };
+    for (const listener of listeners) listener(structuredClone(snapshot));
     return structuredClone(settings);
   },
   async listRules() {
@@ -724,35 +821,71 @@ export const mockApi = {
   async addRule(input: string, expectedRevision: number) {
     return mockApi.pinRoute(input, "direct", expectedRevision);
   },
-  async pinRoute(
-    input: string,
-    outbound: "direct" | "vpn",
-    expectedRevision: number,
-  ) {
+  async pinRoute(input: string, outbound: string, expectedRevision: number) {
     if (expectedRevision !== directRules.revision)
       throw new Error("Rules changed in another window");
     const parsed = canonicalTarget(input);
-    if (outbound === "vpn" && isPrivateHost(parsed.value)) {
+    const route = outboundFromKey(outbound);
+    if (route.kind === "client" && isPrivateHost(parsed.value)) {
       throw new Error(
-        "private, loopback, and carrier-grade NAT addresses cannot be sent through the VPN",
+        "private, loopback, and carrier-grade NAT addresses cannot be sent through a local proxy",
       );
     }
-    const rule: DirectRule = {
+    const listId = ensureListFor(route);
+    const pin: PinnedRoute = {
       target: parsed,
+      outbound: route,
+      list_id: listId,
       resolved_ips: parsed.kind === "ip" ? [parsed.value] : [],
       created_at: now(),
       refreshed_at: now(),
     };
-    const sameTarget = (item: DirectRule) =>
-      item.target.kind === parsed.kind && item.target.value === parsed.value;
-    const rules = directRules.rules.filter((item) => !sameTarget(item));
-    const vpnRules = directRules.vpn_rules.filter((item) => !sameTarget(item));
-    if (outbound === "direct") rules.push(rule);
-    else vpnRules.push(rule);
+    const pins = directRules.pins.filter(
+      (item) =>
+        !(
+          item.target.kind === parsed.kind && item.target.value === parsed.value
+        ),
+    );
+    pins.push(pin);
+    directRules = {
+      ...directRules,
+      revision: directRules.revision + 1,
+      pins,
+    };
+    return structuredClone(directRules);
+  },
+  async discardClientPins(id: string, expectedRevision: number) {
+    if (expectedRevision !== directRules.revision)
+      throw new Error("Rules changed in another window");
     directRules = {
       revision: directRules.revision + 1,
-      rules,
-      vpn_rules: vpnRules,
+      pins: directRules.pins.filter(
+        (pin) =>
+          !(pin.outbound.kind === "client" && pin.outbound.client_id === id),
+      ),
+      lists: directRules.lists.filter(
+        (list) =>
+          !(list.outbound.kind === "client" && list.outbound.client_id === id),
+      ),
+    };
+    return structuredClone(directRules);
+  },
+  async reassignClientPins(from: string, to: string, expectedRevision: number) {
+    if (expectedRevision !== directRules.revision)
+      throw new Error("Rules changed in another window");
+    const outbound = outboundFromKey(to);
+    directRules = {
+      revision: directRules.revision + 1,
+      pins: directRules.pins.map((pin) =>
+        pin.outbound.kind === "client" && pin.outbound.client_id === from
+          ? { ...pin, outbound }
+          : pin,
+      ),
+      lists: directRules.lists.map((list) =>
+        list.outbound.kind === "client" && list.outbound.client_id === from
+          ? { ...list, outbound }
+          : list,
+      ),
     };
     return structuredClone(directRules);
   },
@@ -760,20 +893,138 @@ export const mockApi = {
     if (expectedRevision !== directRules.revision)
       throw new Error("Rules changed in another window");
     directRules = {
+      ...directRules,
       revision: directRules.revision + 1,
-      rules: directRules.rules.filter((item) => item.target.value !== input),
-      vpn_rules: directRules.vpn_rules.filter(
-        (item) => item.target.value !== input,
+      pins: directRules.pins.filter((item) => item.target.value !== input),
+    };
+    return structuredClone(directRules);
+  },
+  async createRuleList(
+    name: string,
+    outbound: string,
+    expectedRevision: number,
+  ) {
+    if (expectedRevision !== directRules.revision)
+      throw new Error("Rules changed in another window");
+    const trimmed = name.trim();
+    if (!trimmed || trimmed.length > 60)
+      throw new Error("list name must be 1-60 characters");
+    directRules = {
+      ...directRules,
+      revision: directRules.revision + 1,
+      lists: [
+        ...directRules.lists,
+        { id: mockUuid(), name: trimmed, outbound: outboundFromKey(outbound) },
+      ],
+    };
+    return structuredClone(directRules);
+  },
+  async renameRuleList(listId: string, name: string, expectedRevision: number) {
+    if (expectedRevision !== directRules.revision)
+      throw new Error("Rules changed in another window");
+    const trimmed = name.trim();
+    if (!trimmed || trimmed.length > 60)
+      throw new Error("list name must be 1-60 characters");
+    directRules = {
+      ...directRules,
+      revision: directRules.revision + 1,
+      lists: directRules.lists.map((list) =>
+        list.id === listId ? { ...list, name: trimmed } : list,
       ),
     };
     return structuredClone(directRules);
   },
-  async refreshRules() {
-    const touch = (item: DirectRule) => ({ ...item, refreshed_at: now() });
+  async deleteRuleList(listId: string, expectedRevision: number) {
+    if (expectedRevision !== directRules.revision)
+      throw new Error("Rules changed in another window");
     directRules = {
       revision: directRules.revision + 1,
-      rules: directRules.rules.map(touch),
-      vpn_rules: directRules.vpn_rules.map(touch),
+      pins: directRules.pins.filter((pin) => pin.list_id !== listId),
+      lists: directRules.lists.filter((list) => list.id !== listId),
+    };
+    return structuredClone(directRules);
+  },
+  async setRuleListOutbound(
+    listId: string,
+    outbound: string,
+    expectedRevision: number,
+  ) {
+    if (expectedRevision !== directRules.revision)
+      throw new Error("Rules changed in another window");
+    const route = outboundFromKey(outbound);
+    if (
+      route.kind === "client" &&
+      directRules.pins.some(
+        (pin) =>
+          pin.list_id === listId &&
+          pin.target.kind === "ip" &&
+          isPrivateHost(pin.target.value),
+      )
+    ) {
+      throw new Error(
+        "private, loopback, and carrier-grade NAT addresses cannot be sent through a local proxy",
+      );
+    }
+    directRules = {
+      revision: directRules.revision + 1,
+      pins: directRules.pins.map((pin) =>
+        pin.list_id === listId ? { ...pin, outbound: route } : pin,
+      ),
+      lists: directRules.lists.map((list) =>
+        list.id === listId ? { ...list, outbound: route } : list,
+      ),
+    };
+    return structuredClone(directRules);
+  },
+  async pinToRuleList(input: string, listId: string, expectedRevision: number) {
+    if (expectedRevision !== directRules.revision)
+      throw new Error("Rules changed in another window");
+    const list = directRules.lists.find((item) => item.id === listId);
+    if (!list) throw new Error("unknown list");
+    const parsed = canonicalTarget(input);
+    if (list.outbound.kind === "client" && isPrivateHost(parsed.value)) {
+      throw new Error(
+        "private, loopback, and carrier-grade NAT addresses cannot be sent through a local proxy",
+      );
+    }
+    const pins = directRules.pins.filter(
+      (item) =>
+        !(
+          item.target.kind === parsed.kind && item.target.value === parsed.value
+        ),
+    );
+    pins.push({
+      target: parsed,
+      outbound: list.outbound,
+      list_id: listId,
+      resolved_ips: parsed.kind === "ip" ? [parsed.value] : [],
+      created_at: now(),
+      refreshed_at: now(),
+    });
+    directRules = {
+      ...directRules,
+      revision: directRules.revision + 1,
+      pins,
+    };
+    return structuredClone(directRules);
+  },
+  async checkRuleList(listId: string): Promise<ListCheckEntry[]> {
+    const domains = directRules.pins
+      .filter((pin) => pin.list_id === listId && pin.target.kind === "domain")
+      .slice(0, 3);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    return domains.map((pin, index) => ({
+      target: pin.target.value,
+      status: index === 2 ? "slow" : "ok",
+      latency_ms: 120 + index * 340,
+      detail: null,
+    }));
+  },
+  async refreshRules() {
+    directRules = {
+      ...directRules,
+      revision: directRules.revision + 1,
+      pins: directRules.pins.map((item) => ({ ...item, refreshed_at: now() })),
     };
     return structuredClone(directRules);
   },
@@ -843,38 +1094,47 @@ export const mockApi = {
     return undefined;
   },
   async testRoute(target: string): Promise<RouteTestResult> {
-    // Mirrors RuleSet::decide: private, then VPN pins, then direct pins, then
-    // the bundled Iran list, then MATCH.
+    // Mirrors RuleSet::decide: private, enabled client pins, DIRECT pins,
+    // bundled Iran list, then MATCH default_route.
     if (isPrivateHost(target)) {
-      return route(target, "direct", "private_or_local", target);
+      return route(target, { kind: "direct" }, "private_or_local", target);
     }
-    if (directRules.vpn_rules.some((item) => ruleMatchesHost(item, target))) {
-      const pin = directRules.vpn_rules.find((item) =>
-        ruleMatchesHost(item, target),
-      );
-      return route(target, "vpn", "vpn_rule", pin?.target.value ?? target);
-    }
-    if (directRules.rules.some((item) => ruleMatchesHost(item, target))) {
-      const pin = directRules.rules.find((item) =>
-        ruleMatchesHost(item, target),
-      );
+    const enabled = enabledClientIds();
+    const clientPin = directRules.pins.find(
+      (item) =>
+        item.outbound.kind === "client" &&
+        enabled.has(item.outbound.client_id) &&
+        pinMatchesHost(item, target),
+    );
+    if (clientPin) {
       return route(
         target,
-        "direct",
+        clientPin.outbound,
+        "vpn_rule",
+        clientPin.target.value,
+      );
+    }
+    const directPin = directRules.pins.find(
+      (item) => item.outbound.kind === "direct" && pinMatchesHost(item, target),
+    );
+    if (directPin) {
+      return route(
+        target,
+        { kind: "direct" },
         "custom_rule",
-        pin?.target.value ?? target,
+        directPin.target.value,
       );
     }
     if (target.endsWith(".ir") || target === "ir") {
-      return route(target, "direct", "iran_domain", "ir");
+      return route(target, { kind: "direct" }, "iran_domain", "ir");
     }
     const business = IRAN_BUSINESS_DOMAINS.find((pin) =>
       domainMatchesPin(target, pin),
     );
     if (business) {
-      return route(target, "direct", "iran_domain", business);
+      return route(target, { kind: "direct" }, "iran_domain", business);
     }
-    return route(target, "vpn", "default_proxy", "MATCH");
+    return route(target, matchOutbound(), "default_proxy", "MATCH");
   },
   async checkReachability(): Promise<ReachabilityResult[]> {
     await new Promise((resolve) => setTimeout(resolve, 150));

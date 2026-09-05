@@ -10,6 +10,7 @@ publish.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 http.workspace = true
+iran-split-clients = { path = "../iran-split-clients" }
 iran-split-config = { path = "../iran-split-config" }
 iran-split-rules = { path = "../iran-split-rules" }
 reqwest.workspace = true

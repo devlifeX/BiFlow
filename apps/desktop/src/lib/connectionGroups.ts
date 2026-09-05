@@ -4,7 +4,7 @@ export interface ConnectionGroup {
   key: string;
   host: string;
   ips: string[];
-  outbound: "direct" | "vpn";
+  outbound: string;
   rule: string;
   count: number;
 }
