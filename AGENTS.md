@@ -53,6 +53,44 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- `cfg(windows)` code and tests never compile on the Linux host, and a
+  full `--target x86_64-pc-windows-msvc` clippy from Linux dies in `ring`'s
+  build script. When changing anything the Windows crates assert on
+  (generated YAML strings, group names, spawn helpers), grep the
+  `iran-split-platform-win` and `iran-split-helper` test modules for the
+  old strings before pushing — CI's Windows job is the first compiler
+  those files ever see. Put generated-config assertions in
+  `iran-split-mihomo` (cross-platform, takes `Platform::Windows`) instead
+  of duplicating them under `cfg(windows)`.
+- tokio's `process::Command` exposes `creation_flags` inherently on
+  Windows; importing `std::os::windows::process::CommandExt` for it trips
+  `-D unused-imports` (and `items-after-statements` if placed mid-body).
+  The std trait import is only needed for `std::process::Command`.
+- Dev and release builds must never share a profile: config schema
+  migration is one-way and the rules document format moves, so one dev run
+  bricked the installed app twice (config.toml `UnsupportedSchema`, then
+  `direct-rules.json` missing legacy `rules` field). `dev.sh` exports
+  `BIFLOW_DEV_PROFILE` and every path — config, data, cache, debug.log,
+  and the helper `staging_dir` — must derive from that one variable; the
+  helper staging path silently diverging produced `INVALID_GENERATION`.
+- A document another build wrote must never keep this build from
+  starting: `RuleManager::load` quarantines undecodable JSON to
+  `.corrupt` and starts empty instead of failing the Tauri setup hook.
+- `open_external_url` is allowlist-gated. New UI links fail silently as
+  "URL is not allowlisted" unless the allowlist grows with them; derive it
+  from the preset catalog so it cannot drift from the buttons.
+- An inner timeout must exceed the operations it wraps: the 5s live-apply
+  budget raced `validate_with_binary`'s own 10s, so every pin move timed
+  out and silently restored the previous document ("moves don't apply").
+- `sr-only` labels are absolutely positioned; without a positioned
+  ancestor they anchor to the page and extend
+  `documentElement.scrollHeight` once their form scrolls below the fold,
+  failing the no-document-overflow e2e. Prefer `aria-label` on the input.
+- A link rendered inside a `disabled` button never receives clicks;
+  catalog rows must keep the download link outside the add-client button.
+- Preset defaults are guesses until verified on a real install: Happ runs
+  an Xray core listening on 10808 (not 3067), and its process bypass must
+  include `xray`/`v2ray` or the core's own egress loops back into the TUN.
 - Backticks inside a double-quoted shell search pattern are command
   substitutions. Quote `rg` patterns with single quotes when they contain
   Markdown code spans so validation does not accidentally execute the text.

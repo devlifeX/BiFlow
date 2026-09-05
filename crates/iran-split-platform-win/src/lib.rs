@@ -1635,7 +1635,9 @@ mod tests {
         assert!(config.contains("find-process-mode: always"));
         assert!(config.contains("auto-redirect: false"));
         assert!(config.contains("ipv6: false"));
-        assert!(config.contains("dns-query#VPN"));
+        // DoH is pinned to the default client's group (client registry
+        // replaced the fixed "VPN" group name).
+        assert!(config.contains("dns-query#client-"));
     }
 
     #[tokio::test]
