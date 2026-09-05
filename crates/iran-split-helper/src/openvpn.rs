@@ -413,7 +413,7 @@ fn apply_openvpn_spawn(command: &mut Command) {
         .env("SYSTEMDRIVE", system_drive)
         .env("PATHEXT", ".COM;.EXE;.BAT;.CMD")
         .env("PATH", path);
-    use std::os::windows::process::CommandExt;
+    // tokio's Command exposes creation_flags directly on Windows.
     command.creation_flags(CREATE_NO_WINDOW);
 }
 
