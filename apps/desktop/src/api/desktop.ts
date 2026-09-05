@@ -209,6 +209,9 @@ export const desktop = {
   pickProfileFile(): Promise<string | null> {
     return native ? invoke("pick_client_profile") : mockApi.pickProfileFile();
   },
+  applyLiveSettings(): Promise<void> {
+    return native ? invoke("apply_live_settings") : mockApi.applyLiveSettings();
+  },
   testRoute(target: string): Promise<RouteTestResult> {
     return native
       ? invoke("test_route", { target })

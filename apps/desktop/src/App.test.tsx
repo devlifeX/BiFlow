@@ -25,6 +25,7 @@ beforeEach(() => {
     diagnostics: null,
     error: null,
     installGuide: null,
+    settingsApplyNotice: null,
   });
 });
 

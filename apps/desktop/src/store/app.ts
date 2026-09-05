@@ -25,6 +25,11 @@ import {
   sanitizeDefaultRoute,
 } from "../lib/clients";
 import { presetById, type PresetId } from "../lib/presets";
+import {
+  settingsAffectLiveMihomo,
+  stackNeedsSettingsApply,
+  type SettingsApplyNotice,
+} from "../lib/settingsApply";
 
 type Page = "dashboard" | "rules" | "diagnostics" | "settings" | "about";
 
@@ -80,7 +85,11 @@ interface AppStore {
   updateClient: (id: string, config: ClientConfig) => Promise<void>;
   setDefaultRoute: (route: DefaultRoute) => Promise<void>;
   routeFallbackNotice: string | null;
+  settingsApplyNotice: SettingsApplyNotice | null;
   clearRouteFallbackNotice: () => void;
+  dismissSettingsApplyNotice: () => void;
+  applyPendingSettings: () => Promise<void>;
+  revertPendingSettings: () => Promise<void>;
   removeRule: (input: string) => Promise<void>;
   refreshRules: () => Promise<void>;
   syncCloudRules: () => Promise<void>;
@@ -160,6 +169,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   diagnostics: null,
   error: null,
   routeFallbackNotice: null,
+  settingsApplyNotice: null,
   installGuide: null,
   update: initialUpdateProgress(),
   setPage: (page) => set({ page }),
@@ -183,6 +193,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
         set({
           snapshot,
           actionPending: snapshot.busy != null,
+          settingsApplyNotice:
+            snapshot.phase === "stopped" ? null : get().settingsApplyNotice,
         });
         void get().refreshTrafficTotals();
       });
@@ -268,10 +280,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
         draft.default_route.kind === "client" &&
         sanitized.default_route.kind === "direct";
       const settings = await desktop.saveSettings(sanitized, current.revision);
+      const existing = get().settingsApplyNotice;
+      const needsApply =
+        stackNeedsSettingsApply(get().snapshot?.phase) &&
+        settingsAffectLiveMihomo(current, settings);
       set({
         settings,
         actionPending: false,
         routeFallbackNotice: fallback ? "defaultRouteFallback" : null,
+        settingsApplyNotice: needsApply
+          ? { previous: existing?.previous ?? current }
+          : existing,
       });
     } catch (error) {
       set({ actionPending: false, error: message(error) });
@@ -469,6 +488,36 @@ export const useAppStore = create<AppStore>((set, get) => ({
     await get().saveSettings({ ...current, default_route: route });
   },
   clearRouteFallbackNotice: () => set({ routeFallbackNotice: null }),
+  dismissSettingsApplyNotice: () => set({ settingsApplyNotice: null }),
+  applyPendingSettings: async () => {
+    if (!get().settingsApplyNotice) return;
+    set({ actionPending: true, error: null });
+    try {
+      await desktop.applyLiveSettings();
+      set({ actionPending: false, settingsApplyNotice: null });
+    } catch (error) {
+      set({ actionPending: false, error: message(error) });
+    }
+  },
+  revertPendingSettings: async () => {
+    const notice = get().settingsApplyNotice;
+    const current = get().settings;
+    if (!notice || !current) return;
+    set({ actionPending: true, error: null });
+    try {
+      const settings = await desktop.saveSettings(
+        notice.previous,
+        current.revision,
+      );
+      set({
+        settings,
+        actionPending: false,
+        settingsApplyNotice: null,
+      });
+    } catch (error) {
+      set({ actionPending: false, error: message(error) });
+    }
+  },
   removeRule: async (input) => {
     const rules = get().rules;
     if (!rules) return;

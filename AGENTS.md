@@ -84,6 +84,10 @@ If a required command fails or emits a warning from project code, fix it in the 
   must be chosen through `pick_client_profile` so the helper reads the
   original file and relative `ca` / `cert` references still resolve. Do
   not log the chosen path.
+- `blocking_pick_file` from a sync Tauri command deadlocks the GTK/WebKit
+  main thread. GNOME then offers Force Quit while the window looks hung.
+  Open the dialog with the callback picker from an async command and await
+  a oneshot. Never block the invoke thread on the file dialog.
 - An inner timeout must exceed the operations it wraps: the 5s live-apply
   budget raced `validate_with_binary`'s own 10s, so every pin move timed
   out and silently restored the previous document ("moves don't apply").

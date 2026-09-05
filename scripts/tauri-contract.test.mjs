@@ -86,6 +86,11 @@ describe("Tauri frontend contract", () => {
       /add_filter\("VPN profile", accepted_profile_extensions\(\)\)/,
     );
     assert.doesNotMatch(picker, /info!\(\s*path\b/);
+    assert.doesNotMatch(picker, /blocking_pick_file/);
+    assert.match(picker, /\.pick_file\(/);
+    assert.match(rust, /async fn pick_client_profile/);
+    assert.match(frontend, /invoke\("apply_live_settings"\)/);
+    assert.match(rust, /async fn apply_live_settings/);
   });
 
   it("reads the native clipboard through the Tauri plugin", () => {

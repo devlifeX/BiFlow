@@ -427,6 +427,46 @@ test.describe("primary BiFlow flows", () => {
     ).toBeVisible();
   });
 
+  test("offers restart Mihomo or revert after a live settings change", async ({
+    page,
+  }) => {
+    await openFresh(page);
+    const installButtons = page.getByRole("button", {
+      name: "Install",
+      exact: true,
+    });
+    const count = await installButtons.count();
+    for (let index = 0; index < count; index += 1) {
+      await page
+        .getByRole("button", { name: "Install", exact: true })
+        .first()
+        .click();
+    }
+    await connectButton(page).click();
+    await expect(
+      page.getByRole("heading", { name: "Protected split routing is active" }),
+    ).toBeVisible();
+
+    await page.getByTestId("default-route").selectOption("direct");
+    const banner = page.getByTestId("settings-apply-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText(
+      "Restart Mihomo to apply these settings",
+    );
+    await banner.getByRole("button", { name: "Revert changes" }).click();
+    await expect(banner).toHaveCount(0);
+    await expect(page.getByTestId("default-route")).not.toHaveValue("direct");
+
+    await page.getByTestId("default-route").selectOption("direct");
+    await expect(banner).toBeVisible();
+    await banner.getByRole("button", { name: "Restart Mihomo" }).click();
+    await expect(banner).toHaveCount(0);
+    await expect(page.getByTestId("default-route")).toHaveValue("direct");
+    await expect(
+      page.getByRole("heading", { name: "Protected split routing is active" }),
+    ).toBeVisible();
+  });
+
   test("keeps the fixed viewport free of document overflow in English and Persian", async ({
     page,
   }) => {

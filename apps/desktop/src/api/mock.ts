@@ -1123,6 +1123,9 @@ export const mockApi = {
     }
     return "/tmp/biflow-mock-profile.ovpn";
   },
+  async applyLiveSettings(): Promise<void> {
+    return undefined;
+  },
   async testRoute(target: string): Promise<RouteTestResult> {
     // Mirrors RuleSet::decide: private, enabled client pins, DIRECT pins,
     // bundled Iran list, then MATCH default_route.

@@ -84,6 +84,10 @@ const resources = {
       deletePins: "Delete these pins",
       defaultRouteFallback:
         "That client was the unmatched default. Unmatched traffic now goes DIRECT.",
+      restartMihomoToApply:
+        "Restart Mihomo to apply these settings. Clients stay running.",
+      restartMihomo: "Restart Mihomo",
+      revertChanges: "Revert changes",
       exitIp: "Exit IP",
       backend: "Backend",
       providers: "Providers",
@@ -368,6 +372,10 @@ const resources = {
       deletePins: "حذف این سنجاق‌ها",
       defaultRouteFallback:
         "آن کلاینت مقصد پیش‌فرض بود. ترافیک بی‌قانون حالا مستقیم می‌رود.",
+      restartMihomoToApply:
+        "برای اعمال این تنظیمات Mihomo را دوباره راه‌اندازی کنید. کلاینت‌ها باز می‌مانند.",
+      restartMihomo: "راه‌اندازی دوباره Mihomo",
+      revertChanges: "برگرداندن تغییرات",
       exitIp: "آی‌پی خروجی",
       backend: "بک‌اند",
       providers: "فراهم‌کننده‌های قانون",

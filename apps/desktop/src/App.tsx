@@ -30,6 +30,7 @@ import { InputContextMenu } from "./components/InputContextMenu";
 import { Diagnostics } from "./components/Diagnostics";
 import { DirectRules } from "./components/DirectRules";
 import { Settings } from "./components/Settings";
+import { SettingsApplyBanner } from "./components/SettingsApplyBanner";
 import { BottomNav } from "./components/BottomNav";
 import { UiModeSwitch } from "./components/UiModeSwitch";
 import { isMobileViewport, subscribeMobileViewport } from "./lib/viewport";
@@ -197,6 +198,7 @@ export function App() {
             />
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto">
+            <SettingsApplyBanner />
             {!advanced && store.page !== "about" && store.snapshot ? (
               <BasicDashboard snapshot={store.snapshot} />
             ) : null}

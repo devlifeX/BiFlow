@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { desktop } from "../api/desktop";
 import type { BootstrapResult } from "../api/models";
+import { baseSettings } from "../test/fixtures";
 import { useAppStore } from "./app";
 
 vi.mock("../api/desktop", () => ({
@@ -26,6 +27,8 @@ vi.mock("../api/desktop", () => ({
     getUpdateState: vi.fn(),
     installUpdate: vi.fn(),
     openUrl: vi.fn(),
+    saveSettings: vi.fn(),
+    applyLiveSettings: vi.fn(),
   },
 }));
 
@@ -514,5 +517,59 @@ describe("app store", () => {
     await useAppStore.getState().retryUpdate();
     expect(desktop.installUpdate).toHaveBeenCalledOnce();
     expect(useAppStore.getState().update.phase).toBe("downloading");
+  });
+
+  it("asks to restart Mihomo after a live settings change and can revert", async () => {
+    const previous = baseSettings();
+    const next = {
+      ...previous,
+      revision: 1,
+      default_route: { kind: "direct" as const },
+    };
+    vi.mocked(desktop.saveSettings).mockResolvedValue(next);
+    vi.mocked(desktop.applyLiveSettings).mockResolvedValue(undefined);
+    useAppStore.setState({
+      settings: previous,
+      snapshot: { ...boot.snapshot, phase: "running" },
+      settingsApplyNotice: null,
+    });
+    await useAppStore.getState().saveSettings(next);
+    expect(useAppStore.getState().settingsApplyNotice?.previous).toEqual(
+      previous,
+    );
+
+    await useAppStore.getState().applyPendingSettings();
+    expect(desktop.applyLiveSettings).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().settingsApplyNotice).toBeNull();
+
+    vi.mocked(desktop.saveSettings).mockResolvedValue(next);
+    useAppStore.setState({
+      settings: previous,
+      snapshot: { ...boot.snapshot, phase: "running" },
+      settingsApplyNotice: null,
+    });
+    await useAppStore.getState().saveSettings(next);
+    vi.mocked(desktop.saveSettings).mockResolvedValue(previous);
+    await useAppStore.getState().revertPendingSettings();
+    expect(desktop.saveSettings).toHaveBeenLastCalledWith(previous, 1);
+    expect(useAppStore.getState().settings).toEqual(previous);
+    expect(useAppStore.getState().settingsApplyNotice).toBeNull();
+  });
+
+  it("does not show the apply banner while the stack is stopped", async () => {
+    const previous = baseSettings();
+    const next = {
+      ...previous,
+      revision: 1,
+      default_route: { kind: "direct" as const },
+    };
+    vi.mocked(desktop.saveSettings).mockResolvedValue(next);
+    useAppStore.setState({
+      settings: previous,
+      snapshot: { ...boot.snapshot, phase: "stopped" },
+      settingsApplyNotice: null,
+    });
+    await useAppStore.getState().saveSettings(next);
+    expect(useAppStore.getState().settingsApplyNotice).toBeNull();
   });
 });

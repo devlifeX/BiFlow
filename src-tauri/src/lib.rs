@@ -1637,15 +1637,32 @@ fn open_external_url(url: String) -> Result<(), String> {
     })
 }
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "Tauri injects AppHandle by value into commands"
-)]
 #[tauri::command]
-fn pick_client_profile(app: AppHandle) -> Result<Option<String>, String> {
-    diagnostics::trace_sync("clients", "tauri_command", "pick_client_profile", || {
-        profile_picker::pick_profile(&app)
-    })
+async fn pick_client_profile(app: AppHandle) -> Result<Option<String>, String> {
+    diagnostics::trace_action(
+        "clients",
+        "tauri_command",
+        "pick_client_profile",
+        async move { profile_picker::pick_profile(&app).await },
+    )
+    .await
+}
+
+#[tauri::command]
+async fn apply_live_settings(app: AppHandle) -> Result<(), String> {
+    diagnostics::trace_action(
+        "settings",
+        "tauri_command",
+        "apply_live_settings",
+        async move {
+            services(&app)?
+                .engine
+                .apply_user_rules()
+                .await
+                .map_err(|error| error.to_string())
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -3310,6 +3327,7 @@ pub fn run() {
             get_install_guide,
             open_external_url,
             pick_client_profile,
+            apply_live_settings,
             run_full_diagnostics,
             test_route,
             query_logs,

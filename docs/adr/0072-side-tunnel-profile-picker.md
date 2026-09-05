@@ -18,9 +18,11 @@ references inside the profile still resolve.
 
 - Every `OwnedSideTunnel` card uses a native choose-file control. The path is
   never typed.
-- The desktop command `pick_client_profile` opens `tauri-plugin-dialog` with
-  `.ovpn` and `.conf` filters. Cancel returns `null`. The chosen path is not
-  written to `debug.log`.
+- The desktop command `pick_client_profile` is async. It opens
+  `tauri-plugin-dialog` with `.ovpn` and `.conf` filters via the callback
+  picker, then awaits a oneshot. `blocking_pick_file` from a sync command
+  deadlocks the GTK/WebKit main thread and GNOME offers Force Quit. Cancel
+  returns `null`. The chosen path is not written to `debug.log`.
 - Vite / Playwright mock the same command and return
   `/tmp/biflow-mock-profile.ovpn` (or `window.__BIFLOW_NEXT_PROFILE_PATH__`).
 - The card shows the file name only. Username and password stay optional text

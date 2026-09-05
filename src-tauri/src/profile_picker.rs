@@ -24,14 +24,22 @@ pub fn is_accepted_profile(path: &Path) -> bool {
 
 /// Opens a native file dialog and returns the chosen path.
 ///
+/// Uses the callback picker so the GTK/WebKit main thread stays free. The
+/// blocking API deadlocks that loop and GNOME offers Force Quit.
+///
 /// `Ok(None)` means the operator cancelled. The path itself is never logged.
-pub fn pick_profile<R: Runtime>(app: &AppHandle<R>) -> Result<Option<String>, String> {
-    let picked = app
-        .dialog()
+pub async fn pick_profile<R: Runtime>(app: &AppHandle<R>) -> Result<Option<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
         .file()
         .add_filter("VPN profile", accepted_profile_extensions())
-        .blocking_pick_file();
-    let Some(file) = picked else {
+        .pick_file(move |file| {
+            let _ = tx.send(file);
+        });
+    let Some(file) = rx
+        .await
+        .map_err(|_| "profile picker was interrupted".to_owned())?
+    else {
         info!(chosen = false, "client profile picker cancelled");
         return Ok(None);
     };
