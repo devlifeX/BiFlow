@@ -51,36 +51,40 @@ describe("mock transport", () => {
     });
   });
 
-  it("canonicalizes subdomain pins to the registrable root", async () => {
-    const first = await mockApi.addRule("api.shop.example.com", 1);
+  it("keeps subdomain pins exact and the longest match wins", async () => {
+    // Root pin stays DIRECT and covers every subdomain.
+    const first = await mockApi.addRule("google.com", 1);
     expect(first.pins.map((item) => item.target.value)).toEqual(
-      expect.arrayContaining(["example.ir", "example.com"]),
+      expect.arrayContaining(["example.ir", "google.com"]),
     );
-    expect(
-      first.pins.find((item) => item.target.value === "example.com")
-        ?.resolved_ips,
-    ).toEqual([]);
+    // A more specific pin routes its own subtree to the client.
     const moved = await mockApi.pinRoute(
-      "www.example.com",
+      "developer.google.com",
       MOCK_HIDDIFY_ID,
       first.revision,
     );
     expect(
-      moved.pins
-        .filter((item) => item.outbound.kind === "direct")
-        .map((item) => item.target.value),
-    ).toEqual(["example.ir"]);
-    expect(
       moved.pins.find((item) => item.outbound.kind === "client")?.target.value,
-    ).toBe("example.com");
+    ).toBe("developer.google.com");
+    await expect(mockApi.testRoute("gemini.google.com")).resolves.toMatchObject(
+      {
+        outbound: { kind: "direct" },
+        matched_rule: "google.com",
+      },
+    );
     await expect(
-      mockApi.testRoute("api.shop.example.com"),
+      mockApi.testRoute("developer.google.com"),
     ).resolves.toMatchObject({
       outbound: { kind: "client", client_id: MOCK_HIDDIFY_ID },
-      matched_rule: "example.com",
+      matched_rule: "developer.google.com",
     });
-    await expect(mockApi.testRoute("notexample.com")).resolves.toMatchObject({
+    await expect(
+      mockApi.testRoute("api.developer.google.com"),
+    ).resolves.toMatchObject({
       outbound: { kind: "client", client_id: MOCK_HIDDIFY_ID },
+      matched_rule: "developer.google.com",
+    });
+    await expect(mockApi.testRoute("notgoogle.com")).resolves.toMatchObject({
       matched_rule: "MATCH",
     });
   });

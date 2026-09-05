@@ -332,8 +332,9 @@ test.describe("primary BiFlow flows", () => {
     await expect(flow.getByText("www.rade.ir → Hiddify")).toBeVisible();
 
     await page.getByRole("button", { name: "List Management" }).click();
+    // Pins stay exactly as typed; the moved host keeps its www label.
     const pinned = page.getByRole("row").filter({
-      has: page.getByText("rade.ir", { exact: true }),
+      has: page.getByText("www.rade.ir", { exact: true }),
     });
     await expect(pinned.locator("select")).toHaveValue(
       "11111111-1111-1111-1111-111111111111",
@@ -597,15 +598,14 @@ test.describe("primary BiFlow flows", () => {
     ).toHaveCount(0);
   });
 
-  test("pins a subdomain to the registrable root while connected", async ({
-    page,
-  }) => {
+  test("keeps a subdomain pin exact while connected", async ({ page }) => {
     await openFresh(page);
     await page.getByRole("button", { name: "List Management" }).click();
     await page.getByLabel("Domain or IP").fill("api.shop.example.com");
     await page.getByRole("button", { name: "Add rule" }).click();
-    await expect(page.getByText("example.com").first()).toBeVisible();
-    await expect(page.getByText("api.shop.example.com")).toHaveCount(0);
+    await expect(
+      page.getByRole("cell", { name: "api.shop.example.com", exact: true }),
+    ).toBeVisible();
 
     await page.getByRole("button", { name: "Diagnostics" }).click();
     await page.getByLabel("Test IP or domain").fill("www.technolife.com");

@@ -24,10 +24,23 @@ export function outboundLabel(
   clients: ClientInstance[],
 ): string {
   const key = typeof outbound === "string" ? outbound : outboundKey(outbound);
-  if (key === "direct") return "DIRECT";
-  const client = clients.find((item) => item.id === key);
-  if (!client) return key.startsWith("client-") ? key : "Client";
+  if (key === "direct" || key === "DIRECT") return "DIRECT";
+  // Live connections report Mihomo group/proxy names (`client-<uuid>`,
+  // `proxy-<uuid>`); resolve them to the preset title so the UI never
+  // shows a raw uuid.
+  const id = key.replace(/^(client|proxy)-/u, "");
+  const client = clients.find((item) => item.id === id);
+  if (!client) return id === key ? "Client" : key;
   return presetById(client.preset as PresetId).title;
+}
+
+/** Humanizes rule names that embed a client uuid (`custom-<uuid>-domains`). */
+export function ruleLabel(rule: string, clients: ClientInstance[]): string {
+  const match = /^custom-([0-9a-f-]{36})-(domains|ips)$/u.exec(rule);
+  if (!match) return rule;
+  const client = clients.find((item) => item.id === match[1]);
+  if (!client) return rule;
+  return `${presetById(client.preset as PresetId).title} ${match[2]}`;
 }
 
 export function localProxyConfig(client: ClientInstance): {

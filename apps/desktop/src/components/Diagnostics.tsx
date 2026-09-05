@@ -30,7 +30,7 @@ import { extractHost } from "../lib/host";
 import type { SortState } from "../lib/tableSort";
 import { sortRows, toggleSort } from "../lib/tableSort";
 import { useAppStore } from "../store/app";
-import { outboundLabel } from "../lib/outbound";
+import { outboundLabel, ruleLabel } from "../lib/outbound";
 import { FlowResult, OutboundSelect } from "./DirectRules";
 import { SortHeader } from "./SortHeader";
 
@@ -820,7 +820,7 @@ function LiveConnectionsCard() {
               <option value="all">{t("liveConnectionsAllRules")}</option>
               {ruleOptions.map((rule) => (
                 <option key={rule} value={rule}>
-                  {rule}
+                  {ruleLabel(rule, clients)}
                 </option>
               ))}
             </select>
@@ -906,7 +906,7 @@ function LiveConnectionsCard() {
                             </span>
                           </td>
                           <td className="px-3 py-2 font-mono text-xs text-muted">
-                            {group.rule || "—"}
+                            {group.rule ? ruleLabel(group.rule, clients) : "—"}
                           </td>
                           <td className="px-3 py-2">
                             {target ? (

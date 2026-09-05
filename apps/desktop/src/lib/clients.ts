@@ -11,6 +11,7 @@ export function createClientInstance(
       id,
       preset,
       enabled: true,
+      allow_direct_when_down: false,
       config: {
         kind: "local_proxy",
         host: "127.0.0.1",
@@ -26,6 +27,7 @@ export function createClientInstance(
       id,
       preset,
       enabled: true,
+      allow_direct_when_down: false,
       config: {
         kind: "owned_side_tunnel",
         profile_path: null,
@@ -40,6 +42,7 @@ export function createClientInstance(
     id,
     preset,
     enabled: true,
+    allow_direct_when_down: false,
     config: { kind: "unsupported" },
   };
 }

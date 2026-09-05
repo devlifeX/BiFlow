@@ -327,6 +327,12 @@ fn subscriber(log: DebugLog) -> impl Subscriber + Send + Sync {
 }
 
 pub fn default_log_path() -> Result<PathBuf, String> {
+    // A dev run logs inside its own profile; it must never write into (or
+    // reveal) the installed app's data directory.
+    if let Some(profile) = std::env::var_os("BIFLOW_DEV_PROFILE").filter(|value| !value.is_empty())
+    {
+        return Ok(PathBuf::from(profile).join("data").join("debug.log"));
+    }
     dirs::data_local_dir()
         .map(|path| path.join("biflow").join("debug.log"))
         .ok_or_else(|| "local data directory is unavailable for debug.log".into())

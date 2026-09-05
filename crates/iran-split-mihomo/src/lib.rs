@@ -239,41 +239,30 @@ pub fn generate_config_with_handles(
         };
         rules.push(format!("{flag},{exclude},DIRECT,no-resolve"));
     }
-    for handle in ready
-        .iter()
-        .filter(|handle| handle.kind == EgressKind::OwnedSideTunnel)
+    // Domain pins are emitted inline, most specific first, so the longest
+    // matching pin wins across lists and outbounds: a developer.google.com
+    // pin overrides a google.com pin even when they route differently.
+    rules.extend(ordered_domain_pin_rules(app, custom_rules, &ready));
+    for client in app
+        .enabled_clients()
+        .into_iter()
+        .filter(|client| client.spec().kind == EgressKind::OwnedSideTunnel)
     {
-        let id = handle.client_id.as_hyphenated();
-        rules.push(format!(
-            "RULE-SET,custom-{id}-domains,{}",
-            handle
-                .outbound
-                .as_ref()
-                .map_or_else(|| format!("client-{id}"), |out| out.group_name.clone())
-        ));
-        rules.push(format!(
-            "RULE-SET,custom-{id}-ips,{},no-resolve",
-            handle
-                .outbound
-                .as_ref()
-                .map_or_else(|| format!("client-{id}"), |out| out.group_name.clone())
-        ));
+        let id = client.id.as_hyphenated();
+        let target = client_rule_target(app, client, &ready);
+        rules.push(format!("RULE-SET,custom-{id}-ips,{target},no-resolve"));
     }
     rules.push("RULE-SET,private-networks,DIRECT,no-resolve".into());
-    for handle in ready
-        .iter()
-        .filter(|handle| handle.kind == EgressKind::LocalProxy)
+    for client in app
+        .enabled_clients()
+        .into_iter()
+        .filter(|client| client.spec().kind == EgressKind::LocalProxy)
     {
-        let id = handle.client_id.as_hyphenated();
-        let group = handle
-            .outbound
-            .as_ref()
-            .map_or_else(|| format!("client-{id}"), |out| out.group_name.clone());
-        rules.push(format!("RULE-SET,custom-{id}-domains,{group}"));
-        rules.push(format!("RULE-SET,custom-{id}-ips,{group},no-resolve"));
+        let id = client.id.as_hyphenated();
+        let target = client_rule_target(app, client, &ready);
+        rules.push(format!("RULE-SET,custom-{id}-ips,{target},no-resolve"));
     }
     rules.extend([
-        "RULE-SET,custom-direct-domains,DIRECT".into(),
         "RULE-SET,custom-direct-ips,DIRECT,no-resolve".into(),
         "RULE-SET,iran-domains,DIRECT".into(),
         "RULE-SET,iran-business-domains,DIRECT".into(),
@@ -391,7 +380,7 @@ pub fn generate_config_with_handles(
                 proxies: vec![outbound.name.clone()],
             })
             .collect(),
-        rule_providers: providers(&ready),
+        rule_providers: providers(app),
         rules,
     };
     validate_custom_rules(custom_rules)?;
@@ -402,8 +391,9 @@ pub fn generate_config_with_handles(
 
 fn nameservers(match_target: &str) -> Vec<String> {
     // Pin DoH to the MATCH group. Unpinned Cloudflare / Google DoH is often
-    // blocked on the Iranian WAN. When MATCH is DIRECT the hash is omitted.
-    if match_target == "DIRECT" {
+    // blocked on the Iranian WAN. When MATCH is DIRECT (or fail-closed
+    // REJECT, which is not a proxy group) the hash is omitted.
+    if match_target == "DIRECT" || match_target == "REJECT" {
         return vec![
             "https://1.1.1.1/dns-query".into(),
             "https://8.8.8.8/dns-query".into(),
@@ -413,6 +403,66 @@ fn nameservers(match_target: &str) -> Vec<String> {
         format!("https://1.1.1.1/dns-query#{match_target}"),
         format!("https://8.8.8.8/dns-query#{match_target}"),
     ]
+}
+
+/// Inline `DOMAIN-SUFFIX` rules for every user domain pin, ordered by
+/// specificity (label count, descending) so the longest matching pin wins.
+/// Pins of disabled clients are skipped, matching the "disable keeps pins
+/// but does not emit them" contract.
+fn ordered_domain_pin_rules(
+    app: &AppConfig,
+    custom_rules: &RoutePinsDocument,
+    ready: &[EgressHandle],
+) -> Vec<String> {
+    let mut pins: Vec<(&str, String)> = Vec::new();
+    for pin in &custom_rules.pins {
+        let iran_split_rules::DirectTarget::Domain(domain) = &pin.target else {
+            continue;
+        };
+        let target = match pin.outbound {
+            iran_split_rules::Outbound::Direct => "DIRECT".into(),
+            iran_split_rules::Outbound::Client { client_id } => {
+                let Some(client) = app
+                    .enabled_clients()
+                    .into_iter()
+                    .find(|client| client.id == client_id)
+                else {
+                    continue;
+                };
+                client_rule_target(app, client, ready)
+            }
+        };
+        pins.push((domain.as_str(), target));
+    }
+    pins.sort_by(|left, right| {
+        iran_split_rules::domain_specificity(right.0)
+            .cmp(&iran_split_rules::domain_specificity(left.0))
+            .then_with(|| left.0.cmp(right.0))
+    });
+    pins.into_iter()
+        .map(|(domain, target)| format!("DOMAIN-SUFFIX,{domain},{target}"))
+        .collect()
+}
+
+/// Rule target for one enabled client: its proxy group when the egress is
+/// ready, otherwise the fail-closed fallback (REJECT blocks the pinned hosts
+/// locally so the real IP never leaks; the per-client exclusion or a disabled
+/// global fail-closed downgrade that to DIRECT).
+fn client_rule_target(
+    app: &AppConfig,
+    client: &iran_split_config::ClientInstance,
+    ready: &[EgressHandle],
+) -> String {
+    let group = ready
+        .iter()
+        .find(|handle| handle.client_id == client.id)
+        .and_then(|handle| handle.outbound.as_ref())
+        .map(|outbound| outbound.group_name.clone());
+    match group {
+        Some(group) => group,
+        None if app.behavior.fail_closed && !client.allow_direct_when_down => "REJECT".into(),
+        None => "DIRECT".into(),
+    }
 }
 
 fn ready_handles(app: &AppConfig, handles: &[EgressHandle]) -> Vec<EgressHandle> {
@@ -432,11 +482,26 @@ fn ready_handles(app: &AppConfig, handles: &[EgressHandle]) -> Vec<EgressHandle>
 fn match_group(app: &AppConfig, ready: &[EgressHandle]) -> String {
     match app.default_route {
         DefaultRoute::Direct => "DIRECT".into(),
-        DefaultRoute::Client { client_id } => ready
-            .iter()
-            .find(|handle| handle.client_id == client_id)
-            .and_then(|handle| handle.outbound.as_ref())
-            .map_or_else(|| "DIRECT".into(), |outbound| outbound.group_name.clone()),
+        DefaultRoute::Client { client_id } => {
+            if let Some(group) = ready
+                .iter()
+                .find(|handle| handle.client_id == client_id)
+                .and_then(|handle| handle.outbound.as_ref())
+                .map(|outbound| outbound.group_name.clone())
+            {
+                return group;
+            }
+            // The chosen default egress is down. Fail closed: unmatched
+            // traffic is rejected locally instead of leaking over DIRECT.
+            let excluded = app
+                .client(client_id)
+                .is_some_and(|client| client.allow_direct_when_down);
+            if app.behavior.fail_closed && !excluded {
+                "REJECT".into()
+            } else {
+                "DIRECT".into()
+            }
+        }
     }
 }
 
@@ -486,7 +551,7 @@ fn process_bypass_rules(app: &AppConfig, platform: Platform) -> Vec<String> {
     rules
 }
 
-fn providers(ready: &[EgressHandle]) -> BTreeMap<String, RuleProvider> {
+fn providers(app: &AppConfig) -> BTreeMap<String, RuleProvider> {
     let mut map = BTreeMap::new();
     for (name, behavior, path) in [
         ("private-networks", "ipcidr", "private.txt"),
@@ -514,8 +579,8 @@ fn providers(ready: &[EgressHandle]) -> BTreeMap<String, RuleProvider> {
             },
         );
     }
-    for handle in ready {
-        let id = handle.client_id.as_hyphenated();
+    for client in app.enabled_clients() {
+        let id = client.id.as_hyphenated();
         map.insert(
             format!("custom-{id}-domains"),
             RuleProvider {
@@ -1275,6 +1340,119 @@ mod tests {
         .expect("direct match");
         assert!(direct.yaml.contains("MATCH,DIRECT"));
         assert!(!direct.yaml.contains("dns-query#client-"));
+    }
+
+    #[test]
+    fn domain_pins_emit_most_specific_first_across_outbounds() {
+        let app = AppConfig::default();
+        let id = app.clients[0].id;
+        let now = chrono::Utc::now();
+        let pinned = RoutePinsDocument {
+            revision: 1,
+            pins: vec![
+                PinnedRoute {
+                    target: DirectTarget::Domain("google.com".into()),
+                    outbound: Outbound::Direct,
+                    list_id: None,
+                    resolved_ips: vec![],
+                    created_at: now,
+                    refreshed_at: None,
+                },
+                PinnedRoute {
+                    target: DirectTarget::Domain("developer.google.com".into()),
+                    outbound: Outbound::client(id),
+                    list_id: None,
+                    resolved_ips: vec![],
+                    created_at: now,
+                    refreshed_at: None,
+                },
+            ],
+            lists: vec![],
+        };
+        let generated = generate_config(&app, Platform::Linux, &paths(), &pinned).expect("config");
+        let group = app.clients[0].group_name();
+        let specific = generated
+            .yaml
+            .find(&format!("DOMAIN-SUFFIX,developer.google.com,{group}"))
+            .expect("specific pin");
+        let root = generated
+            .yaml
+            .find("DOMAIN-SUFFIX,google.com,DIRECT")
+            .expect("root pin");
+        assert!(
+            specific < root,
+            "the more specific pin must be evaluated first"
+        );
+    }
+
+    #[test]
+    fn fail_closed_rejects_dead_client_pins_and_match() {
+        let app = AppConfig::default();
+        assert!(app.behavior.fail_closed);
+        let id = app.clients[0].id;
+        // A degraded handle filters out of the ready set, so the default
+        // client is "down" while still enabled.
+        let dead = EgressHandle {
+            client_id: id,
+            preset: app.clients[0].preset,
+            kind: EgressKind::LocalProxy,
+            ready: false,
+            degraded: true,
+            outbound: None,
+            transport_excludes: Vec::new(),
+        };
+        let pinned = RoutePinsDocument {
+            revision: 1,
+            pins: vec![PinnedRoute {
+                target: DirectTarget::Domain("office.example".into()),
+                outbound: Outbound::client(id),
+                list_id: None,
+                resolved_ips: vec![],
+                created_at: chrono::Utc::now(),
+                refreshed_at: None,
+            }],
+            lists: vec![],
+        };
+        let generated =
+            generate_config_with_handles(&app, Platform::Linux, &paths(), &pinned, &[dead.clone()])
+                .expect("config");
+        assert!(generated.yaml.contains("MATCH,REJECT"));
+        assert!(generated
+            .yaml
+            .contains("DOMAIN-SUFFIX,office.example,REJECT"));
+        assert!(generated.yaml.contains(&format!(
+            "RULE-SET,custom-{}-ips,REJECT",
+            id.as_hyphenated()
+        )));
+        // REJECT is not a proxy group, so DoH must not be pinned to it.
+        assert!(!generated.yaml.contains("dns-query#REJECT"));
+
+        // Per-client exclusion downgrades the block to DIRECT.
+        let mut excluded = app.clone();
+        excluded.clients[0].allow_direct_when_down = true;
+        let generated = generate_config_with_handles(
+            &excluded,
+            Platform::Linux,
+            &paths(),
+            &RoutePinsDocument::default(),
+            &[dead.clone()],
+        )
+        .expect("config");
+        assert!(generated.yaml.contains("MATCH,DIRECT"));
+        assert!(!generated.yaml.contains("MATCH,REJECT"));
+
+        // Disabling the global switch restores the old DIRECT fallback.
+        let mut open = app;
+        open.behavior.fail_closed = false;
+        let generated = generate_config_with_handles(
+            &open,
+            Platform::Linux,
+            &paths(),
+            &RoutePinsDocument::default(),
+            &[dead],
+        )
+        .expect("config");
+        assert!(generated.yaml.contains("MATCH,DIRECT"));
     }
 
     #[test]

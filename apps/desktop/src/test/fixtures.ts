@@ -12,6 +12,7 @@ export function baseSettings(overrides: Partial<AppConfig> = {}): AppConfig {
         id: MOCK_HIDDIFY_ID,
         preset: "hiddify",
         enabled: true,
+        allow_direct_when_down: false,
         config: {
           kind: "local_proxy",
           host: "127.0.0.1",
@@ -39,6 +40,7 @@ export function baseSettings(overrides: Partial<AppConfig> = {}): AppConfig {
       launch_at_login: false,
       connect_at_launch: false,
       close_to_tray: true,
+      fail_closed: true,
     },
     ...overrides,
   };

@@ -788,7 +788,10 @@ impl<B: PlatformBackend> Engine<B> {
         }
         self.reserve_lifecycle(LifecycleBusy::ApplyingRules).await?;
         let cancel = CancellationToken::new();
-        let result = tokio::time::timeout(Duration::from_secs(5), self.run_apply_rules(&cancel))
+        // The live apply re-stages the generation and re-validates with the
+        // Mihomo binary (itself up to 10s); a shorter budget made every pin
+        // move time out and silently revert the document.
+        let result = tokio::time::timeout(Duration::from_secs(30), self.run_apply_rules(&cancel))
             .await
             .unwrap_or(Err(CoreError::OperationTimeout));
         self.release_lifecycle(LifecycleBusy::ApplyingRules).await;

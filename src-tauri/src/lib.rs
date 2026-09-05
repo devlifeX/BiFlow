@@ -408,16 +408,29 @@ fn log_linux_webview_workarounds() {
 
 impl AppPaths {
     fn discover(app: &AppHandle) -> Result<Self, String> {
-        let config = dirs::config_dir()
-            .ok_or("configuration directory is unavailable")?
-            .join("biflow")
-            .join("config.toml");
-        let data = dirs::data_local_dir()
-            .ok_or("local data directory is unavailable")?
-            .join("biflow");
-        let cache = dirs::cache_dir()
-            .ok_or("cache directory is unavailable")?
-            .join("biflow");
+        // A dev run must never open the production profile: schema migration
+        // is one-way, so `dev.sh` points config/data/cache at a sibling
+        // profile and the installed app keeps working.
+        let profile = std::env::var_os("BIFLOW_DEV_PROFILE")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let (config_root, data_root, cache_root) = match &profile {
+            Some(root) => (root.join("config"), root.join("data"), root.join("cache")),
+            None => (
+                dirs::config_dir()
+                    .ok_or("configuration directory is unavailable")?
+                    .join("biflow"),
+                dirs::data_local_dir()
+                    .ok_or("local data directory is unavailable")?
+                    .join("biflow"),
+                dirs::cache_dir()
+                    .ok_or("cache directory is unavailable")?
+                    .join("biflow"),
+            ),
+        };
+        let config = config_root.join("config.toml");
+        let data = data_root;
+        let cache = cache_root;
         let resource_root = app
             .path()
             .resource_dir()

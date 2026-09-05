@@ -220,10 +220,17 @@ const HAPP_SPEC: PresetSpec = PresetSpec {
     kind: EgressKind::LocalProxy,
     status: PresetStatus::Working,
     default_host: "127.0.0.1",
-    default_port: Some(3067),
-    linux_bypass: &["Happ", "*Happ*", "sing-box"],
-    windows_bypass: &["Happ.exe", "*Happ*", "sing-box.exe"],
-    install_hint: "Run Happ and expose a local SOCKS or mixed port.",
+    // Happ runs an Xray core; its local SOCKS listener defaults to 10808.
+    default_port: Some(10_808),
+    linux_bypass: &["Happ", "*Happ*", "sing-box", "xray", "v2ray"],
+    windows_bypass: &[
+        "Happ.exe",
+        "*Happ*",
+        "sing-box.exe",
+        "xray.exe",
+        "v2ray.exe",
+    ],
+    install_hint: "Run Happ and expose a local SOCKS or mixed port (default 10808).",
     downloads: PresetDownloads {
         linux: "https://www.happ.su/main/download",
         windows: "https://www.happ.su/main/download",
@@ -316,6 +323,10 @@ pub struct ClientInstance {
     pub id: ClientId,
     pub preset: PresetId,
     pub enabled: bool,
+    /// Per-client fail-closed exclusion: when this client is down, let its
+    /// traffic fall back to DIRECT instead of REJECT (accepts the IP leak).
+    #[serde(default)]
+    pub allow_direct_when_down: bool,
     pub config: ClientConfig,
 }
 
@@ -327,6 +338,7 @@ impl ClientInstance {
             id,
             preset: PresetId::Hiddify,
             enabled: true,
+            allow_direct_when_down: false,
             config: ClientConfig::local_proxy_default(PresetId::Hiddify),
         }
     }
@@ -338,6 +350,7 @@ impl ClientInstance {
             id: ClientId::new(),
             preset,
             enabled: true,
+            allow_direct_when_down: false,
             config: ClientConfig::from_preset(preset),
         }
     }

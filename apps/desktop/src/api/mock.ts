@@ -93,6 +93,7 @@ function initialSettings(): AppConfig {
         id: MOCK_HIDDIFY_ID,
         preset: "hiddify",
         enabled: true,
+        allow_direct_when_down: false,
         config: {
           kind: "local_proxy",
           host: "127.0.0.1",
@@ -120,6 +121,7 @@ function initialSettings(): AppConfig {
       launch_at_login: false,
       connect_at_launch: false,
       close_to_tray: true,
+      fail_closed: true,
     },
   };
 }
@@ -343,16 +345,33 @@ function canonicalTarget(input: string): {
     throw new Error("domain must have a registrable root");
   }
   const lastTwo = labels.slice(-2).join(".");
-  if (PRIVATE_SUFFIXES.includes(lastTwo)) {
-    if (labels.length < 3) {
-      throw new Error("public suffixes cannot be pinned");
+  if (PRIVATE_SUFFIXES.includes(lastTwo) && labels.length < 3) {
+    throw new Error("public suffixes cannot be pinned");
+  }
+  // Pins stay exactly as typed: a root covers every subdomain, and a more
+  // specific subdomain pin can live in another list and win.
+  return { kind: "domain", value: labels.join(".") };
+}
+
+function pinSpecificity(pin: string): number {
+  return pin.split(".").length;
+}
+
+function bestPinMatch(
+  target: string,
+  candidates: PinnedRoute[],
+): PinnedRoute | undefined {
+  let best: PinnedRoute | undefined;
+  for (const item of candidates) {
+    if (!pinMatchesHost(item, target)) continue;
+    if (
+      !best ||
+      pinSpecificity(item.target.value) > pinSpecificity(best.target.value)
+    ) {
+      best = item;
     }
-    return { kind: "domain", value: labels.slice(-3).join(".") };
   }
-  if (labels.at(-1) === "uk" && labels.at(-2) === "co" && labels.length >= 3) {
-    return { kind: "domain", value: labels.slice(-3).join(".") };
-  }
-  return { kind: "domain", value: lastTwo };
+  return best;
 }
 
 function domainMatchesPin(host: string, pin: string): boolean {
@@ -1100,29 +1119,21 @@ export const mockApi = {
       return route(target, { kind: "direct" }, "private_or_local", target);
     }
     const enabled = enabledClientIds();
-    const clientPin = directRules.pins.find(
-      (item) =>
-        item.outbound.kind === "client" &&
-        enabled.has(item.outbound.client_id) &&
-        pinMatchesHost(item, target),
+    // Longest matching pin wins across lists and outbounds.
+    const pin = bestPinMatch(
+      target,
+      directRules.pins.filter(
+        (item) =>
+          item.outbound.kind === "direct" ||
+          enabled.has(item.outbound.client_id),
+      ),
     );
-    if (clientPin) {
+    if (pin) {
       return route(
         target,
-        clientPin.outbound,
-        "vpn_rule",
-        clientPin.target.value,
-      );
-    }
-    const directPin = directRules.pins.find(
-      (item) => item.outbound.kind === "direct" && pinMatchesHost(item, target),
-    );
-    if (directPin) {
-      return route(
-        target,
-        { kind: "direct" },
-        "custom_rule",
-        directPin.target.value,
+        pin.outbound,
+        pin.outbound.kind === "direct" ? "custom_rule" : "vpn_rule",
+        pin.target.value,
       );
     }
     if (target.endsWith(".ir") || target === "ir") {

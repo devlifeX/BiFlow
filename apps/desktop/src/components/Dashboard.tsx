@@ -311,12 +311,14 @@ function Component({
     <div className="rounded-2xl border border-ink/10 bg-surface p-4">
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
-          <span className="text-muted" aria-hidden>
+          <span className="shrink-0 text-muted" aria-hidden>
             {icon}
           </span>
-          <span className="font-semibold">{name}</span>
+          <span className="min-w-0 truncate font-semibold">{name}</span>
         </div>
-        <StatusPill phase={status.phase} />
+        <span className="shrink-0">
+          <StatusPill phase={status.phase} />
+        </span>
       </div>
       <p className="mt-3 min-h-10 text-xs leading-5 text-muted">
         {status.message ?? t("statusDetailUnavailable")}

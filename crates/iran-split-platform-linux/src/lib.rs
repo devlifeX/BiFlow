@@ -208,6 +208,7 @@ pub struct LinuxBackend {
     egress_exit_ip: Mutex<Option<String>>,
     egress_handles: Mutex<Vec<EgressHandle>>,
     side_tunnel_auth_files: Mutex<Vec<NamedTempFile>>,
+    launched_clients: Mutex<Vec<Child>>,
 }
 
 impl LinuxBackend {
@@ -222,6 +223,7 @@ impl LinuxBackend {
             egress_exit_ip: Mutex::new(None),
             egress_handles: Mutex::new(Vec::new()),
             side_tunnel_auth_files: Mutex::new(Vec::new()),
+            launched_clients: Mutex::new(Vec::new()),
         }
     }
 
@@ -328,7 +330,10 @@ impl LinuxBackend {
                 self.start_hiddify_client(client, required, &cancel).await
             } else {
                 match client.spec().kind {
-                    EgressKind::LocalProxy => self.start_local_proxy_client(client, required).await,
+                    EgressKind::LocalProxy => {
+                        self.start_local_proxy_client(client, required, &cancel)
+                            .await
+                    }
                     EgressKind::OwnedSideTunnel => {
                         self.start_openvpn_client(client, cancel.clone()).await
                     }
@@ -379,12 +384,17 @@ impl LinuxBackend {
         &self,
         client: &ClientInstance,
         required: bool,
+        cancel: &CancellationToken,
     ) -> Result<EgressHandle, CoreError> {
         let Some((host, port)) = local_proxy_endpoint(client) else {
             return Err(CoreError::ConfigInvalid(
                 "local proxy handle is missing".into(),
             ));
         };
+        if !Self::tcp_listening(&host, port).await {
+            self.launch_local_proxy_if_needed(client, &host, port, cancel)
+                .await?;
+        }
         // ADR 0018: every local-proxy egress is verified before the TUN starts,
         // so pinned or MATCH traffic cannot blackhole into a dead proxy.
         let exit_ip = probe_hiddify_egress(&host, port, Duration::from_secs(3))
@@ -400,6 +410,63 @@ impl LinuxBackend {
         }
         synthesized_local_handle(client)
             .ok_or_else(|| CoreError::ConfigInvalid("local proxy handle is missing".into()))
+    }
+
+    /// Launches a local-proxy client that is not listening yet (same
+    /// contract as the Hiddify auto-launch): configured path first, then the
+    /// preset's process names on PATH; waits until the port answers.
+    async fn launch_local_proxy_if_needed(
+        &self,
+        client: &ClientInstance,
+        host: &str,
+        port: u16,
+        cancel: &CancellationToken,
+    ) -> Result<(), CoreError> {
+        let ClientConfig::LocalProxy {
+            executable,
+            start_timeout_seconds,
+            ..
+        } = &client.config
+        else {
+            return Err(CoreError::ConfigInvalid(
+                "client is not a local proxy".into(),
+            ));
+        };
+        let resolved = match executable {
+            ExecutableSetting::Path(path) => path.is_file().then(|| path.clone()),
+            ExecutableSetting::Auto => discover_local_proxy_binary(&client.spec()),
+        };
+        let Some(binary) = resolved else {
+            return Err(CoreError::Platform(format!(
+                "{} is not running and its executable was not found; start it once or set its path on the client card",
+                client.spec().id
+            )));
+        };
+        let child = Command::new(binary)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(false)
+            .spawn()
+            .map_err(|error| CoreError::Platform(error.to_string()))?;
+        self.launched_clients.lock().await.push(child);
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs((*start_timeout_seconds).max(1));
+        loop {
+            if Self::tcp_listening(host, port).await {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(CoreError::Platform(format!(
+                    "{} was launched but its local port did not open in time",
+                    client.spec().id
+                )));
+            }
+            tokio::select! {
+                () = cancel.cancelled() => return Err(CoreError::Cancelled),
+                () = tokio::time::sleep(Duration::from_millis(250)) => {}
+            }
+        }
     }
 
     async fn hiddify_listening(config: &AppConfig) -> bool {
@@ -428,7 +495,13 @@ impl LinuxBackend {
                         Some(format!("Listening on {host}:{port}")),
                     )
                 }
-                _ => ComponentStatus::new(
+                Some((host, port)) => ComponentStatus::new(
+                    ComponentPhase::Stopped,
+                    Some(format!(
+                        "nothing is listening on {host}:{port}; check the port on the client card"
+                    )),
+                ),
+                None => ComponentStatus::new(
                     ComponentPhase::Stopped,
                     Some("local proxy is not listening".into()),
                 ),
@@ -466,6 +539,11 @@ impl LinuxBackend {
             let home = PathBuf::from(home);
             candidates.push(home.join(".local/bin/hiddify"));
             candidates.push(home.join(".local/bin/hiddify-app"));
+            // The installed app keeps its managed Hiddify here. A dev run
+            // uses an isolated profile, so without these entries it could
+            // not find the Hiddify the user already installed.
+            candidates.push(home.join(".local/share/biflow/bin/hiddify"));
+            candidates.push(home.join(".local/share/biflow/apps/Hiddify.AppImage"));
         }
         if let Some(path) = std::env::var_os("PATH") {
             for dir in std::env::split_paths(&path) {
@@ -1124,6 +1202,22 @@ impl PlatformBackend for LinuxBackend {
 
 fn platform_error(error: &std::io::Error) -> CoreError {
     CoreError::Platform(error.to_string())
+}
+
+/// Finds a launchable binary for a `LocalProxy` preset by its process names
+/// (wildcards excluded), preferring the first — the GUI app — over cores.
+fn discover_local_proxy_binary(spec: &iran_split_config::PresetSpec) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let directories: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    for name in spec.linux_bypass.iter().filter(|name| !name.contains('*')) {
+        for directory in &directories {
+            let candidate = directory.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 /// Writes `username\npassword` to a 0600 temp file for `--auth-user-pass`.

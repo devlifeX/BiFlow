@@ -759,7 +759,15 @@ fn open_url_allowed(url: &str) -> bool {
         "https://github.com/devlifeX/BiFlow",
         "https://raw.githubusercontent.com/devlifeX/BiFlow/",
     ];
-    PREFIXES.iter().any(|prefix| url.starts_with(prefix))
+    if PREFIXES.iter().any(|prefix| url.starts_with(prefix)) {
+        return true;
+    }
+    // Catalog download pages are part of the shipped preset table, so the
+    // allowlist can never drift from the buttons that use it.
+    iran_split_config::PresetId::all().iter().any(|preset| {
+        let downloads = preset.spec().downloads;
+        url == downloads.linux || url == downloads.windows
+    })
 }
 
 #[cfg(test)]

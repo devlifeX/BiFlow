@@ -13,3 +13,6 @@ src-tauri/binaries/*
 !src-tauri/binaries/.gitkeep
 packaging/staged/
 resources/rules/cache/
+
+test-results/
+apps/desktop/test-results/

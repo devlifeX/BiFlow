@@ -76,6 +76,7 @@ interface AppStore {
   addClient: (preset: PresetId) => Promise<void>;
   deleteClient: (id: string, moveTo?: string) => Promise<void>;
   setClientEnabled: (id: string, enabled: boolean) => Promise<void>;
+  setClientAllowDirectWhenDown: (id: string, allow: boolean) => Promise<void>;
   updateClient: (id: string, config: ClientConfig) => Promise<void>;
   setDefaultRoute: (route: DefaultRoute) => Promise<void>;
   routeFallbackNotice: string | null;
@@ -434,6 +435,19 @@ export const useAppStore = create<AppStore>((set, get) => ({
       ...current,
       clients: current.clients.map((client) =>
         client.id === id ? { ...client, enabled } : client,
+      ),
+    };
+    await get().saveSettings(next);
+  },
+  setClientAllowDirectWhenDown: async (id, allow) => {
+    const current = get().settings;
+    if (!current) return;
+    const next = {
+      ...current,
+      clients: current.clients.map((client) =>
+        client.id === id
+          ? { ...client, allow_direct_when_down: allow }
+          : client,
       ),
     };
     await get().saveSettings(next);

@@ -44,6 +44,7 @@ const formSchema = z
     launchAtLogin: z.boolean(),
     connectAtLaunch: z.boolean(),
     closeToTray: z.boolean(),
+    failClosed: z.boolean(),
   })
   .superRefine((values, context) => {
     if (values.directDnsPreset !== "custom") return;
@@ -73,6 +74,7 @@ function toValues(config: AppConfig): FormValues {
     launchAtLogin: config.behavior.launch_at_login,
     connectAtLaunch: config.behavior.connect_at_launch,
     closeToTray: config.behavior.close_to_tray,
+    failClosed: config.behavior.fail_closed,
   };
 }
 
@@ -97,6 +99,7 @@ function merge(config: AppConfig, values: FormValues): AppConfig {
       launch_at_login: values.launchAtLogin,
       connect_at_launch: values.connectAtLaunch,
       close_to_tray: values.closeToTray,
+      fail_closed: values.failClosed,
     },
   };
 }
@@ -289,6 +292,10 @@ export function Settings({ settings }: { settings: AppConfig }) {
                 <Check
                   label="Close window to tray"
                   registration={register("closeToTray")}
+                />
+                <Check
+                  label="Block traffic when its client is down (fail closed)"
+                  registration={register("failClosed")}
                 />
               </div>
             </Fieldset>

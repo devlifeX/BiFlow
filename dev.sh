@@ -7,6 +7,9 @@ SOURCE_MIHOMO="${SOURCE_STACK_DIR}/.tools/mihomo"
 VENDORED_MIHOMO="${PROJECT_DIR}/vendor/mihomo/linux-x86_64/mihomo"
 EXPECTED_MIHOMO_SHA256="9c397be7489538628fae781bc005e4c5b8cd7b0961b8bb2ca815c8150f193577"
 TARGET_DIR="${PROJECT_DIR}/target"
+# One shared definition: the app (BIFLOW_DEV_PROFILE) and the helper staging
+# path must agree, or the helper cannot read staged generations.
+DEV_PROFILE_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/biflow-dev-profile"
 DEV_HELPER_UNIT=""
 DEV_HELPER_ROOT=""
 DEV_HELPER_LIB_ROOT=""
@@ -203,7 +206,9 @@ prepare_dev_helper() {
     die "could not determine the developer home directory"
   data_base="${XDG_DATA_HOME:-${account_home}/.local/share}"
   [[ "${data_base}" == /* ]] || die "XDG_DATA_HOME must be an absolute path"
-  staging_dir="${data_base}/biflow/runtime/generations"
+  # The dev app stages generations inside its isolated profile, so the dev
+  # helper must read from the same place — never the installed app's data.
+  staging_dir="${DEV_PROFILE_DIR}/data/runtime/generations"
   tun_name="$(read_dev_tun_name "${account_home}")"
 
   DEV_HELPER_UNIT="biflow-dev-helper-${developer_uid}.service"
@@ -225,7 +230,7 @@ prepare_dev_helper() {
   [[ "${mihomo_hash}" == "${EXPECTED_MIHOMO_SHA256}" ]] || \
     die "development Mihomo checksum changed during helper setup"
   command mkdir -p -- "${staging_dir}"
-  command chmod 700 -- "${data_base}/biflow/runtime" "${staging_dir}"
+  command chmod 700 -- "${DEV_PROFILE_DIR}/data/runtime" "${staging_dir}"
 
   DEV_HELPER_CONFIG_TEMP="$(command mktemp "/tmp/biflow-helper-${developer_uid}.XXXXXX.toml")"
   command chmod 600 -- "${DEV_HELPER_CONFIG_TEMP}"
@@ -383,6 +388,12 @@ run_dev() {
   trap 'exit 143' TERM
   trap 'exit 129' HUP
   prepare_dev_helper
+  # Keep the development profile away from the installed app's profile:
+  # config schema migration is one-way, and a dev run must never break the
+  # release build the developer relies on.
+  export BIFLOW_DEV_PROFILE="${DEV_PROFILE_DIR}"
+  command mkdir -p -- "${BIFLOW_DEV_PROFILE}"
+  command printf 'Development profile: %s\n' "${BIFLOW_DEV_PROFILE}"
   command pnpm tauri dev
 }
 

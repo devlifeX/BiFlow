@@ -23,6 +23,7 @@ export function ClientRegistry() {
     addClient,
     deleteClient,
     setClientEnabled,
+    setClientAllowDirectWhenDown,
     updateClient,
     setDefaultRoute,
     pinRoute,
@@ -104,48 +105,48 @@ export function ClientRegistry() {
             const added = !canAddPreset(preset.id, clients);
             const disabled = preset.status !== "working" || added;
             return (
-              <button
+              <div
                 key={preset.id}
-                type="button"
-                disabled={disabled || actionPending}
-                onClick={() => {
-                  void addClient(preset.id).then(() => setCatalogOpen(false));
-                }}
-                className="rounded-xl border border-ink/10 p-3 text-start disabled:opacity-50"
+                className={`flex flex-col rounded-xl border border-ink/10 p-3 text-start ${
+                  disabled ? "opacity-60" : ""
+                }`}
               >
-                <p className="font-semibold">{preset.title}</p>
-                <p className="mt-1 text-xs text-muted">{preset.installHint}</p>
+                <button
+                  type="button"
+                  disabled={disabled || actionPending}
+                  onClick={() => {
+                    void addClient(preset.id).then(() => setCatalogOpen(false));
+                  }}
+                  className="text-start"
+                >
+                  <p className="font-semibold">{preset.title}</p>
+                  <p className="mt-1 text-xs text-muted">
+                    {preset.installHint}
+                  </p>
+                  {added ? (
+                    <p className="mt-2 text-xs font-semibold">
+                      {t("alreadyAdded")}
+                    </p>
+                  ) : null}
+                  {preset.status !== "working" ? (
+                    <p className="mt-2 text-xs font-semibold">
+                      {t("catalogOnly")}
+                    </p>
+                  ) : null}
+                </button>
                 {preset.status === "working" ? (
-                  <span
-                    role="link"
-                    tabIndex={0}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void desktop.openUrl(downloadUrlFor(preset, platform));
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.stopPropagation();
-                        void desktop.openUrl(downloadUrlFor(preset, platform));
-                      }
-                    }}
-                    className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-brand underline"
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void desktop.openUrl(downloadUrlFor(preset, platform))
+                    }
+                    className="mt-2 inline-flex items-center gap-1 self-start text-xs font-semibold text-brand underline"
                   >
                     <Download size={12} aria-hidden />
                     {t("downloadInstall")}
-                  </span>
+                  </button>
                 ) : null}
-                {added ? (
-                  <p className="mt-2 text-xs font-semibold">
-                    {t("alreadyAdded")}
-                  </p>
-                ) : null}
-                {preset.status !== "working" ? (
-                  <p className="mt-2 text-xs font-semibold">
-                    {t("catalogOnly")}
-                  </p>
-                ) : null}
-              </button>
+              </div>
             );
           })}
         </div>
@@ -195,6 +196,9 @@ export function ClientRegistry() {
               ).then(() => setPendingDelete(null));
             }}
             onEnabled={(enabled) => void setClientEnabled(client.id, enabled)}
+            onAllowDirectWhenDown={(allow) =>
+              void setClientAllowDirectWhenDown(client.id, allow)
+            }
             onConfig={(next) => void updateClient(client.id, next.config)}
             onPin={(host) => void pinRoute(host, client.id)}
             onRemovePin={(host) => void removeRule(host)}
@@ -220,6 +224,7 @@ function ClientCard({
   onCancelDelete,
   onConfirmDelete,
   onEnabled,
+  onAllowDirectWhenDown,
   onConfig,
   onPin,
   onRemovePin,
@@ -238,6 +243,7 @@ function ClientCard({
   onCancelDelete: () => void;
   onConfirmDelete: () => void;
   onEnabled: (enabled: boolean) => void;
+  onAllowDirectWhenDown: (allow: boolean) => void;
   onConfig: (next: ClientInstance) => void;
   onPin: (host: string) => Promise<void> | void;
   onRemovePin: (host: string) => void;
@@ -278,7 +284,7 @@ function ClientCard({
             {t("downloadInstall")}
           </button>
         </div>
-        <label className="flex items-center gap-2 text-xs font-semibold">
+        <label className="flex shrink-0 items-center gap-2 text-xs font-semibold">
           <input
             type="checkbox"
             checked={client.enabled}
@@ -287,6 +293,15 @@ function ClientCard({
           {t("enabled")}
         </label>
       </div>
+
+      <label className="mt-3 flex items-center gap-2 text-xs text-muted">
+        <input
+          type="checkbox"
+          checked={client.allow_direct_when_down}
+          onChange={(event) => onAllowDirectWhenDown(event.target.checked)}
+        />
+        {t("allowDirectWhenDown")}
+      </label>
 
       {client.config.kind === "local_proxy" ? (
         <div className="mt-3 grid gap-2 sm:grid-cols-2">

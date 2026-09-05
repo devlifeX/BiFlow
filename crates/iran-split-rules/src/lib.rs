@@ -19,7 +19,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-pub use canonical::{canonical_target, domain_matches_pin, registrable_domain};
+pub use canonical::{canonical_target, domain_matches_pin, domain_specificity, registrable_domain};
 pub use cloud::{
     bundled_snapshot_is_complete, ensure_bundled_snapshot, provider_entry_count,
     resolve_provider_path, CloudRuleSetStatus, CloudRuleStore, CloudRulesStatus, CloudSyncError,
@@ -406,13 +406,35 @@ impl RuleManager {
         let path = path.into();
         let document = if path.exists() {
             let bytes = fs::read(&path)?;
-            let original = decode_pins_document(&bytes, legacy)?;
-            let migrated = canonicalize_document(original.clone());
-            if migrated != original {
-                backup_last_good(&path)?;
-                publish(&path, &migrated)?;
+            match decode_pins_document(&bytes, legacy) {
+                Ok(original) => {
+                    let migrated = canonicalize_document(original.clone());
+                    if migrated != original {
+                        backup_last_good(&path)?;
+                        publish(&path, &migrated)?;
+                    }
+                    migrated
+                }
+                Err(RuleError::Json(cause)) => {
+                    // A document another (older or newer) build wrote must
+                    // never keep this build from starting: quarantine the
+                    // file and begin empty. The copy stays for recovery.
+                    tracing::error!(
+                        event = "rules.document_quarantined",
+                        section = "rules",
+                        initiator = "rule_manager",
+                        cause = %cause,
+                        trace_route = "rule_manager->load->decode",
+                        "route pins document is unreadable; starting empty and keeping a .corrupt copy"
+                    );
+                    let quarantine = path.with_extension("json.corrupt");
+                    fs::copy(&path, quarantine)?;
+                    let empty = RoutePinsDocument::default();
+                    publish(&path, &empty)?;
+                    empty
+                }
+                Err(error) => return Err(error),
             }
-            migrated
         } else {
             RoutePinsDocument::default()
         };
@@ -540,13 +562,18 @@ impl RuleManager {
             .retain(|pin| pin.target != target || pin.outbound == outbound);
         if already_pinned {
             // Keep the pin but move it into the requested list if needed.
+            let mut moved = false;
             for pin in &mut document.pins {
-                if pin.target == target {
+                if pin.target == target && pin.list_id != Some(list_id) {
                     pin.list_id = Some(list_id);
+                    moved = true;
                 }
             }
             if other_count == 0 {
-                publish(&self.path, &document)?;
+                if moved {
+                    document.revision = document.revision.saturating_add(1);
+                    publish(&self.path, &document)?;
+                }
                 return Ok(document.clone());
             }
         } else {
@@ -1037,19 +1064,19 @@ impl RuleSet {
         }
         let domain = normalize_domain(target)?;
         let canonical = registrable_domain(&domain).unwrap_or_else(|_| domain.clone());
-        if let Some((client_id, pin)) = self.find_client_domain(&domain, &canonical) {
+        // The most specific matching pin wins across every list, so a
+        // `developer.google.com` pin overrides a `google.com` pin even when
+        // they route to different outbounds.
+        if let Some((outbound, pin)) = self.best_pin_match(&domain) {
+            let reason = match outbound {
+                Outbound::Direct => DecisionReason::CustomRule,
+                Outbound::Client { .. } => DecisionReason::VpnRule,
+            };
             return Ok(RouteDecision {
-                outbound: Outbound::client(client_id),
-                reason: DecisionReason::VpnRule,
+                outbound,
+                reason,
                 matched_rule: Some(pin),
             });
-        }
-        if let Some(pin) = self
-            .custom_domains
-            .iter()
-            .find(|pin| domain_matches_pin(&domain, pin) || *pin == &canonical)
-        {
-            return Ok(direct(DecisionReason::CustomRule, Some(pin.clone())));
         }
         if let Some(rule) = self
             .iran_domains
@@ -1072,16 +1099,25 @@ impl RuleSet {
         })
     }
 
-    fn find_client_domain(&self, domain: &str, canonical: &str) -> Option<(ClientId, String)> {
+    fn best_pin_match(&self, domain: &str) -> Option<(Outbound, String)> {
+        let mut best: Option<(usize, Outbound, String)> = None;
+        let mut consider = |outbound: Outbound, pin: &str| {
+            if domain_matches_pin(domain, pin) {
+                let score = domain_specificity(pin);
+                if best.as_ref().is_none_or(|(current, _, _)| score > *current) {
+                    best = Some((score, outbound, pin.to_owned()));
+                }
+            }
+        };
         for (client_id, pins) in &self.client_domains {
-            if let Some(pin) = pins
-                .iter()
-                .find(|pin| domain_matches_pin(domain, pin) || *pin == canonical)
-            {
-                return Some((*client_id, pin.clone()));
+            for pin in pins {
+                consider(Outbound::client(*client_id), pin);
             }
         }
-        None
+        for pin in &self.custom_domains {
+            consider(Outbound::Direct, pin);
+        }
+        best.map(|(_, outbound, pin)| (outbound, pin))
     }
 
     fn decide_ip(&self, address: IpAddr) -> RouteDecision {
@@ -1191,6 +1227,19 @@ mod tests {
             test_outbound(),
             &enabled_clients(),
         )
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_document_is_quarantined_instead_of_blocking_startup() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("direct-rules.json");
+        fs::write(&path, b"{ not json at all").expect("write");
+        let manager = RuleManager::load(&path, Arc::new(FixedResolver)).expect("load starts empty");
+        let document = manager.list().await;
+        assert!(document.pins.is_empty());
+        assert!(directory.path().join("direct-rules.json.corrupt").exists());
+        // The published replacement parses cleanly on the next load.
+        RuleManager::load(&path, Arc::new(FixedResolver)).expect("reload");
     }
 
     #[tokio::test]
@@ -1500,7 +1549,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_subdomain_pin_stores_the_registrable_root_and_covers_siblings() {
+    async fn a_subdomain_pin_beats_a_root_pin_in_another_list() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let manager = RuleManager::load(
+            directory.path().join("direct-rules.json"),
+            Arc::new(FixedResolver),
+        )
+        .expect("manager");
+        // Root pin to DIRECT: covers itself and every subdomain.
+        let added = manager.add("google.com", 0).await.expect("add root");
+        // A more specific subdomain pin routed to the client.
+        let added = manager
+            .pin("developer.google.com", test_outbound(), added.revision)
+            .await
+            .expect("pin subdomain");
+        assert_eq!(added.pins.len(), 2);
+        let set = iran_rule_set(&added);
+        // The wildcard covers unpinned subdomains…
+        assert_eq!(
+            set.decide("gemini.google.com").expect("sub").outbound,
+            Outbound::Direct
+        );
+        // …but the longer pin wins for its own subtree.
+        assert_eq!(
+            set.decide("developer.google.com").expect("exact").outbound,
+            test_outbound()
+        );
+        assert_eq!(
+            set.decide("api.developer.google.com")
+                .expect("nested")
+                .outbound,
+            test_outbound()
+        );
+        assert_eq!(
+            set.decide("notgoogle.com").expect("sibling").outbound,
+            test_outbound()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_subdomain_pin_stays_exact_and_covers_its_own_subtree() {
         let directory = tempfile::tempdir().expect("tempdir");
         let manager = RuleManager::load(
             directory.path().join("direct-rules.json"),
@@ -1511,30 +1599,33 @@ mod tests {
         assert_eq!(added.pins.len(), 1);
         assert_eq!(
             added.pins[0].target,
-            DirectTarget::Domain("example.com".into())
+            DirectTarget::Domain("api.shop.example.com".into())
         );
         let set = iran_rule_set(&added);
         assert_eq!(
-            set.decide("www.example.com").expect("www").reason,
+            set.decide("api.shop.example.com").expect("exact").reason,
             DecisionReason::CustomRule
         );
         assert_eq!(
-            set.decide("api.shop.example.com").expect("nested").reason,
+            set.decide("v2.api.shop.example.com")
+                .expect("nested")
+                .reason,
             DecisionReason::CustomRule
         );
+        // Siblings and the bare root are NOT covered by a subdomain pin.
         assert_eq!(
-            set.decide("notexample.com").expect("sibling").outbound,
+            set.decide("www.example.com").expect("sibling").outbound,
             test_outbound()
         );
         let moved = manager
-            .pin("www.example.com", test_outbound(), added.revision)
+            .pin("api.shop.example.com", test_outbound(), added.revision)
             .await
             .expect("move");
         assert!(moved.pins_for(&Outbound::Direct).is_empty());
         assert_eq!(moved.count_for_client(test_client()), 1);
         assert_eq!(
             iran_rule_set(&moved)
-                .decide("cdn.example.com")
+                .decide("v2.api.shop.example.com")
                 .expect("cdn")
                 .outbound,
             test_outbound()
@@ -1586,7 +1677,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_migrates_exact_hosts_to_the_registrable_root() {
+    async fn load_keeps_exact_hosts_and_assigns_list_membership() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("direct-rules.json");
         let original = serde_json::json!({
@@ -1610,11 +1701,18 @@ mod tests {
         fs::write(&path, serde_json::to_vec_pretty(&original).expect("json")).expect("write");
         let manager = RuleManager::load(&path, Arc::new(FixedResolver)).expect("load");
         let loaded = manager.list().await;
-        assert_eq!(loaded.pins.len(), 1);
+        assert_eq!(loaded.pins.len(), 2);
         assert_eq!(
             loaded.pins[0].target,
-            DirectTarget::Domain("example.com".into())
+            DirectTarget::Domain("api.example.com".into())
         );
+        assert_eq!(
+            loaded.pins[1].target,
+            DirectTarget::Domain("www.example.com".into())
+        );
+        assert!(loaded.pins.iter().all(
+            |pin| pin.list_id.is_some() && loaded.list_meta(pin.list_id.expect("id")).is_some()
+        ));
         assert_eq!(loaded.revision, 5);
         assert!(path.with_extension("json.last-good").is_file());
     }

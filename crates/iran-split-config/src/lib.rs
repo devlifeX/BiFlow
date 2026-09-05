@@ -272,10 +272,17 @@ impl Default for RulesConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each field is an independent user-facing behavior toggle"
+)]
 pub struct BehaviorConfig {
     pub launch_at_login: bool,
     pub connect_at_launch: bool,
     pub close_to_tray: bool,
+    /// When a client's egress is down, REJECT its traffic (and unmatched
+    /// traffic bound for it) instead of leaking the real IP over DIRECT.
+    pub fail_closed: bool,
 }
 
 impl Default for BehaviorConfig {
@@ -284,6 +291,7 @@ impl Default for BehaviorConfig {
             launch_at_login: false,
             connect_at_launch: false,
             close_to_tray: true,
+            fail_closed: true,
         }
     }
 }

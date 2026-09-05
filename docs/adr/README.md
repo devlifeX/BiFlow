@@ -73,3 +73,5 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0067](./0067-owned-side-tunnel-invariants.md)           | OwnedSideTunnel invariants                  | Accepted   |
 | [0068](./0068-client-registry-and-egress-kinds.md)       | Client registry and egress kinds            | Accepted   |
 | [0069](./0069-named-rule-lists.md)                       | Named rule lists                            | Accepted   |
+| [0070](./0070-fail-closed-rule-level.md)                 | Rule-level fail-closed                      | Accepted   |
+| [0071](./0071-exact-subdomain-pins.md)                   | Exact subdomain pins, longest match wins    | Accepted   |

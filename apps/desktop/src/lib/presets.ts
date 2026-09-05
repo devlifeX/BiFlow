@@ -57,8 +57,9 @@ export const PRESETS: PresetSpec[] = [
     kind: "local_proxy",
     status: "working",
     title: "Happ",
-    defaultPort: 3067,
-    installHint: "Run Happ and expose a local SOCKS or mixed port.",
+    defaultPort: 10808,
+    installHint:
+      "Run Happ and expose a local SOCKS or mixed port (default 10808).",
     downloads: {
       linux: "https://www.happ.su/main/download",
       windows: "https://www.happ.su/main/download",

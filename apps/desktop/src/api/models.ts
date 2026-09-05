@@ -145,6 +145,7 @@ export interface ClientInstance {
   id: string;
   preset: string;
   enabled: boolean;
+  allow_direct_when_down: boolean;
   config: ClientConfig;
 }
 
@@ -172,6 +173,7 @@ export interface AppConfig {
     launch_at_login: boolean;
     connect_at_launch: boolean;
     close_to_tray: boolean;
+    fail_closed: boolean;
   };
 }
 
