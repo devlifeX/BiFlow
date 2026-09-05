@@ -1,9 +1,9 @@
-import { Download, Plus, Trash2 } from "lucide-react";
+import { Download, FolderOpen, Plus, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { desktop } from "../api/desktop";
 import type { ClientInstance, PinnedRoute, RuleListMeta } from "../api/models";
-import { canAddPreset, enabledClients } from "../lib/clients";
+import { canAddPreset, enabledClients, profileFileName } from "../lib/clients";
 import { defaultRouteFromKey, outboundKey } from "../lib/outbound";
 import {
   downloadUrlFor,
@@ -202,6 +202,7 @@ export function ClientRegistry() {
             onConfig={(next) => void updateClient(client.id, next.config)}
             onPin={(host) => void pinRoute(host, client.id)}
             onRemovePin={(host) => void removeRule(host)}
+            actionPending={actionPending}
             platform={platform}
           />
         ))}
@@ -228,6 +229,7 @@ function ClientCard({
   onConfig,
   onPin,
   onRemovePin,
+  actionPending,
   platform,
 }: {
   client: ClientInstance;
@@ -247,6 +249,7 @@ function ClientCard({
   onConfig: (next: ClientInstance) => void;
   onPin: (host: string) => Promise<void> | void;
   onRemovePin: (host: string) => void;
+  actionPending: boolean;
   platform: string;
 }) {
   const { t } = useTranslation();
@@ -255,6 +258,25 @@ function ClientCard({
     () => presetById(client.preset as PresetId),
     [client.preset],
   );
+
+  async function chooseProfile() {
+    if (client.config.kind !== "owned_side_tunnel") return;
+    try {
+      const path = await desktop.pickProfileFile();
+      if (!path) return;
+      onConfig({
+        ...client,
+        config: {
+          ...client.config,
+          profile_path: path,
+        },
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : t("profileFileInvalid");
+      useAppStore.setState({ error: message });
+    }
+  }
 
   return (
     <article
@@ -345,24 +367,54 @@ function ClientCard({
 
       {client.config.kind === "owned_side_tunnel" ? (
         <div className="mt-3 grid gap-2">
-          <label className="text-xs font-medium">
-            {t("openvpnProfile")}
-            <input
-              value={client.config.profile_path ?? ""}
-              onChange={(event) => {
-                if (client.config.kind !== "owned_side_tunnel") return;
-                onConfig({
-                  ...client,
-                  config: {
-                    ...client.config,
-                    profile_path: event.target.value || null,
-                  },
-                });
-              }}
-              className="mt-1 w-full rounded-xl border-ink/15 bg-canvas"
-              placeholder="profile.ovpn"
-            />
-          </label>
+          <div className="text-xs font-medium">
+            <span id={`${client.id}-profile-label`}>{t("openvpnProfile")}</span>
+            <div className="mt-1 flex items-center gap-2">
+              <p
+                data-testid="profile-file-name"
+                aria-labelledby={`${client.id}-profile-label`}
+                title={client.config.profile_path ?? undefined}
+                className="min-w-0 flex-1 truncate rounded-xl border border-ink/15 bg-canvas px-3 py-2 text-sm font-normal"
+              >
+                {profileFileName(client.config.profile_path) ??
+                  t("noFileChosen")}
+              </p>
+              <button
+                type="button"
+                data-testid="choose-profile-file"
+                disabled={actionPending}
+                onClick={() => {
+                  void chooseProfile();
+                }}
+                className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-brand px-3 py-2 font-semibold text-white"
+              >
+                <FolderOpen size={16} aria-hidden />
+                {t("chooseFile")}
+              </button>
+              {client.config.profile_path ? (
+                <button
+                  type="button"
+                  data-testid="clear-profile-file"
+                  disabled={actionPending}
+                  onClick={() => {
+                    if (client.config.kind !== "owned_side_tunnel") return;
+                    onConfig({
+                      ...client,
+                      config: {
+                        ...client.config,
+                        profile_path: null,
+                      },
+                    });
+                  }}
+                  aria-label={t("clearFile")}
+                  title={t("clearFile")}
+                  className="inline-flex shrink-0 items-center justify-center rounded-xl border border-ink/15 p-2 text-muted hover:text-danger"
+                >
+                  <X size={16} aria-hidden />
+                </button>
+              ) : null}
+            </div>
+          </div>
           <div className="grid gap-2 sm:grid-cols-2">
             <label className="text-xs font-medium">
               {t("openvpnUsername")}

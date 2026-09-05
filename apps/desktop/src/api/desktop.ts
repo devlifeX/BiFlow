@@ -206,6 +206,9 @@ export const desktop = {
   openUrl(url: string): Promise<void> {
     return native ? invoke("open_external_url", { url }) : mockApi.openUrl(url);
   },
+  pickProfileFile(): Promise<string | null> {
+    return native ? invoke("pick_client_profile") : mockApi.pickProfileFile();
+  },
   testRoute(target: string): Promise<RouteTestResult> {
     return native
       ? invoke("test_route", { target })

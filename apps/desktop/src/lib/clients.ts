@@ -53,6 +53,15 @@ export function workingPresets(): PresetId[] {
   );
 }
 
+/** Last path segment of a stored profile, for the choose-file label. */
+export function profileFileName(
+  path: string | null | undefined,
+): string | null {
+  if (!path) return null;
+  const parts = path.split(/[/\\]/).filter(Boolean);
+  return parts.at(-1) ?? path;
+}
+
 export function canAddPreset(
   preset: PresetId,
   clients: ClientInstance[],

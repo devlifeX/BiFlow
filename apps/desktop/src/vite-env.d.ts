@@ -12,6 +12,7 @@ declare global {
   interface Window {
     __TAURI_INTERNALS__?: unknown;
     __BIFLOW_RESET_MOCK?: () => void;
+    __BIFLOW_NEXT_PROFILE_PATH__?: string | null;
     __BIFLOW_STAGE_SEEN?: string[];
     __BIFLOW_STAGE_STOP?: () => void;
   }

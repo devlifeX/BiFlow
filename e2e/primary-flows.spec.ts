@@ -399,6 +399,34 @@ test.describe("primary BiFlow flows", () => {
     ).toBeVisible();
   });
 
+  test("picks a config file for OpenVPN and Windscribe", async ({ page }) => {
+    await openFresh(page);
+    await page.getByRole("button", { name: "Add client" }).click();
+    await page
+      .getByTestId("client-catalog")
+      .getByRole("button", { name: /^OpenVPN/ })
+      .click();
+    const openvpn = page.getByTestId("client-card-openvpn");
+    await expect(openvpn.getByText("No file chosen")).toBeVisible();
+    await expect(
+      openvpn.locator("input[placeholder='profile.ovpn']"),
+    ).toHaveCount(0);
+    await openvpn.getByRole("button", { name: "Choose file" }).click();
+    await expect(openvpn.getByText("biflow-mock-profile.ovpn")).toBeVisible();
+
+    await page.getByRole("button", { name: "Add client" }).click();
+    await page
+      .getByTestId("client-catalog")
+      .getByRole("button", { name: /^Windscribe/ })
+      .click();
+    const windscribe = page.getByTestId("client-card-windscribe");
+    await expect(windscribe.getByText("No file chosen")).toBeVisible();
+    await windscribe.getByRole("button", { name: "Choose file" }).click();
+    await expect(
+      windscribe.getByText("biflow-mock-profile.ovpn"),
+    ).toBeVisible();
+  });
+
   test("keeps the fixed viewport free of document overflow in English and Persian", async ({
     page,
   }) => {

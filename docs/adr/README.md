@@ -75,3 +75,4 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0069](./0069-named-rule-lists.md)                       | Named rule lists                            | Accepted   |
 | [0070](./0070-fail-closed-rule-level.md)                 | Rule-level fail-closed                      | Accepted   |
 | [0071](./0071-exact-subdomain-pins.md)                   | Exact subdomain pins, longest match wins    | Accepted   |
+| [0072](./0072-side-tunnel-profile-picker.md)             | Native profile picker for side-tunnel files | Accepted   |

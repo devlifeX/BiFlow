@@ -79,6 +79,11 @@ If a required command fails or emits a warning from project code, fix it in the 
 - `open_external_url` is allowlist-gated. New UI links fail silently as
   "URL is not allowlisted" unless the allowlist grows with them; derive it
   from the preset catalog so it cannot drift from the buttons.
+- An HTML file input does not expose a filesystem path in the Tauri
+  webview. Side-tunnel profiles (OpenVPN, Windscribe, later WireGuard)
+  must be chosen through `pick_client_profile` so the helper reads the
+  original file and relative `ca` / `cert` references still resolve. Do
+  not log the chosen path.
 - An inner timeout must exceed the operations it wraps: the 5s live-apply
   budget raced `validate_with_binary`'s own 10s, so every pin move timed
   out and silently restored the previous document ("moves don't apply").

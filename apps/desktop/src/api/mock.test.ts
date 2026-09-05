@@ -250,4 +250,20 @@ describe("mock transport", () => {
       ),
     ).toBe(true);
   });
+
+  it("returns a mock side-tunnel profile path", async () => {
+    await expect(mockApi.pickProfileFile()).resolves.toBe(
+      "/tmp/biflow-mock-profile.ovpn",
+    );
+    window.__BIFLOW_NEXT_PROFILE_PATH__ = null;
+    await expect(mockApi.pickProfileFile()).resolves.toBeNull();
+    window.__BIFLOW_NEXT_PROFILE_PATH__ = "/home/user/windscribe.ovpn";
+    await expect(mockApi.pickProfileFile()).resolves.toBe(
+      "/home/user/windscribe.ovpn",
+    );
+    resetMockState();
+    await expect(mockApi.pickProfileFile()).resolves.toBe(
+      "/tmp/biflow-mock-profile.ovpn",
+    );
+  });
 });

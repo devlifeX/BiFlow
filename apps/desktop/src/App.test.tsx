@@ -117,6 +117,20 @@ describe("App", () => {
     expect(event.defaultPrevented).toBe(true);
   });
 
+  it("picks a profile file for OpenVPN instead of typing a path", async () => {
+    render(<App />);
+    expect(
+      await screen.findByRole("heading", { name: "Ready when you are" }),
+    ).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Add client" }));
+    await userEvent.click(screen.getByRole("button", { name: /^OpenVPN/ }));
+    const card = await screen.findByTestId("client-card-openvpn");
+    expect(card.querySelector("input[placeholder='profile.ovpn']")).toBeNull();
+    expect(screen.getByText("No file chosen")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Choose file" }));
+    expect(screen.getByText("biflow-mock-profile.ovpn")).toBeVisible();
+  });
+
   it("exposes the version file through bootstrap", async () => {
     render(<App />);
     expect(

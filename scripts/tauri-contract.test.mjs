@@ -66,6 +66,28 @@ describe("Tauri frontend contract", () => {
     assert.match(rust, /emit\("update-progress"/);
   });
 
+  it("picks side-tunnel profiles through the Tauri dialog plugin", () => {
+    const rust = readFileSync(join(root, "src-tauri/src/lib.rs"), "utf8");
+    const cargo = readFileSync(join(root, "src-tauri/Cargo.toml"), "utf8");
+    const frontend = readFileSync(
+      join(root, "apps/desktop/src/api/desktop.ts"),
+      "utf8",
+    );
+    const picker = readFileSync(
+      join(root, "src-tauri/src/profile_picker.rs"),
+      "utf8",
+    );
+    assert.match(cargo, /tauri-plugin-dialog/);
+    assert.match(rust, /tauri_plugin_dialog::init\(\)/);
+    assert.match(rust, /fn pick_client_profile/);
+    assert.match(frontend, /invoke\("pick_client_profile"\)/);
+    assert.match(
+      picker,
+      /add_filter\("VPN profile", accepted_profile_extensions\(\)\)/,
+    );
+    assert.doesNotMatch(picker, /info!\(\s*path\b/);
+  });
+
   it("reads the native clipboard through the Tauri plugin", () => {
     const rust = readFileSync(join(root, "src-tauri/src/lib.rs"), "utf8");
     const cargo = readFileSync(join(root, "src-tauri/Cargo.toml"), "utf8");

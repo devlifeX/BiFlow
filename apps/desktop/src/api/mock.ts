@@ -1112,6 +1112,17 @@ export const mockApi = {
   async openUrl(_url: string) {
     return undefined;
   },
+  async pickProfileFile(): Promise<string | null> {
+    const override =
+      typeof window !== "undefined"
+        ? window.__BIFLOW_NEXT_PROFILE_PATH__
+        : undefined;
+    if (override === null) return null;
+    if (typeof override === "string" && override.length > 0) {
+      return override;
+    }
+    return "/tmp/biflow-mock-profile.ovpn";
+  },
   async testRoute(target: string): Promise<RouteTestResult> {
     // Mirrors RuleSet::decide: private, enabled client pins, DIRECT pins,
     // bundled Iran list, then MATCH default_route.
@@ -1301,6 +1312,9 @@ export function resetMockState() {
   });
   listeners.clear();
   updateListeners.clear();
+  if (typeof window !== "undefined") {
+    delete window.__BIFLOW_NEXT_PROFILE_PATH__;
+  }
 }
 
 if (typeof window !== "undefined") {

@@ -5,6 +5,7 @@ mod github_update;
 mod helper_install;
 mod hiddify_reset;
 mod network;
+mod profile_picker;
 mod reachability;
 mod traffic;
 mod tray;
@@ -1636,6 +1637,17 @@ fn open_external_url(url: String) -> Result<(), String> {
     })
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects AppHandle by value into commands"
+)]
+#[tauri::command]
+fn pick_client_profile(app: AppHandle) -> Result<Option<String>, String> {
+    diagnostics::trace_sync("clients", "tauri_command", "pick_client_profile", || {
+        profile_picker::pick_profile(&app)
+    })
+}
+
 #[tauri::command]
 async fn test_route(target: String, app: AppHandle) -> Result<RouteTestResult, String> {
     diagnostics::trace_action("routing", "tauri_command", "test_route", async move {
@@ -3256,6 +3268,7 @@ pub fn run() {
         )
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .setup(setup_application)
@@ -3296,6 +3309,7 @@ pub fn run() {
             install_helper,
             get_install_guide,
             open_external_url,
+            pick_client_profile,
             run_full_diagnostics,
             test_route,
             query_logs,
