@@ -173,6 +173,11 @@ export const desktop = {
       ? invoke("pin_to_rule_list", { input, listId, expectedRevision })
       : mockApi.pinToRuleList(input, listId, expectedRevision);
   },
+  clientBinaryInstalled(preset: string): Promise<boolean> {
+    return native
+      ? invoke("client_binary_installed", { preset })
+      : mockApi.clientBinaryInstalled(preset);
+  },
   checkRuleList(listId: string): Promise<ListCheckEntry[]> {
     return native
       ? invoke("check_rule_list", { listId })

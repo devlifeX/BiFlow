@@ -1,5 +1,5 @@
 import { Download, FolderOpen, Plus, Trash2, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { desktop } from "../api/desktop";
 import type { ClientInstance, PinnedRoute, RuleListMeta } from "../api/models";
@@ -152,7 +152,7 @@ export function ClientRegistry() {
         </div>
       ) : null}
 
-      <div className="grid gap-3 lg:grid-cols-2">
+      <div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
         {clients.map((client) => (
           <ClientCard
             key={client.id}
@@ -174,6 +174,10 @@ export function ClientRegistry() {
             phase={
               snapshot?.clients.find((item) => item.id === client.id)?.status
                 .phase ?? "stopped"
+            }
+            exitIp={
+              snapshot?.clients.find((item) => item.id === client.id)
+                ?.exit_ip ?? null
             }
             deleting={pendingDelete === client.id}
             others={enabledClients(clients).filter(
@@ -227,6 +231,7 @@ function ClientCard({
   onEnabled,
   onAllowDirectWhenDown,
   onConfig,
+  exitIp,
   onPin,
   onRemovePin,
   actionPending,
@@ -246,6 +251,7 @@ function ClientCard({
   onConfirmDelete: () => void;
   onEnabled: (enabled: boolean) => void;
   onAllowDirectWhenDown: (allow: boolean) => void;
+  exitIp: string | null;
   onConfig: (next: ClientInstance) => void;
   onPin: (host: string) => Promise<void> | void;
   onRemovePin: (host: string) => void;
@@ -258,6 +264,24 @@ function ClientCard({
     () => presetById(client.preset as PresetId),
     [client.preset],
   );
+  const domainCount = pins.filter((pin) => pin.target.kind === "domain").length;
+  const ipCount = pins.length - domainCount;
+  // Side tunnels need a system binary the app cannot ship; surface a
+  // per-platform download link when it is missing.
+  const [binaryInstalled, setBinaryInstalled] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (client.config.kind !== "owned_side_tunnel") return;
+    let cancelled = false;
+    desktop
+      .clientBinaryInstalled(client.preset)
+      .then((installed) => {
+        if (!cancelled) setBinaryInstalled(installed);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [client.preset, client.config.kind]);
 
   async function chooseProfile() {
     if (client.config.kind !== "owned_side_tunnel") return;
@@ -281,30 +305,19 @@ function ClientCard({
   return (
     <article
       data-testid={`client-card-${client.preset}`}
-      className={`rounded-2xl border border-ink/10 bg-surface p-4 ${
+      className={`rounded-2xl border border-ink/10 bg-surface p-3.5 ${
         client.enabled ? "" : "opacity-70"
       }`}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <h3 className="font-semibold">{spec.title}</h3>
-            {isDefault ? (
-              <span className="rounded-md bg-brand/10 px-2 py-0.5 text-xs font-semibold text-brand">
-                {t("matchDefault")}
-              </span>
-            ) : null}
-            <StatusPill phase={phase as never} />
-          </div>
-          <p className="mt-1 text-xs text-muted">{spec.installHint}</p>
-          <button
-            type="button"
-            onClick={() => void desktop.openUrl(downloadUrlFor(spec, platform))}
-            className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-brand underline"
-          >
-            <Download size={12} aria-hidden />
-            {t("downloadInstall")}
-          </button>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <h3 className="font-semibold">{spec.title}</h3>
+          {isDefault ? (
+            <span className="rounded-md bg-brand/10 px-2 py-0.5 text-xs font-semibold text-brand">
+              {t("matchDefault")}
+            </span>
+          ) : null}
+          <StatusPill phase={phase as never} />
         </div>
         <label className="flex shrink-0 items-center gap-2 text-xs font-semibold">
           <input
@@ -316,261 +329,306 @@ function ClientCard({
         </label>
       </div>
 
-      <label className="mt-3 flex items-center gap-2 text-xs text-muted">
-        <input
-          type="checkbox"
-          checked={client.allow_direct_when_down}
-          onChange={(event) => onAllowDirectWhenDown(event.target.checked)}
-        />
-        {t("allowDirectWhenDown")}
-      </label>
+      <p className="mt-1.5 text-xs text-muted">
+        {t("pinSummary", { domains: domainCount, ips: ipCount })}
+        {client.config.kind === "local_proxy"
+          ? ` · ${t("clientPort")} ${client.config.port}`
+          : ""}
+        {exitIp ? (
+          <span className="font-mono">
+            {" "}
+            · {t("exitIp")} {exitIp}
+          </span>
+        ) : null}
+      </p>
 
-      {client.config.kind === "local_proxy" ? (
-        <div className="mt-3 grid gap-2 sm:grid-cols-2">
-          <label className="text-xs font-medium">
-            {t("clientPort")}
-            <input
-              type="number"
-              value={client.config.port}
-              onChange={(event) => {
-                if (client.config.kind !== "local_proxy") return;
-                onConfig({
-                  ...client,
-                  config: {
-                    ...client.config,
-                    port: Number(event.target.value),
-                  },
-                });
-              }}
-              className="mt-1 w-full rounded-xl border-ink/15 bg-canvas"
-            />
-          </label>
-          <label className="flex items-center gap-2 text-xs font-medium">
-            <input
-              type="checkbox"
-              checked={client.config.stop_with_stack}
-              onChange={(event) => {
-                if (client.config.kind !== "local_proxy") return;
-                onConfig({
-                  ...client,
-                  config: {
-                    ...client.config,
-                    stop_with_stack: event.target.checked,
-                  },
-                });
-              }}
-            />
-            {t("stopWithStack")}
-          </label>
-        </div>
+      {binaryInstalled === false ? (
+        <p className="mt-2 flex flex-wrap items-center gap-2 rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs">
+          {t("binaryMissing")}
+          <button
+            type="button"
+            onClick={() => void desktop.openUrl(downloadUrlFor(spec, platform))}
+            className="inline-flex items-center gap-1 font-semibold text-brand underline"
+          >
+            <Download size={12} aria-hidden />
+            {t("downloadInstall")}
+          </button>
+        </p>
       ) : null}
 
-      {client.config.kind === "owned_side_tunnel" ? (
-        <div className="mt-3 grid gap-2">
-          <div className="text-xs font-medium">
-            <span id={`${client.id}-profile-label`}>{t("openvpnProfile")}</span>
-            <div className="mt-1 flex items-center gap-2">
-              <p
-                data-testid="profile-file-name"
-                aria-labelledby={`${client.id}-profile-label`}
-                title={client.config.profile_path ?? undefined}
-                className="min-w-0 flex-1 truncate rounded-xl border border-ink/15 bg-canvas px-3 py-2 text-sm font-normal"
-              >
-                {profileFileName(client.config.profile_path) ??
-                  t("noFileChosen")}
-              </p>
-              <button
-                type="button"
-                data-testid="choose-profile-file"
-                disabled={actionPending}
-                onClick={() => {
-                  void chooseProfile();
+      <details className="mt-2 text-sm">
+        <summary className="cursor-pointer select-none text-xs font-semibold text-muted">
+          {t("clientDetails")}
+        </summary>
+
+        <p className="mt-2 text-xs text-muted">{spec.installHint}</p>
+        <button
+          type="button"
+          onClick={() => void desktop.openUrl(downloadUrlFor(spec, platform))}
+          className="mt-1 inline-flex items-center gap-1 text-xs font-semibold text-brand underline"
+        >
+          <Download size={12} aria-hidden />
+          {t("downloadInstall")}
+        </button>
+
+        <label className="mt-3 flex items-center gap-2 text-xs text-muted">
+          <input
+            type="checkbox"
+            checked={client.allow_direct_when_down}
+            onChange={(event) => onAllowDirectWhenDown(event.target.checked)}
+          />
+          {t("allowDirectWhenDown")}
+        </label>
+
+        {client.config.kind === "local_proxy" ? (
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            <label className="text-xs font-medium">
+              {t("clientPort")}
+              <input
+                type="number"
+                value={client.config.port}
+                onChange={(event) => {
+                  if (client.config.kind !== "local_proxy") return;
+                  onConfig({
+                    ...client,
+                    config: {
+                      ...client.config,
+                      port: Number(event.target.value),
+                    },
+                  });
                 }}
-                className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-brand px-3 py-2 font-semibold text-white"
-              >
-                <FolderOpen size={16} aria-hidden />
-                {t("chooseFile")}
-              </button>
-              {client.config.profile_path ? (
+                className="mt-1 w-full rounded-xl border-ink/15 bg-canvas"
+              />
+            </label>
+            <label className="flex items-center gap-2 text-xs font-medium">
+              <input
+                type="checkbox"
+                checked={client.config.stop_with_stack}
+                onChange={(event) => {
+                  if (client.config.kind !== "local_proxy") return;
+                  onConfig({
+                    ...client,
+                    config: {
+                      ...client.config,
+                      stop_with_stack: event.target.checked,
+                    },
+                  });
+                }}
+              />
+              {t("stopWithStack")}
+            </label>
+          </div>
+        ) : null}
+
+        {client.config.kind === "owned_side_tunnel" ? (
+          <div className="mt-3 grid gap-2">
+            <div className="text-xs font-medium">
+              <span id={`${client.id}-profile-label`}>
+                {t("openvpnProfile")}
+              </span>
+              <div className="mt-1 flex items-center gap-2">
+                <p
+                  data-testid="profile-file-name"
+                  aria-labelledby={`${client.id}-profile-label`}
+                  title={client.config.profile_path ?? undefined}
+                  className="min-w-0 flex-1 truncate rounded-xl border border-ink/15 bg-canvas px-3 py-2 text-sm font-normal"
+                >
+                  {profileFileName(client.config.profile_path) ??
+                    t("noFileChosen")}
+                </p>
                 <button
                   type="button"
-                  data-testid="clear-profile-file"
+                  data-testid="choose-profile-file"
                   disabled={actionPending}
                   onClick={() => {
+                    void chooseProfile();
+                  }}
+                  className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-brand px-3 py-2 font-semibold text-white"
+                >
+                  <FolderOpen size={16} aria-hidden />
+                  {t("chooseFile")}
+                </button>
+                {client.config.profile_path ? (
+                  <button
+                    type="button"
+                    data-testid="clear-profile-file"
+                    disabled={actionPending}
+                    onClick={() => {
+                      if (client.config.kind !== "owned_side_tunnel") return;
+                      onConfig({
+                        ...client,
+                        config: {
+                          ...client.config,
+                          profile_path: null,
+                        },
+                      });
+                    }}
+                    aria-label={t("clearFile")}
+                    title={t("clearFile")}
+                    className="inline-flex shrink-0 items-center justify-center rounded-xl border border-ink/15 p-2 text-muted hover:text-danger"
+                  >
+                    <X size={16} aria-hidden />
+                  </button>
+                ) : null}
+              </div>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <label className="text-xs font-medium">
+                {t("openvpnUsername")}
+                <input
+                  value={client.config.username ?? ""}
+                  autoComplete="off"
+                  onChange={(event) => {
                     if (client.config.kind !== "owned_side_tunnel") return;
                     onConfig({
                       ...client,
                       config: {
                         ...client.config,
-                        profile_path: null,
+                        username: event.target.value || null,
                       },
                     });
                   }}
-                  aria-label={t("clearFile")}
-                  title={t("clearFile")}
-                  className="inline-flex shrink-0 items-center justify-center rounded-xl border border-ink/15 p-2 text-muted hover:text-danger"
-                >
-                  <X size={16} aria-hidden />
-                </button>
-              ) : null}
+                  className="mt-1 w-full rounded-xl border-ink/15 bg-canvas"
+                />
+              </label>
+              <label className="text-xs font-medium">
+                {t("openvpnPassword")}
+                <input
+                  type="password"
+                  value={
+                    client.config.password === "[REDACTED]"
+                      ? ""
+                      : (client.config.password ?? "")
+                  }
+                  placeholder={
+                    client.config.password === "[REDACTED]" ? "••••••••" : ""
+                  }
+                  autoComplete="new-password"
+                  onChange={(event) => {
+                    if (client.config.kind !== "owned_side_tunnel") return;
+                    onConfig({
+                      ...client,
+                      config: {
+                        ...client.config,
+                        password: event.target.value || null,
+                      },
+                    });
+                  }}
+                  className="mt-1 w-full rounded-xl border-ink/15 bg-canvas"
+                />
+              </label>
             </div>
           </div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <label className="text-xs font-medium">
-              {t("openvpnUsername")}
-              <input
-                value={client.config.username ?? ""}
-                autoComplete="off"
-                onChange={(event) => {
-                  if (client.config.kind !== "owned_side_tunnel") return;
-                  onConfig({
-                    ...client,
-                    config: {
-                      ...client.config,
-                      username: event.target.value || null,
-                    },
-                  });
-                }}
-                className="mt-1 w-full rounded-xl border-ink/15 bg-canvas"
-              />
-            </label>
-            <label className="text-xs font-medium">
-              {t("openvpnPassword")}
-              <input
-                type="password"
-                value={
-                  client.config.password === "[REDACTED]"
-                    ? ""
-                    : (client.config.password ?? "")
-                }
-                placeholder={
-                  client.config.password === "[REDACTED]" ? "••••••••" : ""
-                }
-                autoComplete="new-password"
-                onChange={(event) => {
-                  if (client.config.kind !== "owned_side_tunnel") return;
-                  onConfig({
-                    ...client,
-                    config: {
-                      ...client.config,
-                      password: event.target.value || null,
-                    },
-                  });
-                }}
-                className="mt-1 w-full rounded-xl border-ink/15 bg-canvas"
-              />
-            </label>
+        ) : null}
+
+        {lists.length > 0 ? (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {lists.map((list) => (
+              <span
+                key={list.id}
+                className="rounded-md bg-canvas px-2 py-0.5 text-xs font-medium text-muted"
+              >
+                {list.name}
+              </span>
+            ))}
           </div>
-        </div>
-      ) : null}
+        ) : null}
 
-      {lists.length > 0 ? (
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {lists.map((list) => (
-            <span
-              key={list.id}
-              className="rounded-md bg-canvas px-2 py-0.5 text-xs font-medium text-muted"
-            >
-              {list.name}
-            </span>
-          ))}
-        </div>
-      ) : null}
-
-      <form
-        className="mt-3 flex gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!host.trim()) return;
-          void Promise.resolve(onPin(host)).then(() => setHost(""));
-        }}
-      >
-        <input
-          value={host}
-          onChange={(event) => setHost(event.target.value)}
-          placeholder={t("clientPinPlaceholder")}
-          className="min-w-0 flex-1 rounded-xl border-ink/15 bg-canvas text-sm"
-        />
-        <button
-          type="submit"
-          className="rounded-xl border border-ink/15 px-3 py-2 text-xs font-semibold"
+        <form
+          className="mt-3 flex gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!host.trim()) return;
+            void Promise.resolve(onPin(host)).then(() => setHost(""));
+          }}
         >
-          {t("pinToClient")}
-        </button>
-      </form>
-
-      <ul className="mt-2 space-y-1">
-        {pins.map((pin) => (
-          <li
-            key={pin.target.value}
-            className="flex items-center justify-between gap-2 text-sm"
+          <input
+            value={host}
+            onChange={(event) => setHost(event.target.value)}
+            placeholder={t("clientPinPlaceholder")}
+            className="min-w-0 flex-1 rounded-xl border-ink/15 bg-canvas text-sm"
+          />
+          <button
+            type="submit"
+            className="rounded-xl border border-ink/15 px-3 py-2 text-xs font-semibold"
           >
-            <span className="break-all">{pin.target.value}</span>
+            {t("pinToClient")}
+          </button>
+        </form>
+
+        <ul className="mt-2 space-y-1">
+          {pins.map((pin) => (
+            <li
+              key={pin.target.value}
+              className="flex items-center justify-between gap-2 text-sm"
+            >
+              <span className="break-all">{pin.target.value}</span>
+              <button
+                type="button"
+                onClick={() => onRemovePin(pin.target.value)}
+                className="text-xs font-semibold text-muted hover:text-danger"
+              >
+                {t("remove")}
+              </button>
+            </li>
+          ))}
+        </ul>
+
+        <div className="mt-3 border-t border-ink/10 pt-3">
+          {deleting ? (
+            <div className="space-y-2 text-sm" role="dialog">
+              <p>
+                {t("deleteClientConfirm", {
+                  name: spec.title,
+                  count: pins.length,
+                })}
+              </p>
+              {others.length > 0 ? (
+                <label className="block text-xs font-medium">
+                  {t("movePinsTo")}
+                  <select
+                    value={moveTo}
+                    onChange={(event) => onMoveTo(event.target.value)}
+                    className="mt-1 w-full rounded-xl border-ink/15 bg-canvas"
+                  >
+                    <option value="direct">{t("deletePins")}</option>
+                    {others.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {presetById(item.preset as PresetId).title}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={onConfirmDelete}
+                  className="rounded-lg bg-danger px-3 py-1.5 text-xs font-semibold text-white"
+                >
+                  {t("deleteClient")}
+                </button>
+                <button
+                  type="button"
+                  onClick={onCancelDelete}
+                  className="rounded-lg border border-ink/15 px-3 py-1.5 text-xs font-semibold"
+                >
+                  {t("close")}
+                </button>
+              </div>
+            </div>
+          ) : (
             <button
               type="button"
-              onClick={() => onRemovePin(pin.target.value)}
-              className="text-xs font-semibold text-muted hover:text-danger"
+              onClick={onAskDelete}
+              className="inline-flex items-center gap-1 text-xs font-semibold text-muted hover:text-danger"
             >
-              {t("remove")}
+              <Trash2 size={14} aria-hidden />
+              {t("deleteClient")}
             </button>
-          </li>
-        ))}
-      </ul>
-
-      <div className="mt-3 border-t border-ink/10 pt-3">
-        {deleting ? (
-          <div className="space-y-2 text-sm" role="dialog">
-            <p>
-              {t("deleteClientConfirm", {
-                name: spec.title,
-                count: pins.length,
-              })}
-            </p>
-            {others.length > 0 ? (
-              <label className="block text-xs font-medium">
-                {t("movePinsTo")}
-                <select
-                  value={moveTo}
-                  onChange={(event) => onMoveTo(event.target.value)}
-                  className="mt-1 w-full rounded-xl border-ink/15 bg-canvas"
-                >
-                  <option value="direct">{t("deletePins")}</option>
-                  {others.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {presetById(item.preset as PresetId).title}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ) : null}
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={onConfirmDelete}
-                className="rounded-lg bg-danger px-3 py-1.5 text-xs font-semibold text-white"
-              >
-                {t("deleteClient")}
-              </button>
-              <button
-                type="button"
-                onClick={onCancelDelete}
-                className="rounded-lg border border-ink/15 px-3 py-1.5 text-xs font-semibold"
-              >
-                {t("close")}
-              </button>
-            </div>
-          </div>
-        ) : (
-          <button
-            type="button"
-            onClick={onAskDelete}
-            className="inline-flex items-center gap-1 text-xs font-semibold text-muted hover:text-danger"
-          >
-            <Trash2 size={14} aria-hidden />
-            {t("deleteClient")}
-          </button>
-        )}
-      </div>
+          )}
+        </div>
+      </details>
     </article>
   );
 }

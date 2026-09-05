@@ -119,11 +119,11 @@ select:focus-visible,
   animation: traffic-flow 1.1s linear infinite;
 }
 
-.traffic-flow-route-direct {
+.traffic-flow-route-success {
   stroke: rgb(var(--success));
 }
 
-.traffic-flow-route-vpn {
+.traffic-flow-route-brand {
   stroke: rgb(var(--brand));
   animation-delay: -0.55s;
 }
@@ -132,6 +132,21 @@ select:focus-visible,
   fill: rgb(var(--ink));
   font-size: 13px;
   font-weight: 700;
+}
+
+.traffic-flow-default {
+  fill: rgb(var(--brand));
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.traffic-flow-packet-label {
+  fill: rgb(var(--ink));
+  font-size: 12px;
+  font-weight: 600;
+  paint-order: stroke;
+  stroke: rgb(var(--surface));
+  stroke-width: 3px;
 }
 
 @keyframes traffic-flow {
@@ -264,4 +279,28 @@ select:focus-visible,
     animation: none;
     box-shadow: 0 0 0 2px rgb(var(--brand) / 0.28);
   }
+}
+
+/* Themed scrollbars so overflow areas never show the OS default chrome. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--ink) / 0.25) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border-radius: 8px;
+  background: rgb(var(--ink) / 0.22);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--ink) / 0.38);
 }

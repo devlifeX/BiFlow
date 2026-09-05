@@ -26,9 +26,19 @@ export function InputContextMenu() {
       event.preventDefault();
       event.target.focus();
       setError(null);
+      // Clamp so the menu never opens outside the viewport when the user
+      // right-clicks near the bottom or the trailing edge.
+      const menuWidth = 176;
+      const menuHeight = 168;
       setMenu({
-        x: event.clientX,
-        y: event.clientY,
+        x: Math.max(
+          8,
+          Math.min(event.clientX, window.innerWidth - menuWidth - 8),
+        ),
+        y: Math.max(
+          8,
+          Math.min(event.clientY, window.innerHeight - menuHeight - 8),
+        ),
         field: event.target,
       });
     };

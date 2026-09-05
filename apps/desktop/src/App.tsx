@@ -30,6 +30,7 @@ import { InputContextMenu } from "./components/InputContextMenu";
 import { Diagnostics } from "./components/Diagnostics";
 import { DirectRules } from "./components/DirectRules";
 import { Settings } from "./components/Settings";
+import { PageSkeleton } from "./components/PageSkeleton";
 import { SettingsApplyBanner } from "./components/SettingsApplyBanner";
 import { BottomNav } from "./components/BottomNav";
 import { UiModeSwitch } from "./components/UiModeSwitch";
@@ -109,12 +110,8 @@ export function App() {
 
   if (store.loading) {
     return (
-      <main className="grid h-full place-items-center" aria-busy="true">
-        <Activity
-          className="animate-pulse text-brand"
-          size={32}
-          aria-label="Loading"
-        />
+      <main className="h-full overflow-hidden p-5" aria-busy="true">
+        <PageSkeleton page={store.page} />
       </main>
     );
   }

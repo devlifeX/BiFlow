@@ -379,6 +379,7 @@ test.describe("primary BiFlow flows", () => {
     await page.getByRole("button", { name: /v2rayN/ }).click();
     await expect(page.getByTestId("client-card-v2rayn")).toBeVisible();
     const card = page.getByTestId("client-card-v2rayn");
+    await card.getByText("Settings & pinned hosts").click();
     await card.getByPlaceholder("example.com").fill("openai.com");
     await card.getByRole("button", { name: "Pin" }).click();
     await expect(card.getByText("openai.com")).toBeVisible();
@@ -407,6 +408,7 @@ test.describe("primary BiFlow flows", () => {
       .getByRole("button", { name: /^OpenVPN/ })
       .click();
     const openvpn = page.getByTestId("client-card-openvpn");
+    await openvpn.getByText("Settings & pinned hosts").click();
     await expect(openvpn.getByText("No file chosen")).toBeVisible();
     await expect(
       openvpn.locator("input[placeholder='profile.ovpn']"),
@@ -420,6 +422,7 @@ test.describe("primary BiFlow flows", () => {
       .getByRole("button", { name: /^Windscribe/ })
       .click();
     const windscribe = page.getByTestId("client-card-windscribe");
+    await windscribe.getByText("Settings & pinned hosts").click();
     await expect(windscribe.getByText("No file chosen")).toBeVisible();
     await windscribe.getByRole("button", { name: "Choose file" }).click();
     await expect(

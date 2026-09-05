@@ -44,6 +44,16 @@ If a required command fails or emits a warning from project code, fix it in the 
 - Record non-obvious choices as ADRs in `docs/adr/`.
 - After each behavioral or architectural change, add a new ADR or update the existing one. Keep `docs/adr/README.md` current.
 
+## UI design system (hard rule)
+
+- `docs/DESIGN.md` is the binding UI contract: compact card density, the
+  footer-button pattern for action cards, equal-height tiles, usage-ordered
+  sections, horizontal rule-list rows, collapsible client cards, the shared
+  per-client color palette, sticky apply banner, themed scrollbars, and the
+  per-page boot skeleton.
+- Read it before touching any component; do not regress a rule silently. If
+  a rule must change, change `docs/DESIGN.md` in the same commit.
+
 ## Version
 
 - The only version source is the `version` file in the repository root (semver `X.Y.Z`).
@@ -76,6 +86,13 @@ If a required command fails or emits a warning from project code, fix it in the 
 - A document another build wrote must never keep this build from
   starting: `RuleManager::load` quarantines undecodable JSON to
   `.corrupt` and starts empty instead of failing the Tauri setup hook.
+- A dev-profile app must never run the production helper installer: when
+  the transient dev helper is gone (dev.sh exited but the window
+  survived), the Install button ran the packaged 4.7.2 pkexec installer
+  with the dev staging dir and reconfigured the SYSTEM helper against the
+  dev profile. `install_helper` refuses under `BIFLOW_DEV_PROFILE` and
+  points at ./dev.sh; recovery is one Install click from the installed
+  app (it rewrites helper.toml with production paths).
 - `open_external_url` is allowlist-gated. New UI links fail silently as
   "URL is not allowlisted" unless the allowlist grows with them; derive it
   from the preset catalog so it cannot drift from the buttons.

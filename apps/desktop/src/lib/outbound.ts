@@ -51,3 +51,27 @@ export function localProxyConfig(client: ClientInstance): {
 } | null {
   return client.config.kind === "local_proxy" ? client.config : null;
 }
+
+/**
+ * Stable per-client accent palette shared by the live traffic diagram and
+ * the live-connections table, assigned by position in the client registry.
+ */
+export const CLIENT_COLORS = [
+  "#3b82f6", // blue
+  "#a855f7", // violet
+  "#f59e0b", // amber
+  "#ec4899", // pink
+  "#06b6d4", // cyan
+  "#84cc16", // lime
+] as const;
+
+export function clientColor(
+  outbound: string,
+  clients: ClientInstance[],
+): string {
+  const id = outbound.replace(/^(client|proxy)-/u, "");
+  const index = clients.findIndex((item) => item.id === id);
+  return CLIENT_COLORS[
+    (index >= 0 ? index : 0) % CLIENT_COLORS.length
+  ] as string;
+}

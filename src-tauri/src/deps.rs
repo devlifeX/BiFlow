@@ -145,7 +145,13 @@ pub fn hiddify_candidates(data: &Path) -> Vec<PathBuf> {
 
 #[must_use]
 pub fn mihomo_candidates(data: &Path) -> Vec<PathBuf> {
-    let mut candidates = vec![
+    let mut candidates = Vec::new();
+    // A dev session vendors its own Mihomo; without this the dependency
+    // card claims Mihomo is missing and offers a pointless install.
+    if let Some(dev) = std::env::var_os("BIFLOW_DEV_MIHOMO_BINARY") {
+        candidates.push(PathBuf::from(dev));
+    }
+    candidates.extend([
         mihomo_install_path(data),
         data.join("bin").join("clash-meta"),
         PathBuf::from("/usr/lib/biflow/mihomo"),
@@ -155,7 +161,7 @@ pub fn mihomo_candidates(data: &Path) -> Vec<PathBuf> {
         PathBuf::from("/usr/local/bin/clash-meta"),
         PathBuf::from("/usr/bin/mihomo"),
         PathBuf::from("/usr/bin/clash-meta"),
-    ];
+    ]);
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
         candidates.push(home.join(".local").join("bin").join("mihomo"));

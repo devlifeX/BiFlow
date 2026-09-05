@@ -375,7 +375,7 @@ function Fieldset({
       id={id}
       role="tabpanel"
       aria-labelledby={labelledBy}
-      className="grid gap-4 rounded-2xl border border-ink/10 bg-surface p-5 sm:grid-cols-2"
+      className="grid gap-4 rounded-2xl border border-ink/10 bg-surface p-3.5 sm:grid-cols-2"
     >
       <legend className="px-2 font-semibold">{legend}</legend>
       {children}

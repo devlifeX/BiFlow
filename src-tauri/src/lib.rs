@@ -1555,6 +1555,16 @@ async fn sync_cloud_rules(app: AppHandle) -> Result<CloudRulesStatus, String> {
 #[tauri::command]
 async fn install_helper(app: AppHandle) -> Result<helper_install::InstallHelperResult, String> {
     diagnostics::trace_action("helper", "tauri_command", "install_helper", async move {
+        // A dev run gets its transient helper from dev.sh. Running the
+        // production installer here would reconfigure the system helper
+        // with dev-profile paths and break the installed app.
+        if std::env::var_os("BIFLOW_DEV_PROFILE").is_some_and(|value| !value.is_empty()) {
+            return Err(
+                "development run: restart ./dev.sh to provision the transient helper; \
+                 the production helper installer is disabled in dev"
+                    .into(),
+            );
+        }
         helper_install::install_helper(&app).await
     })
     .await
@@ -1622,6 +1632,61 @@ fn get_install_guide(id: String) -> Result<deps::InstallGuide, String> {
             "dependency guide requested"
         );
         Ok(deps::install_guide(parsed))
+    })
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri deserializes command strings into owned values"
+)]
+#[tauri::command]
+fn client_binary_installed(preset: String) -> Result<bool, String> {
+    diagnostics::trace_sync(
+        "dependencies",
+        "tauri_command",
+        "client_binary_installed",
+        || {
+            let spec = iran_split_config::PresetId::all()
+                .iter()
+                .map(|preset| preset.spec())
+                .find(|spec| spec.id == preset)
+                .ok_or_else(|| format!("unknown preset: {preset}"))?;
+            Ok(match spec.kind {
+                // Side tunnels need the system OpenVPN binary the app
+                // cannot ship; local proxies are probed at Connect instead.
+                iran_split_config::EgressKind::OwnedSideTunnel => openvpn_binary_installed(),
+                iran_split_config::EgressKind::LocalProxy => true,
+                iran_split_config::EgressKind::Unsupported => false,
+            })
+        },
+    )
+}
+
+fn openvpn_binary_installed() -> bool {
+    // Kept in step with `candidate_binaries` in the helper's openvpn module.
+    let fixed: &[&str] = if cfg!(windows) {
+        &[
+            r"C:\Program Files\OpenVPN\bin\openvpn.exe",
+            r"C:\Program Files (x86)\OpenVPN\bin\openvpn.exe",
+        ]
+    } else {
+        &[
+            "/usr/sbin/openvpn",
+            "/usr/bin/openvpn",
+            "/sbin/openvpn",
+            "/bin/openvpn",
+        ]
+    };
+    if fixed.iter().any(|path| Path::new(path).is_file()) {
+        return true;
+    }
+    let name = if cfg!(windows) {
+        "openvpn.exe"
+    } else {
+        "openvpn"
+    };
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|directory| directory.join(name).is_file())
     })
 }
 
@@ -3326,6 +3391,7 @@ pub fn run() {
             install_helper,
             get_install_guide,
             open_external_url,
+            client_binary_installed,
             pick_client_profile,
             apply_live_settings,
             run_full_diagnostics,

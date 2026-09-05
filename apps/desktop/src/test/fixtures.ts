@@ -60,6 +60,7 @@ export function baseSnapshot(
         preset: "hiddify",
         enabled: true,
         status: { phase: "stopped", message: null, since: now },
+        exit_ip: null,
       },
     ],
     mihomo: { phase: "stopped", message: null, since: now },

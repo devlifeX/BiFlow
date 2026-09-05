@@ -71,6 +71,7 @@ function initialSnapshot(): StackSnapshot {
         preset: "hiddify",
         enabled: true,
         status: component("stopped", "Hiddify proxy is not listening"),
+        exit_ip: null,
       },
     ],
     mihomo: component("stopped", "Mihomo controller is not listening"),
@@ -827,6 +828,7 @@ export const mockApi = {
           status:
             existing?.status ??
             component("stopped", `${client.preset} is stopped`),
+          exit_ip: existing?.exit_ip ?? null,
         };
       }),
       updated_at: now(),
@@ -1026,6 +1028,14 @@ export const mockApi = {
       pins,
     };
     return structuredClone(directRules);
+  },
+  async clientBinaryInstalled(preset: string): Promise<boolean> {
+    // Side tunnels need the system OpenVPN binary; the mock reports it
+    // missing so the download link stays visible in development.
+    if (preset === "openvpn" || preset === "windscribe") {
+      return sessionStorage.getItem("biflow-mock-openvpn-installed") === "1";
+    }
+    return true;
   },
   async checkRuleList(listId: string): Promise<ListCheckEntry[]> {
     const domains = directRules.pins

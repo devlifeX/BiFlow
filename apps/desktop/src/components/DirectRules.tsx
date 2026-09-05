@@ -83,7 +83,7 @@ export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
   }
 
   return (
-    <section aria-labelledby="rules-title" className="flex flex-col gap-4 pb-2">
+    <section aria-labelledby="rules-title" className="flex flex-col gap-3 pb-2">
       <header className="shrink-0">
         <h1 id="rules-title" className="text-2xl font-semibold tracking-tight">
           {t("listManagementTitle")}
@@ -93,7 +93,7 @@ export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
 
       <RuleLists rules={rules} clients={enabled} allClients={clients} />
 
-      <div className="rounded-2xl border border-ink/10 bg-surface p-5">
+      <div className="rounded-2xl border border-ink/10 bg-surface p-3.5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 className="font-semibold">{t("cloudRules")}</h2>
@@ -129,7 +129,7 @@ export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
       </div>
 
       <form
-        className="flex flex-col gap-2 rounded-2xl border border-ink/10 bg-surface p-4 sm:flex-row"
+        className="flex flex-col gap-2 rounded-2xl border border-ink/10 bg-surface p-3.5 sm:flex-row"
         onSubmit={(event) => {
           event.preventDefault();
           if (!input.trim()) return;
@@ -314,7 +314,7 @@ function RuleLists({
   return (
     <div data-testid="rule-lists" className="flex flex-col gap-3">
       <form
-        className="flex flex-col gap-2 rounded-2xl border border-ink/10 bg-surface p-4 sm:flex-row sm:items-center"
+        className="flex flex-col gap-2 rounded-2xl border border-ink/10 bg-surface p-3.5 sm:flex-row sm:items-center"
         onSubmit={(event) => {
           event.preventDefault();
           if (!name.trim()) return;
@@ -345,7 +345,7 @@ function RuleLists({
         </button>
       </form>
 
-      <div className="grid gap-3 lg:grid-cols-2">
+      <div className="flex flex-col gap-2">
         {rules.lists.map((list) => (
           <RuleListCard
             key={list.id}
@@ -416,11 +416,11 @@ function RuleListCard({
   return (
     <article
       data-testid={`rule-list-${list.id}`}
-      className="rounded-2xl border border-ink/10 bg-surface p-4"
+      className="rounded-2xl border border-ink/10 bg-surface p-3"
     >
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <form
-          className="flex min-w-0 items-center gap-2"
+          className="flex min-w-0 items-center"
           onSubmit={(event) => {
             event.preventDefault();
             if (editedName !== null && editedName.trim() !== list.name) {
@@ -445,20 +445,17 @@ function RuleListCard({
               }
               setEditedName(null);
             }}
-            className="min-w-0 rounded-lg border-transparent bg-transparent font-semibold hover:border-ink/15 focus:border-ink/15 focus:bg-canvas"
+            className="w-36 min-w-0 rounded-lg border-transparent bg-transparent font-semibold hover:border-ink/15 focus:border-ink/15 focus:bg-canvas"
           />
         </form>
-        <span className="text-xs text-muted">
+        <span className="shrink-0 text-xs text-muted">
           {t("listEntries", { count: pins.length })}
         </span>
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <span className="text-xs font-medium text-muted">
+        <span className="shrink-0 text-xs font-medium text-muted">
           {t("listOutbound")}
         </span>
         {disabledClient ? (
-          <span className="text-xs font-semibold text-muted">
+          <span className="shrink-0 text-xs font-semibold text-muted">
             {outboundLabel(list.outbound, allClients)} ({t("disabled")})
           </span>
         ) : (
@@ -478,7 +475,7 @@ function RuleListCard({
           title={
             hasDomains ? t("checkListNeedsStack") : t("checkListNeedsDomains")
           }
-          className="ms-auto inline-flex items-center gap-1.5 rounded-lg border border-ink/15 px-2.5 py-1.5 text-xs font-semibold disabled:opacity-40"
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-ink/15 px-2.5 py-1.5 text-xs font-semibold disabled:opacity-40"
         >
           {checking ? (
             <LoaderCircle className="animate-spin" size={14} aria-hidden />
@@ -487,27 +484,60 @@ function RuleListCard({
           )}
           {checking ? t("checkingList") : t("checkList")}
         </button>
+        <form
+          className="ms-auto flex min-w-52 flex-1 gap-2 sm:max-w-72 sm:flex-none"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!entry.trim()) return;
+            void pinToList(entry, list.id)
+              .then(() => setEntry(""))
+              .catch(() => undefined);
+          }}
+        >
+          <input
+            value={entry}
+            onChange={(event) => setEntry(event.target.value)}
+            placeholder={t("entryPlaceholder")}
+            className="min-w-0 flex-1 rounded-lg border-ink/15 bg-canvas px-2 py-1.5 text-sm"
+          />
+          <button
+            disabled={actionPending}
+            className="rounded-lg border border-ink/15 px-3 py-1.5 text-xs font-semibold"
+          >
+            {t("addEntry")}
+          </button>
+        </form>
+        <button
+          type="button"
+          onClick={() => setDeleting(true)}
+          aria-label={t("deleteList")}
+          title={t("deleteList")}
+          className="inline-flex shrink-0 items-center gap-1 text-xs font-semibold text-muted hover:text-danger"
+        >
+          <Trash2 size={14} aria-hidden />
+        </button>
       </div>
 
       {pins.length === 0 ? (
-        <p className="mt-3 text-xs text-muted">{t("listEmptyHint")}</p>
+        <p className="mt-2 text-xs text-muted">{t("listEmptyHint")}</p>
       ) : (
-        <ul className="mt-3 space-y-1">
+        <ul className="mt-2 flex flex-wrap gap-1.5">
           {pins.map((pin) => (
             <li
               key={`${pin.target.kind}:${pin.target.value}`}
-              className="flex items-center justify-between gap-2 text-sm"
+              className="inline-flex items-center gap-1.5 rounded-md bg-canvas px-2 py-0.5 text-xs"
             >
               <span className="break-all">{pin.target.value}</span>
               <button
                 type="button"
                 disabled={actionPending}
+                aria-label={`${t("remove")} ${pin.target.value}`}
                 onClick={() =>
                   void removeRule(pin.target.value).catch(() => undefined)
                 }
-                className="text-xs font-semibold text-muted hover:text-danger"
+                className="font-semibold text-muted hover:text-danger"
               >
-                {t("remove")}
+                ×
               </button>
             </li>
           ))}
@@ -515,14 +545,14 @@ function RuleListCard({
       )}
 
       {checkResults ? (
-        <ul className="mt-3 space-y-1 rounded-xl bg-canvas p-3">
+        <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 rounded-xl bg-canvas p-2.5">
           {checkResults.length === 0 ? (
             <li className="text-xs text-muted">{t("checkListNeedsStack")}</li>
           ) : (
             checkResults.map((result) => (
               <li
                 key={result.target}
-                className="flex items-center justify-between gap-2 text-xs"
+                className="flex items-center gap-2 text-xs"
               >
                 <span className="break-all">{result.target}</span>
                 <span
@@ -545,71 +575,34 @@ function RuleListCard({
         </ul>
       ) : null}
 
-      <form
-        className="mt-3 flex gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!entry.trim()) return;
-          void pinToList(entry, list.id)
-            .then(() => setEntry(""))
-            .catch(() => undefined);
-        }}
-      >
-        <input
-          value={entry}
-          onChange={(event) => setEntry(event.target.value)}
-          placeholder={t("entryPlaceholder")}
-          className="min-w-0 flex-1 rounded-xl border-ink/15 bg-canvas text-sm"
-        />
-        <button
-          disabled={actionPending}
-          className="rounded-xl border border-ink/15 px-3 py-2 text-xs font-semibold"
+      {deleting ? (
+        <div
+          className="mt-2 flex flex-wrap items-center gap-3 rounded-xl bg-canvas p-2.5 text-sm"
+          role="dialog"
         >
-          {t("addEntry")}
-        </button>
-      </form>
-
-      <div className="mt-3 border-t border-ink/10 pt-3">
-        {deleting ? (
-          <div className="space-y-2 text-sm" role="dialog">
-            <p>
-              {t("deleteListConfirm", {
-                name: list.name,
-                count: pins.length,
-              })}
-            </p>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() =>
-                  void deleteList(list.id)
-                    .then(() => setDeleting(false))
-                    .catch(() => setDeleting(false))
-                }
-                className="rounded-lg bg-danger px-3 py-1.5 text-xs font-semibold text-white"
-              >
-                {t("deleteList")}
-              </button>
-              <button
-                type="button"
-                onClick={() => setDeleting(false)}
-                className="rounded-lg border border-ink/15 px-3 py-1.5 text-xs font-semibold"
-              >
-                {t("close")}
-              </button>
-            </div>
-          </div>
-        ) : (
+          <p className="min-w-0">
+            {t("deleteListConfirm", { name: list.name, count: pins.length })}
+          </p>
           <button
             type="button"
-            onClick={() => setDeleting(true)}
-            className="inline-flex items-center gap-1 text-xs font-semibold text-muted hover:text-danger"
+            onClick={() =>
+              void deleteList(list.id)
+                .then(() => setDeleting(false))
+                .catch(() => setDeleting(false))
+            }
+            className="rounded-lg bg-danger px-3 py-1.5 text-xs font-semibold text-white"
           >
-            <Trash2 size={14} aria-hidden />
             {t("deleteList")}
           </button>
-        )}
-      </div>
+          <button
+            type="button"
+            onClick={() => setDeleting(false)}
+            className="rounded-lg border border-ink/15 px-3 py-1.5 text-xs font-semibold"
+          >
+            {t("close")}
+          </button>
+        </div>
+      ) : null}
     </article>
   );
 }

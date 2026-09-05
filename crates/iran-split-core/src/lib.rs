@@ -198,6 +198,9 @@ pub struct ClientComponentStatus {
     pub preset: PresetId,
     pub enabled: bool,
     pub status: ComponentStatus,
+    /// Public exit IP measured by the egress probe, when known.
+    #[serde(default)]
+    pub exit_ip: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1218,12 +1221,21 @@ impl<B: PlatformBackend> Engine<B> {
 
         self.announce(StackPhase::PreparingRuntime, operation_id)
             .await;
-        let generation = self.backend.prepare_runtime().await?;
+        // The heavy stages must react to Cancel immediately, not only at the
+        // next between-step checkpoint: validation alone can hold the token
+        // hostage for up to 10 seconds.
+        let generation = tokio::select! {
+            () = cancel.cancelled() => return Err(CoreError::Cancelled),
+            generation = self.backend.prepare_runtime() => generation?,
+        };
         check_cancelled(cancel)?;
 
         self.announce(StackPhase::ValidatingConfig, operation_id)
             .await;
-        self.backend.validate_runtime(&generation).await?;
+        tokio::select! {
+            () = cancel.cancelled() => return Err(CoreError::Cancelled),
+            validated = self.backend.validate_runtime(&generation) => validated?,
+        }
         check_cancelled(cancel)?;
 
         self.announce(StackPhase::StartingCore, operation_id).await;
@@ -1644,6 +1656,7 @@ mod tests {
             RuntimeHealth {
                 helper,
                 clients: vec![ClientComponentStatus {
+                    exit_ip: None,
                     id: ClientId::parse("11111111-1111-1111-1111-111111111111").expect("uuid"),
                     preset: PresetId::Hiddify,
                     enabled: true,

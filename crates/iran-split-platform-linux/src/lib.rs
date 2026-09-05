@@ -209,6 +209,7 @@ pub struct LinuxBackend {
     egress_handles: Mutex<Vec<EgressHandle>>,
     side_tunnel_auth_files: Mutex<Vec<NamedTempFile>>,
     launched_clients: Mutex<Vec<Child>>,
+    client_exit_ips: Mutex<std::collections::HashMap<iran_split_config::ClientId, String>>,
 }
 
 impl LinuxBackend {
@@ -224,6 +225,7 @@ impl LinuxBackend {
             egress_handles: Mutex::new(Vec::new()),
             side_tunnel_auth_files: Mutex::new(Vec::new()),
             launched_clients: Mutex::new(Vec::new()),
+            client_exit_ips: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -323,6 +325,7 @@ impl LinuxBackend {
     async fn ensure_enabled_clients(&self, cancel: CancellationToken) -> Result<(), CoreError> {
         let config = self.config.read().await.clone();
         *self.egress_exit_ip.lock().await = None;
+        self.client_exit_ips.lock().await.clear();
         let mut handles = Vec::new();
         for client in config.enabled_clients() {
             let required = config.default_route.client_id() == Some(client.id);
@@ -373,6 +376,10 @@ impl LinuxBackend {
         let exit_ip = self
             .probe_hiddify_until_ready(&config, cancel.clone())
             .await?;
+        self.client_exit_ips
+            .lock()
+            .await
+            .insert(client.id, exit_ip.clone());
         if required {
             *self.egress_exit_ip.lock().await = Some(exit_ip);
         }
@@ -405,6 +412,10 @@ impl LinuxBackend {
                     client.spec().id
                 ))
             })?;
+        self.client_exit_ips
+            .lock()
+            .await
+            .insert(client.id, exit_ip.clone());
         if required {
             *self.egress_exit_ip.lock().await = Some(exit_ip);
         }
@@ -823,6 +834,7 @@ impl PlatformBackend for LinuxBackend {
         let dns = Self::dns_component(config.mihomo.dns_port, dns_listening);
 
         let handles = self.egress_handles.lock().await.clone();
+        let exit_ips = self.client_exit_ips.lock().await.clone();
         let mut clients = Vec::new();
         for client in &config.clients {
             let status = if client.preset == PresetId::Hiddify {
@@ -835,6 +847,7 @@ impl PlatformBackend for LinuxBackend {
                 preset: client.preset,
                 enabled: client.enabled,
                 status,
+                exit_ip: exit_ips.get(&client.id).cloned(),
             });
         }
 
@@ -1183,6 +1196,7 @@ impl PlatformBackend for LinuxBackend {
     async fn cleanup_owned_state(&self) -> Result<CleanupReport, CoreError> {
         self.egress_handles.lock().await.clear();
         *self.egress_exit_ip.lock().await = None;
+        self.client_exit_ips.lock().await.clear();
         self.side_tunnel_auth_files.lock().await.clear();
         match self
             .helper_request(HelperCommand::CleanupOwnedNetworkState)

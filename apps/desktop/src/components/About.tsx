@@ -29,7 +29,7 @@ export function About() {
   const showRetry = update.phase === "failed";
 
   return (
-    <section className="flex flex-col gap-4 pb-2">
+    <section className="flex flex-col gap-3 pb-2">
       <header className="flex items-start gap-3">
         <Info className="mt-1 text-brand" size={24} aria-hidden />
         <div>
@@ -38,7 +38,7 @@ export function About() {
         </div>
       </header>
 
-      <dl className="grid gap-4 rounded-2xl border border-ink/10 bg-surface p-5 sm:grid-cols-2">
+      <dl className="grid gap-4 rounded-2xl border border-ink/10 bg-surface p-3.5 sm:grid-cols-2">
         <div>
           <dt className="text-xs uppercase tracking-wide text-muted">
             {t("appName")}
@@ -74,7 +74,7 @@ export function About() {
       </dl>
 
       <div
-        className="rounded-2xl border border-ink/10 bg-surface p-5"
+        className="rounded-2xl border border-ink/10 bg-surface p-3.5"
         aria-live="polite"
       >
         <h2 className="text-lg font-semibold">{t("aboutUpdatesTitle")}</h2>

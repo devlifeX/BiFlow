@@ -128,6 +128,27 @@ validate_dev_helper_targets() {
     die "refusing unsafe development helper unit: ${DEV_HELPER_UNIT}"
 }
 
+reset_stale_dev_session() {
+  local developer_uid="$1" stale_unit vite_pids
+  if command pkill -f "${TARGET_DIR}/debug/iran-split-desktop" 2>/dev/null; then
+    command printf 'Closed an orphaned dev app window from a previous run.\n'
+    command sleep 0.3
+  fi
+  vite_pids="$(command pgrep -f "${PROJECT_DIR}/node_modules/.*vite" 2>/dev/null || true)"
+  if [[ -n "${vite_pids}" ]]; then
+    # shellcheck disable=SC2086
+    command kill ${vite_pids} 2>/dev/null || true
+    command printf 'Closed a stale dev Vite server (port 1420).\n'
+    command sleep 0.3
+  fi
+  stale_unit="biflow-dev-helper-${developer_uid}.service"
+  if command systemctl is-active --quiet "${stale_unit}"; then
+    command printf 'Stopping a leftover transient helper from a previous run...\n'
+    run_root systemctl stop "${stale_unit}" || \
+      die "could not stop the leftover transient helper ${stale_unit}"
+  fi
+}
+
 cleanup_dev_helper() {
   local original_status="$?" cleanup_status=0
   set +e
@@ -136,6 +157,10 @@ cleanup_dev_helper() {
     DEV_HELPER_CONFIG_TEMP=""
   fi
   if [[ "${DEV_HELPER_STARTED}" -eq 1 ]]; then
+    # Take the dev app window down with the session: an orphaned window
+    # keeps running against a helper that no longer exists and then offers
+    # actions (like helper install) that cannot work.
+    command pkill -f "${TARGET_DIR}/debug/iran-split-desktop" 2>/dev/null
     command printf 'Stopping transient BiFlow development helper...\n'
     if command systemctl is-active --quiet "${DEV_HELPER_UNIT}"; then
       run_root systemctl stop "${DEV_HELPER_UNIT}" || cleanup_status=1
@@ -201,6 +226,11 @@ prepare_dev_helper() {
   exec {DEV_HELPER_LOCK_FD}>"${lock_directory}/biflow-dev.lock"
   command flock -n "${DEV_HELPER_LOCK_FD}" || \
     die "another native BiFlow development session is already running for this user"
+  # The session lock is held, so anything still running from this repo is a
+  # leftover of a crashed or abandoned run. Close it all for a fresh start:
+  # an orphaned dev window keeps acting against a helper that no longer
+  # exists, and a stale Vite server blocks port 1420.
+  reset_stale_dev_session "${developer_uid}"
   account_home="$(command getent passwd "${developer_uid}" | command cut -d: -f6)"
   [[ -n "${account_home}" && "${account_home}" == /* ]] || \
     die "could not determine the developer home directory"

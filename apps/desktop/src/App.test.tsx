@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 import { App } from "./App";
@@ -126,6 +126,7 @@ describe("App", () => {
     await userEvent.click(screen.getByRole("button", { name: "Add client" }));
     await userEvent.click(screen.getByRole("button", { name: /^OpenVPN/ }));
     const card = await screen.findByTestId("client-card-openvpn");
+    await userEvent.click(within(card).getByText("Settings & pinned hosts"));
     expect(card.querySelector("input[placeholder='profile.ovpn']")).toBeNull();
     expect(screen.getByText("No file chosen")).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "Choose file" }));

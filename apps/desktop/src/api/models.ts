@@ -82,6 +82,7 @@ export interface ClientComponentStatus {
   preset: string;
   enabled: boolean;
   status: ComponentStatus;
+  exit_ip: string | null;
 }
 
 export interface StackSnapshot {

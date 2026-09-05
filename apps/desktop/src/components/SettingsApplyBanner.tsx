@@ -21,7 +21,7 @@ export function SettingsApplyBanner() {
   return (
     <div
       data-testid="settings-apply-banner"
-      className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm"
+      className="sticky top-0 z-40 mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm shadow-card backdrop-blur-md"
       role="status"
     >
       <p className="min-w-0 flex-1">{t("restartMihomoToApply")}</p>

@@ -8,10 +8,15 @@ import { baseSettings, baseSnapshot } from "../test/fixtures";
 import { useAppStore } from "../store/app";
 import { ClientRegistry } from "./ClientRegistry";
 
+async function openDetails(card: HTMLElement) {
+  await userEvent.click(within(card).getByText("Settings & pinned hosts"));
+}
+
 vi.mock("../api/desktop", () => ({
   desktop: {
     pickProfileFile: vi.fn(),
     openUrl: vi.fn().mockResolvedValue(undefined),
+    clientBinaryInstalled: vi.fn().mockResolvedValue(true),
   },
 }));
 
@@ -60,6 +65,7 @@ describe("ClientRegistry profile picker", () => {
 
     for (const preset of ["openvpn", "windscribe"] as const) {
       const card = screen.getByTestId(`client-card-${preset}`);
+      await openDetails(card);
       expect(within(card).getByText("No file chosen")).toBeVisible();
       await userEvent.click(
         within(card).getByRole("button", { name: "Choose file" }),
@@ -113,6 +119,7 @@ describe("ClientRegistry profile picker", () => {
     render(<ClientRegistry />);
 
     const card = screen.getByTestId("client-card-openvpn");
+    await openDetails(card);
     expect(within(card).getByTestId("profile-file-name")).toHaveTextContent(
       "windscribe.ovpn",
     );
@@ -138,10 +145,10 @@ describe("ClientRegistry profile picker", () => {
     useAppStore.setState({ updateClient });
     render(<ClientRegistry />);
 
+    const card = screen.getByTestId("client-card-openvpn");
+    await openDetails(card);
     await userEvent.click(
-      within(screen.getByTestId("client-card-openvpn")).getByRole("button", {
-        name: "Choose file",
-      }),
+      within(card).getByRole("button", { name: "Choose file" }),
     );
     expect(updateClient).not.toHaveBeenCalled();
   });

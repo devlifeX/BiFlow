@@ -30,7 +30,7 @@ import { extractHost } from "../lib/host";
 import type { SortState } from "../lib/tableSort";
 import { sortRows, toggleSort } from "../lib/tableSort";
 import { useAppStore } from "../store/app";
-import { outboundLabel, ruleLabel } from "../lib/outbound";
+import { clientColor, outboundLabel, ruleLabel } from "../lib/outbound";
 import { FlowResult, OutboundSelect } from "./DirectRules";
 import { SortHeader } from "./SortHeader";
 
@@ -87,7 +87,7 @@ export function Diagnostics({ report }: { report: DiagnosticsReport | null }) {
   return (
     <section
       aria-labelledby="diagnostics-title"
-      className="flex flex-col gap-4 pb-2"
+      className="flex flex-col gap-3 pb-2"
     >
       <div className="flex shrink-0 flex-wrap items-start justify-between gap-4">
         <header>
@@ -117,8 +117,10 @@ export function Diagnostics({ report }: { report: DiagnosticsReport | null }) {
         </button>
       </div>
 
+      <LiveConnectionsCard />
+
       <form
-        className="rounded-2xl border border-ink/10 bg-surface p-4"
+        className="rounded-2xl border border-ink/10 bg-surface p-3.5"
         onSubmit={(event) => {
           event.preventDefault();
           // Accept whatever the user pasted — a full URL, a host:port, an IP —
@@ -185,158 +187,166 @@ export function Diagnostics({ report }: { report: DiagnosticsReport | null }) {
         ) : null}
       </form>
 
-      <ReachabilityCard />
+      <div className="grid gap-3 xl:grid-cols-2">
+        <ReachabilityCard />
 
-      <LiveConnectionsCard />
-
-      <div className="rounded-2xl border border-ink/10 bg-surface p-4">
-        <h2 className="mb-3 font-semibold">Test timeline</h2>
-        {!report ? (
-          <p className="text-sm text-muted">
-            No diagnostic run in this session.
-          </p>
-        ) : (
-          <ol className="space-y-3">
-            {report.steps.map((step) => (
-              <li key={step.id} className="flex items-start gap-3">
-                {step.status === "passed" ? (
-                  <CheckCircle2
-                    className="mt-0.5 text-success"
-                    size={19}
-                    aria-hidden
-                  />
-                ) : step.status === "warning" || step.status === "failed" ? (
-                  <CircleAlert
-                    className="mt-0.5 text-amber-500"
-                    size={19}
-                    aria-hidden
-                  />
-                ) : (
-                  <LoaderCircle
-                    className="mt-0.5 text-muted"
-                    size={19}
-                    aria-hidden
-                  />
-                )}
-                <div>
-                  <p className="font-medium">{step.label}</p>
-                  {step.detail ? (
-                    <p className="text-sm text-muted">{step.detail}</p>
-                  ) : null}
-                </div>
-              </li>
-            ))}
-          </ol>
-        )}
-      </div>
-
-      <div className="rounded-2xl border border-ink/10 bg-surface p-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h2 className="font-semibold">{t("freshHiddify")}</h2>
-            <p className="mt-1 max-w-prose text-sm text-muted">
-              {t("freshHiddifyHelp")}
+        <div className="rounded-2xl border border-ink/10 bg-surface p-3.5">
+          <h2 className="mb-3 font-semibold">Test timeline</h2>
+          {!report ? (
+            <p className="text-sm text-muted">
+              No diagnostic run in this session.
             </p>
-          </div>
-          <button
-            type="button"
-            disabled={freshStarting}
-            onClick={() => {
-              if (!window.confirm(t("freshHiddifyConfirm"))) return;
-              setFreshStarting(true);
-              setFreshStart(null);
-              setFreshStartError(null);
-              void desktop
-                .freshHiddifyStart()
-                .then(setFreshStart)
-                .catch((error: unknown) =>
-                  setFreshStartError(
-                    error instanceof Error ? error.message : String(error),
-                  ),
-                )
-                .finally(() => setFreshStarting(false));
-            }}
-            className="inline-flex items-center gap-2 rounded-xl border border-ink/15 px-4 py-2.5 font-semibold disabled:opacity-50"
-          >
-            {freshStarting ? (
-              <LoaderCircle className="animate-spin" size={18} aria-hidden />
-            ) : (
-              <Sparkles size={18} aria-hidden />
-            )}
-            {t("freshHiddifyButton")}
-          </button>
+          ) : (
+            <ol className="space-y-3">
+              {report.steps.map((step) => (
+                <li key={step.id} className="flex items-start gap-3">
+                  {step.status === "passed" ? (
+                    <CheckCircle2
+                      className="mt-0.5 text-success"
+                      size={19}
+                      aria-hidden
+                    />
+                  ) : step.status === "warning" || step.status === "failed" ? (
+                    <CircleAlert
+                      className="mt-0.5 text-amber-500"
+                      size={19}
+                      aria-hidden
+                    />
+                  ) : (
+                    <LoaderCircle
+                      className="mt-0.5 text-muted"
+                      size={19}
+                      aria-hidden
+                    />
+                  )}
+                  <div>
+                    <p className="font-medium">{step.label}</p>
+                    {step.detail ? (
+                      <p className="text-sm text-muted">{step.detail}</p>
+                    ) : null}
+                  </div>
+                </li>
+              ))}
+            </ol>
+          )}
         </div>
-        {freshStart ? (
-          <div
-            className="mt-4 space-y-1 rounded-xl bg-canvas p-3 text-sm"
-            role="status"
-          >
-            <p className="font-medium">
-              {freshStart.started
-                ? t("freshHiddifyDone")
-                : t("freshHiddifyNotStarted")}
-            </p>
-            <p className="text-muted">
-              {t("freshHiddifyCleared")}:{" "}
-              {freshStart.cleared.length > 0
-                ? freshStart.cleared.join(", ")
-                : t("freshHiddifyNothing")}
-            </p>
-            <p className="text-muted">
-              {t("freshHiddifyKept")}: {freshStart.preserved.join(", ")}
-            </p>
-            {freshStart.cleared.length > 0 ? (
-              <p className="min-w-0 break-all font-mono text-xs text-muted">
-                {t("freshHiddifyBackup")}: {freshStart.backup_dir}
-              </p>
-            ) : null}
-          </div>
-        ) : null}
-        {freshStartError ? (
-          <p
-            className="mt-4 rounded-xl bg-canvas p-3 text-sm text-danger"
-            role="alert"
-          >
-            {freshStartError}
-          </p>
-        ) : null}
       </div>
 
-      <div className="rounded-2xl border border-ink/10 bg-surface p-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h2 className="font-semibold">Permanent debug.log</h2>
-            <p className="mt-1 text-sm text-muted">
-              Preserved across app restarts until you delete it. Send this file
-              to the support team when reporting a problem.
-            </p>
-            {debugLog ? (
-              <dl className="mt-3 space-y-1 text-sm">
-                <div className="flex gap-2">
-                  <dt className="font-medium">Size:</dt>
-                  <dd data-testid="debug-log-size">
-                    {formatBytes(debugLog.size_bytes)}
-                  </dd>
-                </div>
-                <div className="flex min-w-0 gap-2">
-                  <dt className="shrink-0 font-medium">Location:</dt>
-                  <dd className="min-w-0 break-all font-mono text-xs text-muted">
-                    {debugLog.path}
-                  </dd>
-                </div>
-              </dl>
-            ) : (
-              <p className="mt-3 text-sm text-muted">Reading file status…</p>
-            )}
+      <div className="grid gap-3 xl:grid-cols-3 [&>div]:flex [&>div]:h-full [&>div]:flex-col">
+        <div className="rounded-2xl border border-ink/10 bg-surface p-3.5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h2 className="font-semibold">{t("freshHiddify")}</h2>
+              <p className="mt-1 max-w-prose text-sm text-muted">
+                {t("freshHiddifyHelp")}
+              </p>
+            </div>
           </div>
-          <div className="flex flex-wrap gap-2">
+          {freshStart ? (
+            <div
+              className="mt-4 space-y-1 rounded-xl bg-canvas p-3 text-sm"
+              role="status"
+            >
+              <p className="font-medium">
+                {freshStart.started
+                  ? t("freshHiddifyDone")
+                  : t("freshHiddifyNotStarted")}
+              </p>
+              <p className="text-muted">
+                {t("freshHiddifyCleared")}:{" "}
+                {freshStart.cleared.length > 0
+                  ? freshStart.cleared.join(", ")
+                  : t("freshHiddifyNothing")}
+              </p>
+              <p className="text-muted">
+                {t("freshHiddifyKept")}: {freshStart.preserved.join(", ")}
+              </p>
+              {freshStart.cleared.length > 0 ? (
+                <p className="min-w-0 break-all font-mono text-xs text-muted">
+                  {t("freshHiddifyBackup")}: {freshStart.backup_dir}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+          {freshStartError ? (
+            <p
+              className="mt-4 rounded-xl bg-canvas p-3 text-sm text-danger"
+              role="alert"
+            >
+              {freshStartError}
+            </p>
+          ) : null}
+          <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-ink/10 pt-3">
+            <button
+              type="button"
+              disabled={freshStarting}
+              onClick={() => {
+                if (!window.confirm(t("freshHiddifyConfirm"))) return;
+                setFreshStarting(true);
+                setFreshStart(null);
+                setFreshStartError(null);
+                void desktop
+                  .freshHiddifyStart()
+                  .then(setFreshStart)
+                  .catch((error: unknown) =>
+                    setFreshStartError(
+                      error instanceof Error ? error.message : String(error),
+                    ),
+                  )
+                  .finally(() => setFreshStarting(false));
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-ink/15 px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
+            >
+              {freshStarting ? (
+                <LoaderCircle className="animate-spin" size={14} aria-hidden />
+              ) : (
+                <Sparkles size={14} aria-hidden />
+              )}
+              {t("freshHiddifyButton")}
+            </button>
+          </div>
+        </div>
+        <div className="rounded-2xl border border-ink/10 bg-surface p-3.5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h2 className="font-semibold">Permanent debug.log</h2>
+              <p className="mt-1 text-sm text-muted">
+                Preserved across app restarts until you delete it. Send this
+                file to the support team when reporting a problem.
+              </p>
+              {debugLog ? (
+                <dl className="mt-3 space-y-1 text-sm">
+                  <div className="flex gap-2">
+                    <dt className="font-medium">Size:</dt>
+                    <dd data-testid="debug-log-size">
+                      {formatBytes(debugLog.size_bytes)}
+                    </dd>
+                  </div>
+                  <div className="flex min-w-0 gap-2">
+                    <dt className="shrink-0 font-medium">Location:</dt>
+                    <dd className="min-w-0 break-all font-mono text-xs text-muted">
+                      {debugLog.path}
+                    </dd>
+                  </div>
+                </dl>
+              ) : (
+                <p className="mt-3 text-sm text-muted">Reading file status…</p>
+              )}
+            </div>
+          </div>
+          {logMessage ? (
+            <p className="mt-3 rounded-xl bg-canvas p-3 text-sm" role="status">
+              {logMessage}
+            </p>
+          ) : null}
+          <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-ink/10 pt-3">
             <button
               type="button"
               disabled={logAction !== null}
               onClick={refreshDebugLog}
-              className="inline-flex items-center gap-2 rounded-xl border border-ink/15 px-3 py-2 text-sm font-semibold disabled:opacity-50"
+              className="inline-flex items-center gap-2 rounded-lg border border-ink/15 px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
             >
-              <RefreshCw size={16} aria-hidden /> Refresh size
+              <RefreshCw size={14} aria-hidden /> Refresh
             </button>
             <button
               type="button"
@@ -359,9 +369,9 @@ export function Diagnostics({ report }: { report: DiagnosticsReport | null }) {
                   )
                   .finally(() => setLogAction(null));
               }}
-              className="inline-flex items-center gap-2 rounded-xl border border-ink/15 px-3 py-2 text-sm font-semibold disabled:opacity-50"
+              className="inline-flex items-center gap-2 rounded-lg border border-ink/15 px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
             >
-              <FolderOpen size={16} aria-hidden /> Show file
+              <FolderOpen size={14} aria-hidden /> Show file
             </button>
             <button
               type="button"
@@ -393,20 +403,47 @@ export function Diagnostics({ report }: { report: DiagnosticsReport | null }) {
                   )
                   .finally(() => setLogAction(null));
               }}
-              className="inline-flex items-center gap-2 rounded-xl border border-danger/30 px-3 py-2 text-sm font-semibold text-danger disabled:opacity-50"
+              className="inline-flex items-center gap-2 rounded-lg border border-danger/30 px-3 py-1.5 text-xs font-semibold text-danger disabled:opacity-50"
             >
-              <Trash2 size={16} aria-hidden /> Delete log
+              <Trash2 size={14} aria-hidden /> Delete log
             </button>
           </div>
         </div>
-        {logMessage ? (
-          <p className="mt-3 rounded-xl bg-canvas p-3 text-sm" role="status">
-            {logMessage}
-          </p>
-        ) : null}
+        <div className="rounded-2xl border border-ink/10 bg-surface p-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="font-semibold">Support bundle</h2>
+              <p className="mt-1 text-sm text-muted">
+                Versions, redacted config, state, and the permanent debug.log.
+              </p>
+            </div>
+          </div>
+          {exported ? (
+            <div
+              className="mt-4 rounded-xl bg-canvas p-3 text-sm"
+              role="status"
+            >
+              <p className="flex items-center gap-2 font-medium">
+                <FileText size={17} aria-hidden /> {exported.path}
+              </p>
+              <p className="mt-1 text-muted">
+                Included: {exported.files.join(", ")}
+              </p>
+            </div>
+          ) : null}
+          <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-ink/10 pt-3">
+            <button
+              type="button"
+              onClick={() => void desktop.exportBundle().then(setExported)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-ink/15 px-3 py-1.5 text-xs font-semibold"
+            >
+              <Download size={14} aria-hidden /> Export
+            </button>
+          </div>
+        </div>
       </div>
 
-      <div className="rounded-2xl border border-ink/10 bg-surface p-4">
+      <div className="rounded-2xl border border-ink/10 bg-surface p-3.5">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <h2 className="font-semibold">Recent redacted logs</h2>
           <select
@@ -437,34 +474,6 @@ export function Diagnostics({ report }: { report: DiagnosticsReport | null }) {
             ))
           )}
         </div>
-      </div>
-
-      <div className="rounded-2xl border border-ink/10 bg-surface p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="font-semibold">Support bundle</h2>
-            <p className="mt-1 text-sm text-muted">
-              Versions, redacted config, state, and the permanent debug.log.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => void desktop.exportBundle().then(setExported)}
-            className="inline-flex items-center gap-2 rounded-xl border border-ink/15 px-4 py-2.5 font-semibold"
-          >
-            <Download size={18} aria-hidden /> Export
-          </button>
-        </div>
-        {exported ? (
-          <div className="mt-4 rounded-xl bg-canvas p-3 text-sm" role="status">
-            <p className="flex items-center gap-2 font-medium">
-              <FileText size={17} aria-hidden /> {exported.path}
-            </p>
-            <p className="mt-1 text-muted">
-              Included: {exported.files.join(", ")}
-            </p>
-          </div>
-        ) : null}
       </div>
     </section>
   );
@@ -553,7 +562,7 @@ function ReachabilityCard() {
   return (
     <div
       data-testid="reachability"
-      className="rounded-2xl border border-ink/10 bg-surface p-4"
+      className="rounded-2xl border border-ink/10 bg-surface p-3.5"
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
@@ -635,7 +644,7 @@ function ReachabilityCard() {
               status: statusLabel(selected.status),
             })}
             onClick={(event) => event.stopPropagation()}
-            className="w-full max-w-md rounded-2xl border border-ink/10 bg-surface p-5 shadow-xl"
+            className="w-full max-w-md rounded-2xl border border-ink/10 bg-surface p-3.5 shadow-xl"
           >
             <h3 className="flex items-center gap-2 font-semibold">
               <span
@@ -779,7 +788,7 @@ function LiveConnectionsCard() {
   return (
     <div
       data-testid="live-connections"
-      className="rounded-2xl border border-ink/10 bg-surface p-4"
+      className="rounded-2xl border border-ink/10 bg-surface p-3.5"
     >
       <h2 className="font-semibold">{t("liveConnections")}</h2>
       <p className="mt-1 text-sm text-muted">{t("liveConnectionsHelp")}</p>
@@ -899,8 +908,19 @@ function LiveConnectionsCard() {
                               className={`rounded-md px-2 py-0.5 text-xs font-semibold ${
                                 group.outbound === "direct"
                                   ? "bg-success/10 text-success"
-                                  : "bg-brand/10 text-brand"
+                                  : ""
                               }`}
+                              style={
+                                group.outbound === "direct"
+                                  ? undefined
+                                  : {
+                                      color: clientColor(
+                                        group.outbound,
+                                        clients,
+                                      ),
+                                      backgroundColor: `${clientColor(group.outbound, clients)}1f`,
+                                    }
+                              }
                             >
                               {outboundLabel(group.outbound, clients)}
                             </span>
