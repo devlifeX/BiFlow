@@ -374,7 +374,11 @@ impl LinuxBackend {
             ExecutableSetting::Auto => None,
             ExecutableSetting::Path(path) => Some(path.clone()),
         };
-        let auth_file = write_side_tunnel_auth(username.as_deref(), password.as_deref())?;
+        let auth_file = write_side_tunnel_auth(
+            &self.paths.user_data_dir,
+            username.as_deref(),
+            password.as_deref(),
+        )?;
         let proxy = self.ready_proxy_endpoint(ready).await;
         let pinned_remote = self.pin_side_tunnel_remote(&profile, proxy.as_ref()).await;
         let result = self
@@ -1536,7 +1540,15 @@ fn file_named_ignore_case(directory: &Path, name: &str) -> Option<PathBuf> {
 
 /// Writes `username\npassword` to a 0600 temp file for `--auth-user-pass`.
 /// Returns `None` when the instance has no credentials.
+/// Writes the credential file where the helper can actually read it.
+///
+/// The helper unit sets `PrivateTmp=yes`, so a file in the desktop user's
+/// `/tmp` does not exist inside the helper's mount namespace and `OpenVPN`
+/// dies immediately with "exit status: 1". `ProtectHome=read-only` still
+/// lets the helper read the user's data directory, so the file goes there,
+/// owner-only, and is deleted when the handle drops.
 fn write_side_tunnel_auth(
+    user_data_dir: &Path,
     username: Option<&str>,
     password: Option<&str>,
 ) -> Result<Option<NamedTempFile>, CoreError> {
@@ -1546,7 +1558,15 @@ fn write_side_tunnel_auth(
     if username.is_empty() {
         return Ok(None);
     }
-    let mut file = NamedTempFile::new().map_err(|error| platform_error(&error))?;
+    let directory = user_data_dir.join("side-tunnel");
+    fs::create_dir_all(&directory).map_err(|error| platform_error(&error))?;
+    let mut file = NamedTempFile::new_in(&directory).map_err(|error| platform_error(&error))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(file.path(), fs::Permissions::from_mode(0o600))
+            .map_err(|error| platform_error(&error))?;
+    }
     writeln!(file, "{username}")
         .and_then(|()| writeln!(file, "{password}"))
         .and_then(|()| file.flush())
@@ -1655,6 +1675,39 @@ fn hash_bytes(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use iran_split_config::DefaultRoute;
+
+    #[test]
+    fn side_tunnel_auth_avoids_the_helpers_private_tmp() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let file = write_side_tunnel_auth(home.path(), Some("user"), Some("secret"))
+            .expect("auth")
+            .expect("some");
+        // PrivateTmp=yes hides /tmp from the helper: a credential file there
+        // makes OpenVPN die instantly with "exit status: 1".
+        assert!(
+            file.path().starts_with(home.path()),
+            "auth file must live under the user data directory"
+        );
+        assert_ne!(
+            file.path().parent(),
+            Some(std::env::temp_dir().as_path()),
+            "the bare temp root is exactly what the helper cannot see"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(file.path())
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "credentials must stay owner-only");
+        }
+        let contents = fs::read_to_string(file.path()).expect("read");
+        assert_eq!(contents, "user\nsecret\n");
+        assert!(write_side_tunnel_auth(home.path(), None, Some("secret"))
+            .expect("no username")
+            .is_none());
+    }
 
     #[tokio::test]
     async fn preparation_publishes_only_allowlisted_generation_files() {

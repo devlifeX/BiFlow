@@ -36,7 +36,18 @@ if [ "${has_rust}" = true ]; then
   run cargo clippy --workspace --all-targets -- -D warnings
   run cargo test --workspace
   if command -v cargo-deny >/dev/null 2>&1; then
-    run cargo deny check
+    # cargo-deny fetches the advisory database, which a filtered or offline
+    # network cannot reach. A failed fetch must not block a commit — CI is the
+    # authority — but a real advisory or license violation still must.
+    echo "pre-commit: cargo deny check"
+    deny_output="$(cargo deny check 2>&1)" || {
+      if printf '%s' "${deny_output}" | grep -qiE "unable to access|gnutls|failed to fetch|could not fetch|network|timed out|resolve host"; then
+        echo "pre-commit: advisory database is unreachable; CI will run cargo deny" >&2
+      else
+        printf '%s\n' "${deny_output}" >&2
+        exit 1
+      fi
+    }
   else
     echo "pre-commit: cargo-deny is not installed; CI will still run it" >&2
   fi

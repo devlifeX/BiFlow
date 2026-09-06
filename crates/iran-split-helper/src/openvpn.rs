@@ -208,6 +208,31 @@ impl Supervisor {
     }
 }
 
+/// Last meaningful stderr line of an exited `OpenVPN`, redacted and bounded.
+async fn last_stderr_line(child: &mut Child) -> String {
+    use tokio::io::AsyncReadExt;
+
+    let Some(mut stderr) = child.stderr.take() else {
+        return String::new();
+    };
+    let mut buffer = String::new();
+    // The process has exited, so the pipe is closed and this returns at once.
+    if stderr.read_to_string(&mut buffer).await.is_err() {
+        return String::new();
+    }
+    let Some(line) = buffer
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+    else {
+        return String::new();
+    };
+    let line = redact(line);
+    let line: String = line.chars().take(200).collect();
+    format!(": {line}")
+}
+
 fn spawn_openvpn(binary: &Path, args: &[String]) -> Result<Child, HelperServiceError> {
     let mut command = Command::new(binary);
     command
@@ -215,7 +240,10 @@ fn spawn_openvpn(binary: &Path, args: &[String]) -> Result<Child, HelperServiceE
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        // Captured, not discarded: an OpenVPN option or file error is the
+        // only place the real cause appears, and a bare "exit status: 1"
+        // sends operators hunting the network instead of the message.
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     apply_openvpn_spawn(&mut command);
     command
@@ -232,8 +260,9 @@ async fn wait_for_device(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds.max(1));
     loop {
         if let Ok(Some(status)) = child.try_wait() {
+            let detail = last_stderr_line(child).await;
             return Err(HelperServiceError::SideTunnel(format!(
-                "openvpn exited early with status {status}"
+                "openvpn exited early with status {status}{detail}"
             )));
         }
         if device_is_up(device).await {
