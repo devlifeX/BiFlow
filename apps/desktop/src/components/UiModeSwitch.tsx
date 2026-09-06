@@ -3,7 +3,8 @@ import type { KeyboardEvent, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { UiMode } from "../lib/uiMode";
 import { writeUiMode } from "../lib/uiMode";
-import { BUTTON_ICON_PX } from "./AppButton";
+
+const MODE_ICON_PX = 14;
 
 export function UiModeSwitch({
   mode,
@@ -41,25 +42,25 @@ export function UiModeSwitch({
     <div
       role="radiogroup"
       aria-label={t("uiModeLabel")}
-      className="relative inline-grid w-full max-w-md grid-cols-2 rounded-xl border border-ink/10 bg-canvas p-1"
+      className="relative inline-grid w-full max-w-xs grid-cols-2 rounded-[5px] border border-[rgb(var(--border-default))] bg-canvas p-0.5"
       onKeyDown={onKeyDown}
     >
       <div
         aria-hidden
-        className="pointer-events-none absolute inset-y-1 w-[calc(50%-0.25rem)] rounded-lg bg-surface shadow-sm transition-[inset-inline-start] duration-200 motion-reduce:transition-none"
+        className="pointer-events-none absolute inset-y-0.5 w-[calc(50%-0.125rem)] rounded-[5px] bg-surface transition-[inset-inline-start] duration-150 motion-reduce:transition-none"
         style={{
           insetInlineStart:
-            mode === "basic" ? "0.25rem" : "calc(50% + 0.125rem)",
+            mode === "basic" ? "0.125rem" : "calc(50% + 0.0625rem)",
         }}
       />
       <ModeOption
-        icon={<Sparkles size={BUTTON_ICON_PX} aria-hidden />}
+        icon={<Sparkles size={MODE_ICON_PX} aria-hidden />}
         label={t("uiModeBasic")}
         checked={mode === "basic"}
         onSelect={() => select("basic")}
       />
       <ModeOption
-        icon={<SlidersHorizontal size={BUTTON_ICON_PX} aria-hidden />}
+        icon={<SlidersHorizontal size={MODE_ICON_PX} aria-hidden />}
         label={t("uiModeAdvanced")}
         checked={mode === "advanced"}
         onSelect={() => select("advanced")}
@@ -86,7 +87,7 @@ function ModeOption({
       aria-checked={checked}
       tabIndex={checked ? 0 : -1}
       onClick={onSelect}
-      className={`relative z-10 inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors ${
+      className={`relative z-10 inline-flex h-7 items-center justify-center gap-1 rounded-[5px] px-2 text-[10px] font-semibold transition-colors ${
         checked ? "text-brand" : "text-muted hover:text-ink"
       }`}
     >

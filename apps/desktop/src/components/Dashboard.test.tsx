@@ -34,7 +34,8 @@ describe("Dashboard", () => {
   it("shows real component state and starts without blocking the UI", async () => {
     useAppStore.setState({ snapshot: stopped, actionPending: false });
     render(<Dashboard snapshot={stopped} />);
-    expect(screen.getAllByText("stopped")).toHaveLength(5);
+    expect(screen.getAllByText("Idle")).toHaveLength(4);
+    expect(screen.getAllByText("Ready")).toHaveLength(1);
     const connect = screen.getByRole("button", { name: "Connect" });
     expect(connect.querySelector("svg")).not.toBeNull();
     expect(connect).toHaveAttribute("data-connect-glow", "available");
@@ -54,7 +55,7 @@ describe("Dashboard", () => {
         }}
       />,
     );
-    const connecting = screen.getByRole("button", { name: "Start client" });
+    const connecting = screen.getByRole("button", { name: /^Start client/ });
     expect(connecting).toBeDisabled();
     expect(connecting).toHaveAttribute("data-progress", "25");
     expect(connecting).toHaveAttribute("data-connect-glow", "off");
@@ -104,7 +105,7 @@ describe("Dashboard", () => {
     expect(
       screen.getByRole("button", { name: "Cancel operation" }),
     ).toBeEnabled();
-    const connect = screen.getByRole("button", { name: "Start Mihomo" });
+    const connect = screen.getByRole("button", { name: /^Start Mihomo/ });
     expect(connect).toBeDisabled();
     expect(connect).toHaveAttribute("data-progress", "70");
     expect(screen.queryByRole("status")).toBeNull();
@@ -202,7 +203,8 @@ describe("Dashboard", () => {
     });
     render(<Dashboard snapshot={stopped} />);
     expect(screen.queryByRole("button", { name: /^Install$/ })).toBeNull();
-    expect(screen.getAllByText("stopped")).toHaveLength(5);
+    expect(screen.getAllByText("Idle")).toHaveLength(4);
+    expect(screen.getAllByText("Ready")).toHaveLength(1);
   });
 
   it("shows animated direct and VPN routes only while connected", () => {
@@ -281,11 +283,10 @@ describe("Dashboard", () => {
     expect(useAppStore.getState().actionPending).toBe(true);
   });
 
-  it("lets metric values wrap instead of clipping on narrow columns", () => {
+  it("truncates long stat values inside the strip", () => {
     render(<Dashboard snapshot={stopped} />);
     const exitIp = screen.getByText("Available after connection");
-    expect(exitIp.className).toMatch(/break-words/);
-    expect(exitIp.className).not.toMatch(/truncate/);
+    expect(exitIp.className).toMatch(/truncate/);
   });
 
   it("lets the shell scroll overflowing dashboard content", () => {
@@ -296,14 +297,14 @@ describe("Dashboard", () => {
     expect(container.querySelector("section")?.className).toMatch(/pb-2/);
   });
 
-  it("renders compact mobile status and provider summaries", () => {
+  it("renders unified component and provider summaries", () => {
     render(<Dashboard snapshot={stopped} />);
     expect(screen.getByTestId("connection-status-strip")).toBeInTheDocument();
     expect(screen.getByTestId("provider-summary")).toBeInTheDocument();
     expect(
       screen
         .getByTestId("connection-status-strip")
-        .querySelectorAll("[data-status-light]"),
+        .querySelectorAll("[data-status-phase]"),
     ).toHaveLength(5);
   });
 });

@@ -130,28 +130,30 @@ export function App() {
     <div
       data-connection-glow={glow ?? "none"}
       className={`app-shell grid h-full overflow-hidden ${
-        advanced ? "app-shell-advanced md:grid-cols-[15rem_1fr]" : "grid-cols-1"
+        advanced ? "app-shell-advanced md:grid-cols-[11rem_1fr]" : "grid-cols-1"
       } ${glow ? `connection-glow connection-glow-${glow}` : ""}`}
     >
       {advanced && !mobile ? (
         <aside
           data-testid="sidebar-nav"
-          className="app-sidebar hidden h-full min-h-0 flex-col border-r border-ink/10 bg-surface/85 p-4 backdrop-blur md:flex"
+          className="app-sidebar hidden h-full min-h-0 w-44 shrink-0 flex-col border-r border-[rgb(var(--border-default))] bg-surface px-2 py-3 md:flex"
         >
-          <div className="flex items-center gap-3 px-2 py-2">
+          <div className="flex items-center gap-2 px-2 py-1">
             <img
               src={logo}
               alt=""
-              className="h-10 w-10 rounded-xl object-contain"
+              className="h-7 w-7 rounded-[5px] object-contain"
             />
             <div className="min-w-0">
-              <p className="font-semibold">{t("appName")}</p>
-              <p className="text-xs text-muted">{t("tagline")}</p>
+              <p className="truncate text-[12px] font-semibold">
+                {t("appName")}
+              </p>
+              <p className="truncate text-[10px] text-muted">{t("tagline")}</p>
             </div>
           </div>
           <nav
             aria-label="Primary navigation"
-            className="mt-4 grid flex-1 content-start gap-1"
+            className="mt-3 grid flex-1 content-start gap-1"
           >
             <NavButton
               page="dashboard"
@@ -182,8 +184,8 @@ export function App() {
       ) : null}
 
       <div className="flex min-h-0 min-w-0 flex-col overflow-hidden">
-        <main className="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col overflow-hidden p-3 sm:p-5">
-          <div className="shrink-0 pb-4">
+        <main className="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col overflow-hidden px-4 py-3">
+          <div className="shrink-0 pb-3">
             <UiModeSwitch
               mode={uiMode}
               onChange={(mode) => {
@@ -344,13 +346,15 @@ function NavButton({
       type="button"
       aria-current={active ? "page" : undefined}
       onClick={() => setPage(page)}
-      className={`flex min-w-0 items-center gap-2 rounded-xl px-3 py-3 text-sm font-medium transition ${
+      className={`flex h-7 min-w-0 items-center gap-2 rounded-[5px] px-2 text-[12px] font-medium transition ${
         active
-          ? "bg-brand/10 text-brand"
+          ? "bg-blue-50 font-semibold text-blue-700 dark:bg-brand/15 dark:text-brand"
           : "text-muted hover:bg-ink/5 hover:text-ink"
       }`}
     >
-      <span aria-hidden>{icon}</span>
+      <span className="shrink-0 [&>svg]:h-3.5 [&>svg]:w-3.5" aria-hidden>
+        {icon}
+      </span>
       <span className="truncate">{label}</span>
     </button>
   );

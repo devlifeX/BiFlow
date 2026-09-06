@@ -1,355 +1,73 @@
-import {
-  Activity,
-  ArrowDownUp,
-  CircleDot,
-  Download,
-  Gauge,
-  Globe2,
-  LoaderCircle,
-  Network,
-  Pause,
-  Play,
-  Power,
-  PowerOff,
-  ShieldCheck,
-  X,
-} from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { desktop } from "../api/desktop";
-import type {
-  ClientInstance,
-  ComponentStatus,
-  StackSnapshot,
-} from "../api/models";
-import { controlsLocked, isOperating } from "../lib/lifecycle";
-import { useAppStore } from "../store/app";
-import { BUTTON_ICON_PX } from "./AppButton";
-import { ConnectionActionButton } from "./ConnectionActionButton";
-import { ClientRegistry } from "./ClientRegistry";
-import { LifecycleCancelButton } from "./LifecycleCancelButton";
-import { StatusPill } from "./StatusPill";
+import type { ClientInstance, StackSnapshot } from "../api/models";
 import { isHiddenProductionHost } from "../lib/hiddenHosts";
 import { clientColor } from "../lib/outbound";
 import { presetById, type PresetId } from "../lib/presets";
+import { useAppStore } from "../store/app";
+import { ClientRegistry } from "./ClientRegistry";
+import { ComponentStatusList } from "./ComponentStatusList";
+import { LifecycleControls } from "./LifecycleControls";
+import { StatStrip } from "./StatStrip";
+import { StatusPill } from "./StatusPill";
 
 export function Dashboard({ snapshot }: { snapshot: StackSnapshot }) {
   const { t } = useTranslation();
-  const {
-    actionPending,
-    toggleConnection,
-    pauseConnection,
-    resumeConnection,
-    cancel,
-    boot,
-    dependencies,
-    installingId,
-    installDependency,
-    installHelper,
-  } = useAppStore();
+  const { boot, dependencies, installingId, installDependency, installHelper } =
+    useAppStore();
   const active = snapshot.phase === "running" || snapshot.phase === "degraded";
-  const paused = snapshot.phase === "paused";
-  const locked = controlsLocked(snapshot, actionPending);
-  const operating = isOperating(snapshot);
-  const needsAttention = [
-    snapshot.helper,
-    ...snapshot.clients.map((client) => client.status),
-    snapshot.mihomo,
-    snapshot.tun,
-    snapshot.dns,
-  ].some(({ phase }) => phase === "error" || phase === "unavailable");
 
   return (
     <section
       aria-labelledby="dashboard-title"
-      className="flex flex-col gap-3 pb-2"
+      className="flex flex-col gap-3 px-4 py-3 pb-2"
     >
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <p className="mb-1 text-sm font-medium text-brand">{t("status")}</p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <p className="text-[11px] font-medium text-brand">{t("status")}</p>
           <h1
             id="dashboard-title"
-            className="text-2xl font-semibold tracking-tight"
+            className="text-lg font-semibold leading-snug tracking-tight"
           >
-            {active
+            {snapshot.phase === "running" || snapshot.phase === "degraded"
               ? t("activeTitle")
-              : paused
+              : snapshot.phase === "paused"
                 ? t("pausedTitle")
-                : needsAttention
-                  ? t("setupNeedsAttention")
-                  : t("readyTitle")}
+                : t("readyTitle")}
           </h1>
-          <p className="mt-2 max-w-2xl text-muted">{t("routingSummary")}</p>
+          <p className="mt-1 max-w-2xl text-[12px] leading-snug text-muted">
+            {t("routingSummary")}
+          </p>
         </div>
-        <div className="flex w-full max-w-xl flex-wrap gap-3 sm:w-auto sm:flex-nowrap">
-          {operating && snapshot.operation_id ? (
-            <LifecycleCancelButton
-              icon={<X size={BUTTON_ICON_PX} aria-hidden />}
-              onClick={() => void cancel()}
-            />
-          ) : null}
-          {active ? (
-            <ConnectionActionButton
-              action="pause"
-              snapshot={snapshot}
-              installingId={installingId}
-              actionPending={actionPending}
-              disabled={locked}
-              onClick={() => void pauseConnection()}
-              icon={<Pause size={BUTTON_ICON_PX} aria-hidden />}
-              variant="secondary"
-            />
-          ) : null}
-          {paused ? (
-            <ConnectionActionButton
-              action="resume"
-              snapshot={snapshot}
-              installingId={installingId}
-              actionPending={actionPending}
-              disabled={locked}
-              onClick={() => void resumeConnection()}
-              icon={<Play size={BUTTON_ICON_PX} aria-hidden />}
-              variant="primary"
-            />
-          ) : null}
-          <ConnectionActionButton
-            action={active || paused ? "disconnect" : "connect"}
-            snapshot={snapshot}
-            installingId={installingId}
-            actionPending={actionPending}
-            disabled={locked}
-            onClick={() => void toggleConnection()}
-            icon={
-              active || paused ? (
-                <PowerOff size={BUTTON_ICON_PX} aria-hidden />
-              ) : (
-                <Power size={BUTTON_ICON_PX} aria-hidden />
-              )
-            }
-            variant={paused ? "secondary" : "primary"}
-          />
-        </div>
+        <LifecycleControls snapshot={snapshot} />
       </div>
 
-      <div
-        data-testid="provider-summary"
-        className="rounded-2xl border border-ink/10 bg-surface p-3.5 shadow-card md:hidden"
-      >
-        <p className="text-sm text-muted">{t("providers")}</p>
-        <p className="mt-1 text-lg font-semibold">
-          {snapshot.providers.ready} / {snapshot.providers.total}
-        </p>
-        <p className="mt-1 text-xs text-muted">
-          {t("rulesLoaded")}: {snapshot.providers.rules_loaded.toLocaleString()}
-        </p>
-      </div>
-      <div className="hidden gap-4 md:grid md:grid-cols-3">
-        <Metric
-          icon={<Globe2 aria-hidden />}
-          label={t("exitIp")}
-          value={snapshot.exit_ip ?? t("noExitIp")}
-        />
-        <Metric
-          icon={<Network aria-hidden />}
-          label={t("backend")}
-          value={t("clientsTitle")}
-        />
-        <Metric
-          icon={<Gauge aria-hidden />}
-          label={t("providers")}
-          value={`${snapshot.providers.ready} / ${snapshot.providers.total}`}
-        />
-      </div>
+      <StatStrip snapshot={snapshot} />
 
       <div>
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-lg font-semibold">{t("components")}</h2>
-          <StatusPill phase={snapshot.phase} />
-        </div>
-        <div
-          data-testid="connection-status-strip"
-          className="grid grid-cols-5 gap-2 rounded-2xl border border-ink/10 bg-surface p-3 shadow-card md:hidden"
-        >
-          <StatusLight name={t("helper")} phase={snapshot.helper.phase} />
-          {snapshot.clients.map((client) => (
-            <StatusLight
-              key={client.id}
-              name={presetById(client.preset as PresetId).title}
-              phase={client.status.phase}
-            />
-          ))}
-          <StatusLight name="Mihomo" phase={snapshot.mihomo.phase} />
-          <StatusLight name="TUN" phase={snapshot.tun.phase} />
-          <StatusLight name="DNS" phase={snapshot.dns.phase} />
-        </div>
-        <div className="hidden gap-3 sm:grid-cols-2 md:grid lg:grid-cols-3 xl:grid-cols-5">
-          <Component
-            name={t("helper")}
-            status={snapshot.helper}
-            icon={<ShieldCheck />}
-            installed={
-              snapshot.helper.phase !== "unavailable" &&
-              snapshot.helper.phase !== "error"
-            }
-            installing={installingId === "helper"}
-            onInstall={() => void installHelper()}
-          />
-          {snapshot.clients.map((client) => (
-            <Component
-              key={client.id}
-              name={presetById(client.preset as PresetId).title}
-              status={client.status}
-              icon={<CircleDot />}
-              installed={
-                client.preset === "hiddify"
-                  ? dependencies.find((item) => item.id === "hiddify")
-                      ?.installed
-                  : true
-              }
-              installing={
-                client.preset === "hiddify" && installingId === "hiddify"
-              }
-              onInstall={
-                client.preset === "hiddify"
-                  ? () => void installDependency("hiddify")
-                  : undefined
-              }
-            />
-          ))}
-          <Component
-            name="Mihomo"
-            status={snapshot.mihomo}
-            icon={<Activity />}
-            installed={
-              dependencies.find((item) => item.id === "mihomo")?.installed
-            }
-            installing={installingId === "mihomo"}
-            onInstall={() => void installDependency("mihomo")}
-          />
-          <Component name="TUN" status={snapshot.tun} icon={<ArrowDownUp />} />
-          <Component name="DNS" status={snapshot.dns} icon={<Network />} />
-        </div>
+        <h2 className="mb-2 text-[13px] font-semibold">{t("components")}</h2>
+        <ComponentStatusList
+          snapshot={snapshot}
+          dependencies={dependencies}
+          installingId={installingId}
+          onInstallHelper={() => void installHelper()}
+          onInstallDependency={(id) => void installDependency(id)}
+        />
       </div>
 
       <ClientRegistry />
 
       {active ? <TrafficFlow /> : null}
 
-      <p className="text-xs text-muted">
-        {t("lastUpdated")}: {new Date(snapshot.updated_at).toLocaleTimeString()}
+      <p className="text-[11px] text-muted">
+        {t("lastUpdated")}:{" "}
+        <span className="tabular-nums">
+          {new Date(snapshot.updated_at).toLocaleTimeString()}
+        </span>
         {boot?.mock_mode ? ` · ${t("mockMode")}` : ""}
       </p>
     </section>
-  );
-}
-
-function StatusLight({
-  name,
-  phase,
-}: {
-  name: string;
-  phase: ComponentStatus["phase"];
-}) {
-  const tone =
-    phase === "running"
-      ? "bg-success"
-      : phase === "error" || phase === "unavailable"
-        ? "bg-danger"
-        : phase === "starting" || phase === "checking" || phase === "degraded"
-          ? "bg-amber-400"
-          : "bg-slate-400";
-  return (
-    <div className="flex min-w-0 flex-col items-center gap-1 text-center">
-      <span
-        className={`h-3 w-3 rounded-full ${tone}`}
-        data-status-light={phase}
-        aria-hidden
-      />
-      <span className="max-w-full truncate text-[0.65rem] font-medium">
-        {name}
-      </span>
-      <span className="sr-only">
-        {name}: {phase}
-      </span>
-    </div>
-  );
-}
-
-function Metric({
-  icon,
-  label,
-  value,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="rounded-2xl border border-ink/10 bg-surface p-3.5 shadow-card">
-      <div className="flex items-center gap-2">
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-brand/10 text-brand [&>svg]:h-4 [&>svg]:w-4">
-          {icon}
-        </span>
-        <p className="text-xs text-muted">{label}</p>
-      </div>
-      <p className="mt-1.5 text-base font-semibold leading-snug break-words">
-        {value}
-      </p>
-    </div>
-  );
-}
-
-function Component({
-  name,
-  status,
-  icon,
-  installed,
-  installing,
-  onInstall,
-}: {
-  name: string;
-  status: ComponentStatus;
-  icon: React.ReactNode;
-  installed?: boolean;
-  installing?: boolean;
-  onInstall?: () => void;
-}) {
-  const { t } = useTranslation();
-  return (
-    <div className="rounded-2xl border border-ink/10 bg-surface p-3">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <span
-            className="shrink-0 text-muted [&>svg]:h-4 [&>svg]:w-4"
-            aria-hidden
-          >
-            {icon}
-          </span>
-          <span className="min-w-0 truncate text-sm font-semibold">{name}</span>
-        </div>
-        <span className="shrink-0">
-          <StatusPill phase={status.phase} />
-        </span>
-      </div>
-      <p className="mt-2 line-clamp-2 min-h-8 text-xs leading-4 text-muted">
-        {status.message ?? t("statusDetailUnavailable")}
-      </p>
-      {installed === false && onInstall ? (
-        <button
-          type="button"
-          disabled={installing}
-          onClick={onInstall}
-          className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
-        >
-          {installing ? (
-            <LoaderCircle className="animate-spin" size={14} aria-hidden />
-          ) : (
-            <Download size={14} aria-hidden />
-          )}
-          {installing ? t("installing") : t("install")}
-        </button>
-      ) : null}
-    </div>
   );
 }
 
@@ -361,7 +79,6 @@ const FLOW_MAX_PACKETS = 6;
 type FlowBranch = {
   key: string;
   label: string;
-  /** Concrete accent color; DIRECT is green, every client gets its own. */
   color: string;
   y: number;
   d: string;
@@ -374,7 +91,6 @@ type FlowPacket = {
   label: string;
   branchKey: string;
   born: number;
-  /** Alternates labels above/below the dot so they never overlap. */
   lane: 1 | -1;
 };
 
@@ -397,8 +113,6 @@ function TrafficFlow() {
   const packetsRef = useRef<FlowPacket[]>([]);
   packetsRef.current = packets;
 
-  // One branch for DIRECT plus one per enabled client; geometry grows with
-  // the branch count so the diagram stays readable as clients are added.
   const { branches, height, deviceY } = useMemo(() => {
     const enabled = (clients ?? []).filter((client) => client.enabled);
     const rows: Array<Omit<FlowBranch, "y" | "d">> = [
@@ -431,10 +145,6 @@ function TrafficFlow() {
     return { branches: placed, height: svgHeight, deviceY: centerY };
   }, [clients, defaultClientId, defaultIsDirect, t]);
 
-  // Live packets: poll the active connections and float each new host along
-  // its real route so the user sees which domain uses which client.
-  // A stable signature keeps the polling effect from restarting on every
-  // render (branch objects are rebuilt whenever settings re-memoize).
   const branchSignature = branches.map((branch) => branch.key).join("|");
   useEffect(() => {
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -472,7 +182,6 @@ function TrafficFlow() {
               id,
               label: label.length > 22 ? `${label.slice(0, 21)}…` : label,
               branchKey,
-              // Staggered births keep simultaneous packets apart on the path.
               born: Date.now() + stagger,
               lane: laneFlip.current,
             });
@@ -488,7 +197,7 @@ function TrafficFlow() {
           return added ? next : previous;
         });
       } catch {
-        // The stack may be tearing down between polls; skip this round.
+        // Stack may be tearing down between polls.
       }
     };
     void tick();
@@ -500,9 +209,6 @@ function TrafficFlow() {
     };
   }, [branchSignature]);
 
-  // SMIL animateMotion does not start reliably for dynamically inserted
-  // nodes in the embedded webview, so packets are moved by hand along the
-  // measured path every animation frame.
   const hasPackets = packets.length > 0;
   useEffect(() => {
     if (!hasPackets) return;
@@ -523,7 +229,6 @@ function TrafficFlow() {
         }
         const point = path.getPointAtLength(progress * path.getTotalLength());
         node.setAttribute("transform", `translate(${point.x} ${point.y})`);
-        // Soft fade at both ends instead of popping in and out.
         const fade =
           progress < 0.15
             ? progress / 0.15
@@ -546,13 +251,15 @@ function TrafficFlow() {
   const directIp = useAppStore((state) => state.networkStatus?.public_ip);
 
   return (
-    <section className="overflow-x-hidden rounded-2xl border border-brand/15 bg-surface p-3.5 shadow-card">
-      <h2 className="text-lg font-semibold">{t("liveRouting")}</h2>
-      <p className="mt-1 text-sm text-muted">{t("liveRoutingHelp")}</p>
+    <section className="overflow-x-hidden rounded-md border border-[rgb(var(--border-default))] bg-surface px-3 py-3">
+      <h2 className="text-[13px] font-semibold">{t("liveRouting")}</h2>
+      <p className="mt-1 text-[12px] leading-snug text-muted">
+        {t("liveRoutingHelp")}
+      </p>
       <div className="relative">
         <svg
           data-testid="live-routing"
-          className="mt-4 h-auto w-full"
+          className="mt-3 h-auto w-full"
           viewBox={`0 0 ${FLOW_WIDTH} ${height}`}
           role="img"
           aria-label={t("liveRoutingAria")}
@@ -671,7 +378,7 @@ function TrafficFlow() {
         {selectedBranch ? (
           <div
             role="status"
-            className="absolute end-1 z-10 max-w-56 rounded-xl border border-ink/15 bg-canvas p-3 text-xs shadow-card"
+            className="absolute end-1 z-10 max-w-56 rounded-md border border-[rgb(var(--border-default))] bg-canvas p-2 text-[11px]"
             style={{ top: `${(selectedBranch.y / height) * 100}%` }}
           >
             <p className="font-semibold">{selectedBranch.label}</p>
@@ -684,7 +391,7 @@ function TrafficFlow() {
                   <p className="mt-1 text-muted">{selectedStatus.message}</p>
                 ) : null}
                 {selectedClientStatus?.exit_ip ? (
-                  <p className="mt-1 font-mono">
+                  <p className="mt-1 tabular-nums">
                     {t("exitIp")}: {selectedClientStatus.exit_ip}
                   </p>
                 ) : null}
@@ -693,7 +400,7 @@ function TrafficFlow() {
               <>
                 <p className="mt-1 text-muted">{t("directTooltip")}</p>
                 {directIp ? (
-                  <p className="mt-1 font-mono">
+                  <p className="mt-1 tabular-nums">
                     {t("exitIp")}: {directIp}
                   </p>
                 ) : null}

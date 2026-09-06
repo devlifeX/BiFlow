@@ -9,11 +9,6 @@ import { useTranslation } from "react-i18next";
 import { desktop } from "../api/desktop";
 import type { ClientInstance, PinnedRoute, RuleListMeta } from "../api/models";
 import { canAddPreset, enabledClients, profileFileName } from "../lib/clients";
-import {
-  failedSideTunnelClients,
-  INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT,
-  nextSideTunnelRetryTimeout,
-} from "../lib/sideTunnelConnect";
 import { defaultRouteFromKey, outboundKey } from "../lib/outbound";
 import {
   downloadLinksFor,
@@ -26,6 +21,8 @@ import {
   type PresetSpec,
 } from "../lib/presets";
 import { useAppStore } from "../store/app";
+import { listPanelClassName, listRowClassName } from "../lib/listPanel";
+import { SideTunnelRetryBanner } from "./SideTunnelRetryBanner";
 import { StatusPill } from "./StatusPill";
 
 export function ClientRegistry() {
@@ -46,8 +43,6 @@ export function ClientRegistry() {
     clearRouteFallbackNotice,
     actionPending,
     boot,
-    sideTunnelLastTimeout,
-    retrySideTunnelConnect,
   } = useAppStore();
   const platform = boot?.platform ?? "linux";
   const [catalogOpen, setCatalogOpen] = useState(false);
@@ -56,27 +51,24 @@ export function ClientRegistry() {
   const clients = settings?.clients ?? [];
   const pins = rules?.pins ?? [];
   const lists = rules?.lists ?? [];
-  const failedSideTunnels =
-    snapshot && settings ? failedSideTunnelClients(snapshot, clients) : [];
-  const sideTunnelRetryTimeout = sideTunnelLastTimeout
-    ? nextSideTunnelRetryTimeout(sideTunnelLastTimeout)
-    : nextSideTunnelRetryTimeout(INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT);
 
-  if (!settings) return null;
+  if (!settings || !snapshot) return null;
 
   return (
     <section data-testid="client-registry" className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h2 className="text-lg font-semibold">{t("clientsTitle")}</h2>
-          <p className="mt-1 text-sm text-muted">{t("clientsHelp")}</p>
+          <h2 className="text-[13px] font-semibold">{t("clientsTitle")}</h2>
+          <p className="mt-0.5 text-[12px] leading-snug text-muted">
+            {t("clientsHelp")}
+          </p>
         </div>
         <button
           type="button"
           onClick={() => setCatalogOpen((open) => !open)}
-          className="inline-flex items-center gap-2 rounded-xl bg-brand px-4 py-2.5 font-semibold text-white"
+          className="inline-flex h-[30px] items-center gap-1 rounded-[5px] bg-brand px-2 text-[11px] font-semibold text-white"
         >
-          <Plus size={18} aria-hidden />
+          <Plus size={14} aria-hidden />
           {t("addClient")}
         </button>
       </div>
@@ -97,42 +89,9 @@ export function ClientRegistry() {
         </p>
       ) : null}
 
-      {failedSideTunnels.length > 0 && sideTunnelRetryTimeout ? (
-        <div
-          data-testid="side-tunnel-retry-banner"
-          className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm"
-          role="status"
-        >
-          <p>
-            {t("sideTunnelStartFailed", {
-              seconds:
-                sideTunnelLastTimeout ?? INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT,
-            })}
-          </p>
-          <button
-            type="button"
-            className="mt-2 rounded-lg bg-brand px-3 py-2 text-xs font-semibold text-white disabled:opacity-55"
-            disabled={actionPending}
-            onClick={() => void retrySideTunnelConnect()}
-          >
-            {t("sideTunnelRetryWithTimeout", {
-              seconds: sideTunnelRetryTimeout,
-            })}
-          </button>
-        </div>
-      ) : null}
+      <SideTunnelRetryBanner snapshot={snapshot} clients={clients} />
 
-      {failedSideTunnels.length > 0 && !sideTunnelRetryTimeout ? (
-        <p
-          data-testid="side-tunnel-retry-exhausted"
-          className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm"
-          role="status"
-        >
-          {t("sideTunnelStartExhausted", { seconds: 60 })}
-        </p>
-      ) : null}
-
-      <label className="flex max-w-xl flex-col gap-1 text-sm font-medium">
+      <label className="flex max-w-xl flex-col gap-1 text-[12px] font-medium">
         <span>{t("defaultRouteLabel")}</span>
         <select
           data-testid="default-route"
@@ -141,7 +100,7 @@ export function ClientRegistry() {
           onChange={(event) =>
             void setDefaultRoute(defaultRouteFromKey(event.target.value))
           }
-          className="rounded-xl border-ink/15 bg-surface"
+          className="rounded-[5px] border border-[rgb(var(--border-default))] bg-surface"
         >
           <option value="direct">{t("direct")}</option>
           {enabledClients(clients).map((client) => (
@@ -204,7 +163,7 @@ export function ClientRegistry() {
         </div>
       ) : null}
 
-      <div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
+      <div className={listPanelClassName()}>
         {clients.map((client) => (
           <ClientCard
             key={client.id}
@@ -395,31 +354,36 @@ function ClientCard({
   return (
     <article
       data-testid={`client-card-${client.preset}`}
-      className={`rounded-2xl border border-ink/10 bg-surface p-3.5 ${
+      className={`${listRowClassName()} flex-col items-stretch !h-auto gap-1 border-0 ${
         client.enabled ? "" : "opacity-70"
       }`}
     >
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <h3 className="font-semibold">{spec.title}</h3>
+      <div className="flex h-8 min-w-0 items-center gap-2">
+        <h3 className="min-w-[64px] max-w-[140px] shrink-0 truncate text-[12px] font-semibold">
+          {spec.title}
+        </h3>
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
           {isDefault ? (
-            <span className="rounded-md bg-brand/10 px-2 py-0.5 text-xs font-semibold text-brand">
+            <span className="rounded-[5px] bg-brand/10 px-1.5 py-0.5 text-[10px] font-semibold text-brand">
               {t("matchDefault")}
             </span>
           ) : null}
-          <StatusPill phase={phase as never} />
         </div>
-        <label className="flex shrink-0 items-center gap-2 text-xs font-semibold">
+        <StatusPill phase={phase as never} disabled={!client.enabled} />
+        <label className="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center">
           <input
             type="checkbox"
+            role="switch"
+            className="peer absolute inset-0 cursor-pointer opacity-0"
             checked={client.enabled}
             onChange={(event) => onEnabled(event.target.checked)}
+            aria-label={t("enabled")}
           />
-          {t("enabled")}
+          <span className="pointer-events-none relative h-5 w-9 rounded-full bg-slate-300/80 transition peer-checked:bg-brand peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-brand/40 after:absolute after:start-[2px] after:top-[2px] after:h-4 after:w-4 after:rounded-full after:bg-white after:transition peer-checked:after:translate-x-4" />
         </label>
       </div>
 
-      <p className="mt-1.5 text-xs text-muted">
+      <p className="truncate ps-0 text-[11px] leading-snug text-muted tabular-nums">
         {t("pinSummary", { domains: domainCount, ips: ipCount })}
         {client.config.kind === "local_proxy"
           ? ` · ${t("clientPort")} ${client.config.port}`

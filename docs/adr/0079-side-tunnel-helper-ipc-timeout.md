@@ -75,3 +75,23 @@ Connect, Pause, Resume, Disconnect, and Cancel use a fixed `h-14` button
 height with `whitespace-nowrap` labels. `ConnectionActionButton` reserves
 width using the longest EN/FA idle or stage string so lifecycle label changes
 do not wrap or shift the control row.
+
+## Compact native dashboard chrome (6.2.8)
+
+The Advanced and Basic dashboards adopt a flat, list-first layout aligned with
+`docs/DESIGN.md`:
+
+- Connection controls are **128×30px** (`w-32 h-[30px]`) with a reserved
+  `tabular-nums` countdown slot during Connect; progressive side-tunnel retry
+  (15s → 30s → 60s) and per-component readiness signals are unchanged.
+- Five separate component cards become one bordered list with `divide-y`
+  hairlines; status chips are fixed **18×64px** (`Idle`, `Starting`, `Ready`,
+  `Failed`, `Off` for disabled clients).
+- Stat strip uses `flex-[2]` for Exit IP and `flex-1` for Providers and Active
+  clients; the redundant Backend metric and section-level Stopped badge are
+  removed.
+- Sidebar narrows to **176px** (`w-44`); nav rows are **28px** with 12px
+  type. Basic mode shows a compact branded header, stat strip, component list,
+  and the same lifecycle row — not an empty canvas with one button.
+- Border tokens `--border-default` / `--border-strong` centralize 1px chrome;
+  IPs, ports, counts, and traffic use `tabular-nums`.

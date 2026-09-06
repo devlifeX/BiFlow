@@ -6,7 +6,7 @@ import { AppStatusBar } from "./AppStatusBar";
 import { countryFlag } from "./country";
 
 describe("AppStatusBar", () => {
-  it("shows internet, public IP, location, and country flag", () => {
+  it("shows internet, public IP, location, and traffic totals", () => {
     useAppStore.setState({
       trafficTotals: { sent: 12_345_678, received: 1_099_511_627_776 },
       networkStatus: {
@@ -24,7 +24,7 @@ describe("AppStatusBar", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Internet connected");
     expect(screen.getByRole("status")).toHaveTextContent("203.0.113.8");
     expect(screen.getByRole("status")).toHaveTextContent("Tehran");
-    expect(screen.getByRole("status")).toHaveTextContent("🇮🇷");
+    expect(screen.getByRole("status")).toHaveTextContent("Iran");
     expect(screen.getByRole("status")).toHaveTextContent("Sent: 11.77 MiB");
     expect(screen.getByRole("status")).toHaveTextContent("Received: 1.00 TiB");
     expect(screen.getByRole("status").className).toMatch(/sticky/);

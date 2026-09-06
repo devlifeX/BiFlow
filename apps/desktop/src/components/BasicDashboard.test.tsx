@@ -19,7 +19,7 @@ describe("BasicDashboard", () => {
         }}
       />,
     );
-    const connect = screen.getByRole("button", { name: "Start client" });
+    const connect = screen.getByRole("button", { name: /^Start client/ });
     expect(connect).toBeDisabled();
     expect(connect).toHaveAttribute("data-progress", "25");
     expect(connect).toHaveAttribute("data-connect-glow", "off");

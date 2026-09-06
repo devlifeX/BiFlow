@@ -20,6 +20,8 @@
   --brand: 0 104 230;
   --success: 0 124 131;
   --danger: 201 54 70;
+  --border-default: var(--ink) / 0.1;
+  --border-strong: var(--ink) / 0.18;
 }
 
 .dark {
@@ -223,6 +225,8 @@ select:focus-visible,
 .connection-action {
   max-width: 100%;
   flex-shrink: 0;
+  width: 8rem;
+  height: 30px;
 }
 
 .connection-action-fill-clip {
@@ -261,30 +265,7 @@ select:focus-visible,
 /* Available Connect only: a quiet pulse that sits on the button box-shadow
    so the in-button progress fill can keep animating independently. */
 .connect-button-glow {
-  animation: connect-button-glow-pulse 2.2s ease-in-out infinite;
-}
-
-@keyframes connect-button-glow-pulse {
-  0%,
-  100% {
-    box-shadow:
-      0 0 0 2px rgb(var(--brand) / 0.22),
-      0 0 14px rgb(var(--brand) / 0.28),
-      0 10px 18px rgb(var(--brand) / 0.16);
-  }
-  50% {
-    box-shadow:
-      0 0 0 3px rgb(var(--brand) / 0.38),
-      0 0 22px rgb(var(--brand) / 0.4),
-      0 12px 22px rgb(var(--brand) / 0.2);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .connect-button-glow {
-    animation: none;
-    box-shadow: 0 0 0 2px rgb(var(--brand) / 0.28);
-  }
+  box-shadow: 0 0 0 1px rgb(var(--brand) / 0.35);
 }
 
 /* Themed scrollbars so overflow areas never show the OS default chrome. */

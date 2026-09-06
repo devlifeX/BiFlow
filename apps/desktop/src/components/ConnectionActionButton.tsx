@@ -1,11 +1,16 @@
-import { useMemo, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { StackSnapshot } from "../api/models";
 import {
   connectionButtonProgress,
-  longestConnectionActionLabel,
   type ConnectionAction,
 } from "../lib/connectionProgress";
+import { INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT } from "../lib/sideTunnelConnect";
+import { useAppStore } from "../store/app";
+
+export const CONNECTION_BUTTON_ICON_PX = 14;
+export const CONNECTION_BUTTON_WIDTH_CLASS = "w-32";
+export const CONNECTION_BUTTON_HEIGHT_CLASS = "h-[30px]";
 
 export function ConnectionActionButton({
   action,
@@ -27,6 +32,9 @@ export function ConnectionActionButton({
   variant: "primary" | "secondary";
 }) {
   const { t } = useTranslation();
+  const sideTunnelLastTimeout = useAppStore(
+    (state) => state.sideTunnelLastTimeout,
+  );
   const progress = connectionButtonProgress(
     snapshot,
     action,
@@ -34,8 +42,11 @@ export function ConnectionActionButton({
     actionPending,
   );
   const label = t(progress.labelKey);
-  const reserveLabel = useMemo(() => longestConnectionActionLabel(t), [t]);
   const glow = action === "connect" && !disabled && !progress.processing;
+  const countdownSeconds =
+    progress.processing && action === "connect"
+      ? (sideTunnelLastTimeout ?? INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT)
+      : null;
 
   return (
     <button
@@ -51,9 +62,9 @@ export function ConnectionActionButton({
         progress.processing ? "connection-action-processing" : ""
       } ${glow ? "connect-button-glow" : ""} ${
         variant === "primary"
-          ? "bg-brand text-white shadow-lg shadow-brand/20"
-          : "border border-ink/15 bg-surface"
-      } relative isolate inline-flex h-14 shrink-0 items-center justify-center rounded-2xl px-5 text-sm font-semibold sm:text-base disabled:cursor-not-allowed disabled:opacity-55`}
+          ? "bg-brand text-white"
+          : "border border-[rgb(var(--border-default))] bg-surface text-ink"
+      } relative isolate inline-flex ${CONNECTION_BUTTON_WIDTH_CLASS} ${CONNECTION_BUTTON_HEIGHT_CLASS} shrink-0 items-center justify-center gap-1 rounded-[5px] px-2 text-[11px] font-semibold leading-none disabled:cursor-not-allowed disabled:opacity-55`}
     >
       <span className="connection-action-fill-clip" aria-hidden>
         <span
@@ -61,19 +72,18 @@ export function ConnectionActionButton({
           style={{ width: `${progress.percent}%` }}
         />
       </span>
-      <span className="relative z-10 inline-grid min-w-0 max-w-full">
-        <span
-          className="connection-action-reserve invisible col-start-1 row-start-1 inline-flex items-center gap-2 whitespace-nowrap"
-          aria-hidden
-        >
-          {icon}
-          <span>{reserveLabel}</span>
+      <span className="relative z-10 flex min-w-0 flex-1 items-center justify-center gap-1 overflow-hidden">
+        <span className="shrink-0">{icon}</span>
+        <span className="connection-action-label min-w-0 flex-1 truncate whitespace-nowrap text-center">
+          {label}
         </span>
-        <span className="connection-action-content col-start-1 row-start-1 inline-flex min-w-0 items-center justify-center gap-2 overflow-hidden">
-          <span className="shrink-0">{icon}</span>
-          <span className="connection-action-label min-w-0 truncate whitespace-nowrap text-center">
-            {label}
-          </span>
+        <span
+          className={`connection-action-countdown w-[3ch] shrink-0 tabular-nums text-[10px] leading-none ${
+            countdownSeconds === null ? "opacity-0" : "opacity-80"
+          }`}
+          aria-hidden={countdownSeconds === null}
+        >
+          {countdownSeconds === null ? "60s" : `${countdownSeconds}s`}
         </span>
       </span>
     </button>

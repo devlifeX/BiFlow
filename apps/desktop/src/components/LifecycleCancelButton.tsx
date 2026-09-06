@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { AppButton } from "./AppButton";
+import { CONNECTION_BUTTON_HEIGHT_CLASS } from "./ConnectionActionButton";
 
 export function LifecycleCancelButton({
   icon,
@@ -15,7 +16,7 @@ export function LifecycleCancelButton({
     <AppButton
       icon={icon}
       onClick={onClick}
-      className="lifecycle-cancel-action h-14 shrink-0 whitespace-nowrap rounded-2xl border border-ink/15 bg-surface px-5 text-sm font-semibold sm:text-base"
+      className={`lifecycle-cancel-action ${CONNECTION_BUTTON_HEIGHT_CLASS} shrink-0 whitespace-nowrap rounded-[5px] border border-[rgb(var(--border-default))] bg-surface px-2 text-[11px] font-semibold leading-none`}
     >
       {t("cancel")}
     </AppButton>

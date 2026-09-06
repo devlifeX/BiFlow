@@ -31,13 +31,8 @@ describe("fixed desktop shell", () => {
     );
   });
 
-  it("pulses a Connect glow only when the button is available", () => {
-    expect(css).toMatch(
-      /\.connect-button-glow[\s\S]*connect-button-glow-pulse/,
-    );
-    expect(css).toMatch(
-      /prefers-reduced-motion: reduce[\s\S]*\.connect-button-glow[\s\S]*animation:\s*none/,
-    );
+  it("highlights an available Connect button with a flat brand ring", () => {
+    expect(css).toMatch(/\.connect-button-glow[\s\S]*box-shadow:/);
   });
 
   it("fills connection progress inside the action button", () => {

@@ -10,7 +10,6 @@ import { useTranslation } from "react-i18next";
 import type { NetworkStatus } from "../api/models";
 import { formatTrafficBytes } from "../lib/formatTraffic";
 import { useAppStore } from "../store/app";
-import { countryFlag } from "./country";
 
 function countryName(code: string | null, language: string): string | null {
   if (!code) return null;
@@ -45,12 +44,11 @@ export function AppStatusBar() {
     detail: null,
   };
   const location = locationLabel(current, i18n.language);
-  const flag = countryFlag(current.country_code);
   const state = refreshing ? "checking" : current.state;
 
   return (
     <footer
-      className="app-status-bar sticky bottom-0 z-20 shrink-0 border-t border-ink/10 bg-surface/90 px-3 py-2 text-xs text-muted backdrop-blur sm:px-8 sm:py-3 lg:px-10"
+      className="app-status-bar sticky bottom-0 z-20 shrink-0 border-t border-[rgb(var(--border-default))] bg-surface px-4 py-2 text-[11px] text-muted"
       role="status"
       aria-live="polite"
       title={current.detail ?? undefined}
@@ -85,18 +83,19 @@ export function AppStatusBar() {
             aria-label={t("refreshNetwork")}
           >
             {t("currentIp")}:{" "}
-            <bdi className="font-mono text-ink">{current.public_ip}</bdi>
+            <bdi className="font-semibold tabular-nums text-ink">
+              {current.public_ip}
+            </bdi>
           </button>
         ) : null}
         {location ? (
           <span className="inline-flex items-center gap-1.5">
-            <MapPin size={14} aria-hidden />
-            {flag ? <span aria-hidden>{flag}</span> : null}
+            <MapPin size={14} aria-hidden className="shrink-0 text-muted" />
             <span>{location}</span>
           </span>
         ) : null}
         <span
-          className="inline-flex items-center gap-3 font-mono text-ink"
+          className="inline-flex items-center gap-3 tabular-nums text-ink"
           data-testid="traffic-totals"
           title={`${traffic.sent} / ${traffic.received}`}
         >

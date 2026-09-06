@@ -71,9 +71,14 @@ border-ink/10 pt-3`, with small buttons
 - Pause/Disconnect (and Cancel) stay on one row on `sm+`
   (`sm:flex-nowrap`).
 - Connection lifecycle buttons (`ConnectionActionButton`, cancel) use a fixed
-  `h-14` height, `whitespace-nowrap`, and an invisible reserve label sized to
-  the longest EN/FA idle or stage string so labels never wrap and the control
-  row does not shift while Connect/Pause/Resume/Disconnect progress runs.
+  `128×30px` (`w-32 h-[30px]`) footprint, `whitespace-nowrap`, and a reserved
+  tabular-nums countdown slot so labels never wrap and the control row does not
+  shift while Connect/Pause/Resume/Disconnect progress runs.
+- Component readiness uses one bordered list (`divide-y`, `h-8` rows) instead of
+  per-component cards. Status chips are fixed `w-16 h-[18px]` with short labels
+  (`Idle`, `Starting`, `Ready`, `Failed`, `Off`).
+- Stat strip uses `flex-[2]` for Exit IP and `flex-1` for Providers and Active
+  clients. Sidebar width is `w-44` with `h-7` nav rows.
 
 ## Accessibility guardrails
 
