@@ -1417,16 +1417,27 @@ impl<B: PlatformBackend> Engine<B> {
         self.backend
             .set_side_tunnel_connect_timeout(connect_timeout)
             .await;
-        let ensure_result = self.backend.ensure_clients(cancel.clone()).await;
-        self.backend.set_side_tunnel_connect_timeout(None).await;
-        ensure_result?;
+        let mut ensure = Box::pin(self.backend.ensure_clients(cancel.clone()));
+        let mut poll = tokio::time::interval(Duration::from_millis(250));
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                result = ensure.as_mut() => {
+                    self.backend.set_side_tunnel_connect_timeout(None).await;
+                    result?;
+                    break;
+                }
+                () = cancel.cancelled() => {
+                    self.backend.set_side_tunnel_connect_timeout(None).await;
+                    return Err(CoreError::Cancelled);
+                }
+                _ = poll.tick() => {
+                    self.publish_connect_client_health().await;
+                }
+            }
+        }
         check_cancelled(cancel)?;
-        // An optional client may have failed alone; take the backend's view
-        // instead of assuming every instance is running.
-        let health = self.backend.runtime_health().await;
-        self.update(|snapshot| {
-            snapshot.clients = health.clients;
-        });
+        self.publish_connect_client_health().await;
         Ok(())
     }
 
@@ -1436,6 +1447,12 @@ impl<B: PlatformBackend> Engine<B> {
         cancel: &CancellationToken,
         core_started: &mut bool,
     ) -> Result<(), CoreError> {
+        self.update(|snapshot| {
+            snapshot.helper = ComponentStatus::new(
+                ComponentPhase::Checking,
+                Some("Checking helper service".into()),
+            );
+        });
         let helper = self.backend.helper_status().await?;
         if !helper.available {
             return Err(CoreError::HelperUnavailable);
@@ -1479,11 +1496,12 @@ impl<B: PlatformBackend> Engine<B> {
         });
         self.backend.start_core(&generation).await?;
         *core_started = true;
+        self.publish_connect_core_health().await;
         check_cancelled(cancel)?;
 
         self.announce(StackPhase::CheckingReadiness, operation_id)
             .await;
-        let readiness = self.backend.check_readiness(cancel.clone()).await?;
+        let readiness = self.wait_for_readiness_with_health(cancel.clone()).await?;
         if !readiness.controller_ready {
             return Err(CoreError::ControllerTimeout);
         }
@@ -1534,6 +1552,41 @@ impl<B: PlatformBackend> Engine<B> {
         Ok(())
     }
 
+    async fn wait_for_readiness_with_health(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<ReadinessReport, CoreError> {
+        let mut check = Box::pin(self.backend.check_readiness(cancel.clone()));
+        let mut poll = tokio::time::interval(Duration::from_millis(250));
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                result = check.as_mut() => return result,
+                () = cancel.cancelled() => return Err(CoreError::Cancelled),
+                _ = poll.tick() => {
+                    self.publish_connect_core_health().await;
+                }
+            }
+        }
+    }
+
+    async fn publish_connect_client_health(&self) {
+        let health = self.backend.runtime_health().await;
+        self.update(|snapshot| {
+            snapshot.helper = health.helper;
+            snapshot.clients = merge_clients_during_connect(&snapshot.clients, &health.clients);
+        });
+        tokio::task::yield_now().await;
+    }
+
+    async fn publish_connect_core_health(&self) {
+        let health = self.backend.runtime_health().await;
+        self.update(|snapshot| {
+            apply_core_health_during_connect(snapshot, health);
+        });
+        tokio::task::yield_now().await;
+    }
+
     async fn confirm_core_and_tun(
         &self,
         cancel: &CancellationToken,
@@ -1543,6 +1596,7 @@ impl<B: PlatformBackend> Engine<B> {
         let deadline = tokio::time::Instant::now() + BUDGET;
         loop {
             check_cancelled(cancel)?;
+            self.publish_connect_core_health().await;
             let process = self.backend.core_process().await?;
             let tun = self.backend.tun_status().await?;
             if process.running && tun.active {
@@ -1831,6 +1885,61 @@ fn apply_health(snapshot: &mut StackSnapshot, health: RuntimeHealth) {
     snapshot.providers = health.providers;
 }
 
+fn merge_clients_during_connect(
+    current: &[ClientComponentStatus],
+    fresh: &[ClientComponentStatus],
+) -> Vec<ClientComponentStatus> {
+    fresh
+        .iter()
+        .map(|fresh_client| {
+            let Some(current_client) = current.iter().find(|client| client.id == fresh_client.id)
+            else {
+                return fresh_client.clone();
+            };
+            if fresh_client.status.phase == ComponentPhase::Running
+                || matches!(
+                    fresh_client.status.phase,
+                    ComponentPhase::Error | ComponentPhase::Degraded | ComponentPhase::Unavailable
+                )
+                || (fresh_client.enabled
+                    && fresh_client.status.phase == ComponentPhase::Stopped
+                    && fresh_client.status.message.is_some())
+            {
+                return fresh_client.clone();
+            }
+            if current_client.status.phase == ComponentPhase::Starting
+                && fresh_client.status.phase != ComponentPhase::Running
+            {
+                return current_client.clone();
+            }
+            fresh_client.clone()
+        })
+        .collect()
+}
+
+fn apply_core_health_during_connect(snapshot: &mut StackSnapshot, health: RuntimeHealth) {
+    let mihomo = preserve_starting_component(&snapshot.mihomo, health.mihomo);
+    if mihomo.phase == ComponentPhase::Running {
+        snapshot.providers = health.providers;
+    }
+    snapshot.mihomo = mihomo;
+    snapshot.tun = preserve_starting_component(&snapshot.tun, health.tun);
+    snapshot.dns = preserve_starting_component(&snapshot.dns, health.dns);
+}
+
+fn preserve_starting_component(
+    current: &ComponentStatus,
+    health: ComponentStatus,
+) -> ComponentStatus {
+    if health.phase == ComponentPhase::Running {
+        health
+    } else if current.phase == ComponentPhase::Starting {
+        current.clone()
+    } else {
+        health
+    }
+}
+
 #[must_use]
 fn core_tun_missing_message(process: &ProcessStatus, tun: &TunStatus) -> String {
     if process.running {
@@ -1865,6 +1974,7 @@ mod tests {
         hiddify_missing: AtomicBool,
         helper_missing: AtomicBool,
         recover_ready: AtomicBool,
+        client_egress_ready: AtomicBool,
         /// 0 = no primary to probe, 1 = egress OK, 2 = egress dead.
         primary_probe: AtomicUsize,
         starts: AtomicUsize,
@@ -1884,6 +1994,10 @@ mod tests {
             };
             let hiddify = if self.hiddify_missing.load(Ordering::SeqCst) {
                 ComponentStatus::new(ComponentPhase::Unavailable, Some("Hiddify missing".into()))
+            } else if self.slow_hiddify.load(Ordering::SeqCst)
+                && !self.client_egress_ready.load(Ordering::SeqCst)
+            {
+                ComponentStatus::new(ComponentPhase::Stopped, Some("Hiddify starting".into()))
             } else {
                 ComponentStatus::new(ComponentPhase::Running, Some("Hiddify ready".into()))
             };
@@ -1953,10 +2067,22 @@ mod tests {
             if self.slow_hiddify.load(Ordering::SeqCst) {
                 tokio::select! {
                     () = cancel.cancelled() => return Err(CoreError::Cancelled),
-                    () = tokio::time::sleep(Duration::from_secs(2)) => {}
+                    () = tokio::time::sleep(Duration::from_millis(150)) => {
+                        self.client_egress_ready.store(true, Ordering::SeqCst);
+                    }
                 }
+                tokio::select! {
+                    () = cancel.cancelled() => return Err(CoreError::Cancelled),
+                    () = tokio::time::sleep(Duration::from_millis(350)) => {}
+                }
+            } else {
+                self.client_egress_ready.store(true, Ordering::SeqCst);
             }
             Ok(())
+        }
+
+        async fn ensure_clients(&self, cancel: CancellationToken) -> Result<(), CoreError> {
+            self.ensure_hiddify(cancel).await
         }
 
         async fn recover_clients(&self) -> Result<bool, CoreError> {
@@ -1985,7 +2111,6 @@ mod tests {
         async fn start_core(&self, _generation: &RuntimeGeneration) -> Result<(), CoreError> {
             self.starts.fetch_add(1, Ordering::SeqCst);
             self.process.store(true, Ordering::SeqCst);
-            self.tun.store(true, Ordering::SeqCst);
             Ok(())
         }
 
@@ -2025,8 +2150,13 @@ mod tests {
 
         async fn check_readiness(
             &self,
-            _cancel: CancellationToken,
+            cancel: CancellationToken,
         ) -> Result<ReadinessReport, CoreError> {
+            tokio::select! {
+                () = cancel.cancelled() => return Err(CoreError::Cancelled),
+                () = tokio::time::sleep(Duration::from_millis(300)) => {}
+            }
+            self.tun.store(true, Ordering::SeqCst);
             let fail = self.fail_readiness.load(Ordering::SeqCst);
             Ok(ReadinessReport {
                 controller_ready: !fail,
@@ -2428,6 +2558,69 @@ mod tests {
                 return stages;
             }
         }
+    }
+
+    #[tokio::test]
+    async fn connect_publishes_component_status_before_stack_running() {
+        let backend = Arc::new(FakeBackend {
+            slow_hiddify: AtomicBool::new(true),
+            ..FakeBackend::default()
+        });
+        let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+        let mut receiver = engine.subscribe();
+
+        let progress = async {
+            let mut saw_helper_running = false;
+            let mut saw_client_running = false;
+            let mut saw_mihomo_running = false;
+            let mut saw_tun_running = false;
+            loop {
+                receiver.changed().await.expect("snapshot update");
+                let snapshot = receiver.borrow().clone();
+                if snapshot.phase == StackPhase::Running && snapshot.busy.is_none() {
+                    break;
+                }
+                if snapshot.helper.phase == ComponentPhase::Running {
+                    saw_helper_running = true;
+                }
+                if snapshot
+                    .clients
+                    .iter()
+                    .any(|client| client.status.phase == ComponentPhase::Running)
+                {
+                    saw_client_running = true;
+                }
+                if snapshot.mihomo.phase == ComponentPhase::Running {
+                    saw_mihomo_running = true;
+                }
+                if snapshot.tun.phase == ComponentPhase::Running {
+                    saw_tun_running = true;
+                }
+            }
+            (
+                saw_helper_running,
+                saw_client_running,
+                saw_mihomo_running,
+                saw_tun_running,
+            )
+        };
+
+        let (progress, accepted) = tokio::join!(progress, engine.start_stack(None));
+        accepted.expect("start accepted");
+        let (helper, client, mihomo, tun) = progress;
+        assert!(
+            helper,
+            "helper should reach running before the stack finishes"
+        );
+        assert!(
+            client,
+            "client should reach running before the stack finishes"
+        );
+        assert!(
+            mihomo,
+            "mihomo should reach running before the stack finishes"
+        );
+        assert!(tun, "tun should reach running before the stack finishes");
     }
 
     #[tokio::test]

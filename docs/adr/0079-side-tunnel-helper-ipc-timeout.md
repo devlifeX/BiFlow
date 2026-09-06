@@ -50,3 +50,21 @@ Connect passes an explicit side-tunnel start budget on each attempt:
 `retry_side_tunnels` re-starts failed side tunnels on a live stack without a
 full disconnect, and the IPC reply wait stays `timeout_seconds + 15` via
 `helper_ipc_reply_timeout`.
+
+## Per-component connect progress (6.2.6)
+
+Connect no longer waits until the end to paint every component green. The
+engine publishes partial `StackSnapshot` updates as real readiness arrives:
+
+- Helper moves to `checking`, then `running`, as soon as the helper probe
+  succeeds.
+- Each enabled client flips to `running` when its egress handle is registered;
+  platform backends commit `egress_handles` after every client instead of only
+  at the end of `ensure_clients`.
+- While `ensure_clients`, `check_readiness`, and `confirm_core_and_tun` run,
+  the engine polls `runtime_health` and merges component status without
+  downgrading in-flight `starting` states.
+- Mihomo, TUN, and DNS advance independently during core start and readiness.
+
+The mock transport mirrors the same staged snapshot updates for Playwright and
+unit tests.

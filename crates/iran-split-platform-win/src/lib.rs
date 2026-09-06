@@ -508,6 +508,7 @@ impl WindowsBackend {
                 Ok(handle) => {
                     self.client_failures.lock().await.remove(&client.id);
                     handles.push(handle);
+                    self.egress_handles.lock().await.clone_from(&handles);
                 }
                 Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
                 Err(error) if !required => {

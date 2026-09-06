@@ -576,8 +576,7 @@ function clientsWithMockSideTunnelOutcomes(timeoutSeconds: number) {
     }
     return {
       ...base,
-      status:
-        existing?.status ?? component("running", `${client.preset} is ready`),
+      status: component("running", `${client.preset} is ready`),
     };
   });
 }
@@ -627,22 +626,80 @@ async function runStart(accepted: OperationAccepted) {
     ["starting_core", "starting_core"],
     ["checking_readiness", "checking_readiness"],
   ];
-  for (const [phase, stage] of phases) {
-    emit(phase, accepted.operation_id, lifecycleBusy, stage);
-    await new Promise((resolve) => setTimeout(resolve, 180));
-  }
+
+  snapshot = {
+    ...snapshot,
+    helper: component("checking", "Checking helper service"),
+  };
+  emit(snapshot.phase, accepted.operation_id, lifecycleBusy, "preparing");
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  snapshot = {
+    ...snapshot,
+    helper: component("running", "Mock helper is ready"),
+  };
+  for (const listener of listeners) listener(structuredClone(snapshot));
+
+  snapshot = {
+    ...snapshot,
+    clients: snapshot.clients.map((client) =>
+      client.enabled
+        ? {
+            ...client,
+            status: component("starting", `${client.preset} is starting`),
+          }
+        : client,
+    ),
+  };
+  emit(
+    "starting_client",
+    accepted.operation_id,
+    lifecycleBusy,
+    "starting_client",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 100));
   snapshot = {
     ...snapshot,
     clients: clientsWithMockSideTunnelOutcomes(mockSideTunnelConnectTimeout),
-    mihomo: component("running", "Mihomo controller is ready"),
-    tun: component("running", "TUN interface is active"),
-    dns: component("running", "DNS listener is active"),
-    providers: {
-      ready: 6,
-      total: 6,
-      rules_loaded: 184203,
-      last_refresh: now(),
-    },
+  };
+  for (const listener of listeners) listener(structuredClone(snapshot));
+
+  for (const [phase, stage] of phases.slice(1)) {
+    if (phase === "starting_core") {
+      snapshot = {
+        ...snapshot,
+        mihomo: component("starting", "Mihomo controller is starting"),
+        tun: component("starting", "TUN interface is starting"),
+        dns: component("starting", "DNS listener is starting"),
+      };
+    }
+    emit(phase, accepted.operation_id, lifecycleBusy, stage);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (phase === "starting_core") {
+      snapshot = {
+        ...snapshot,
+        mihomo: component("running", "Mihomo controller is ready"),
+        dns: component("running", "DNS listener is active"),
+      };
+      for (const listener of listeners) listener(structuredClone(snapshot));
+    }
+    if (phase === "checking_readiness") {
+      snapshot = {
+        ...snapshot,
+        tun: component("running", "TUN interface is active"),
+        providers: {
+          ready: 6,
+          total: 6,
+          rules_loaded: 184203,
+          last_refresh: now(),
+        },
+      };
+      for (const listener of listeners) listener(structuredClone(snapshot));
+    }
+  }
+
+  snapshot = {
+    ...snapshot,
+    clients: clientsWithMockSideTunnelOutcomes(mockSideTunnelConnectTimeout),
     exit_ip: "203.0.113.42",
   };
   lifecycleBusy = null;

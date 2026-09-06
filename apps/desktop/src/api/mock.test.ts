@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MOCK_HIDDIFY_ID } from "../lib/outbound";
 import { APP_VERSION } from "../version";
+import type { StackSnapshot } from "./models";
 import { mockApi, resetMockState } from "./mock";
 
 describe("mock transport", () => {
@@ -144,19 +145,49 @@ describe("mock transport", () => {
 
   it("publishes real start stages on the snapshot", async () => {
     const stages: Array<string | null | undefined> = [];
+    const componentSnapshots: StackSnapshot[] = [];
     const unsubscribe = mockApi.subscribe((snapshot) => {
       stages.push(snapshot.operation_stage);
+      componentSnapshots.push(structuredClone(snapshot));
     });
     await mockApi.start();
-    await vi.waitFor(async () => {
-      const snapshot = await mockApi.getSnapshot();
-      expect(snapshot.phase).toBe("running");
-    });
+    await vi.waitFor(
+      async () => {
+        const snapshot = await mockApi.getSnapshot();
+        expect(snapshot.phase).toBe("running");
+      },
+      { timeout: 5_000 },
+    );
     unsubscribe();
     expect(stages).toContain("preparing");
     expect(stages).toContain("starting_client");
     expect(stages).toContain("starting_core");
     expect(stages).toContain("checking_readiness");
+    expect(
+      componentSnapshots.some(
+        (snapshot) =>
+          snapshot.phase !== "running" && snapshot.helper.phase === "running",
+      ),
+    ).toBe(true);
+    expect(
+      componentSnapshots.some(
+        (snapshot) =>
+          snapshot.phase !== "running" &&
+          snapshot.clients.some((client) => client.status.phase === "running"),
+      ),
+    ).toBe(true);
+    expect(
+      componentSnapshots.some(
+        (snapshot) =>
+          snapshot.phase !== "running" && snapshot.mihomo.phase === "running",
+      ),
+    ).toBe(true);
+    expect(
+      componentSnapshots.some(
+        (snapshot) =>
+          snapshot.phase !== "running" && snapshot.tun.phase === "running",
+      ),
+    ).toBe(true);
   });
 
   it("lists mock DIRECT and VPN connections only while connected", async () => {
