@@ -142,6 +142,98 @@ describe("ClientRegistry profile picker", () => {
     );
   });
 
+  it("lets the user type a Windscribe password and commits it on blur", async () => {
+    const updateClient = vi.fn();
+    useAppStore.setState({ updateClient });
+    render(<ClientRegistry />);
+
+    const card = screen.getByTestId("client-card-windscribe");
+    await openDetails(card);
+    const password = within(card).getByLabelText("Password (optional)");
+    await userEvent.type(password, "hunter2secret");
+    // Typing must stay local: a per-keystroke save echoes the redacted
+    // config back and erases the field.
+    expect(password).toHaveValue("hunter2secret");
+    expect(updateClient).not.toHaveBeenCalled();
+    await userEvent.tab();
+    expect(updateClient).toHaveBeenCalledTimes(1);
+    expect(updateClient).toHaveBeenCalledWith(
+      "22222222-2222-2222-2222-222222222222",
+      {
+        kind: "owned_side_tunnel",
+        profile_path: null,
+        executable: "auto",
+        username: null,
+        password: "hunter2secret",
+        start_timeout_seconds: 45,
+      },
+    );
+  });
+
+  it("keeps typing usable when the saved password is redacted", async () => {
+    const updateClient = vi.fn();
+    const windscribe = createClientInstance(
+      "windscribe",
+      "22222222-2222-2222-2222-222222222222",
+    );
+    if (windscribe.config.kind === "owned_side_tunnel") {
+      windscribe.config.password = "[REDACTED]";
+    }
+    useAppStore.setState({
+      updateClient,
+      settings: { ...baseSettings(), clients: [windscribe] },
+    });
+    render(<ClientRegistry />);
+
+    const card = screen.getByTestId("client-card-windscribe");
+    await openDetails(card);
+    const password = within(card).getByLabelText("Password (optional)");
+    expect(password).toHaveAttribute("placeholder", "••••••••");
+    await userEvent.type(password, "new-secret");
+    expect(password).toHaveValue("new-secret");
+    await userEvent.tab();
+    expect(updateClient).toHaveBeenCalledTimes(1);
+    expect(updateClient).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ password: "new-secret" }),
+    );
+  });
+
+  it("commits username and port edits on blur, rejecting invalid ports", async () => {
+    const updateClient = vi.fn();
+    useAppStore.setState({ updateClient });
+    render(<ClientRegistry />);
+
+    const card = screen.getByTestId("client-card-windscribe");
+    await openDetails(card);
+    const username = within(card).getByLabelText("Username (optional)");
+    await userEvent.type(username, "user@example.com");
+    expect(updateClient).not.toHaveBeenCalled();
+    await userEvent.tab();
+    expect(updateClient).toHaveBeenCalledTimes(1);
+    expect(updateClient).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ username: "user@example.com" }),
+    );
+
+    const hiddify = screen.getByTestId("client-card-hiddify");
+    await openDetails(hiddify);
+    const port = within(hiddify).getByLabelText("Local port");
+    await userEvent.clear(port);
+    await userEvent.type(port, "99999");
+    await userEvent.tab();
+    // 99999 is out of range: the draft is discarded, nothing is saved.
+    expect(updateClient).toHaveBeenCalledTimes(1);
+    await userEvent.clear(port);
+    await userEvent.type(port, "2080");
+    await userEvent.tab();
+    expect(updateClient).toHaveBeenCalledTimes(2);
+    expect(updateClient).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ port: 2080 }),
+    );
+  });
+
   it("offers OpenVPN download on the Windscribe catalog and missing-binary banner", async () => {
     vi.mocked(desktop.clientBinaryInstalled).mockResolvedValue(false);
     render(<ClientRegistry />);

@@ -1,5 +1,10 @@
 import { Download, FolderOpen, Plus, Trash2, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { desktop } from "../api/desktop";
 import type { ClientInstance, PinnedRoute, RuleListMeta } from "../api/models";
@@ -260,6 +265,38 @@ function ClientCard({
 }) {
   const { t } = useTranslation();
   const [host, setHost] = useState("");
+  // Text fields draft locally and commit on blur/Enter. Committing per
+  // keystroke round-trips the whole settings save, and the echoed config
+  // redacts the OpenVPN password to "[REDACTED]" — which the controlled
+  // input rendered as "", erasing every character the user typed.
+  const [draft, setDraft] = useState<{
+    username?: string;
+    password?: string;
+    port?: string;
+  }>({});
+
+  function commitDraft(field: "username" | "password" | "port") {
+    const value = draft[field];
+    if (value === undefined) return;
+    setDraft((current) => ({ ...current, [field]: undefined }));
+    if (field === "port") {
+      if (client.config.kind !== "local_proxy") return;
+      const port = Number(value);
+      if (!Number.isInteger(port) || port < 1 || port > 65_535) return;
+      if (port === client.config.port) return;
+      onConfig({ ...client, config: { ...client.config, port } });
+      return;
+    }
+    if (client.config.kind !== "owned_side_tunnel") return;
+    onConfig({
+      ...client,
+      config: { ...client.config, [field]: value || null },
+    });
+  }
+
+  function blurOnEnter(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Enter") event.currentTarget.blur();
+  }
   const spec = useMemo(
     () => presetById(client.preset as PresetId),
     [client.preset],
@@ -380,17 +417,15 @@ function ClientCard({
               {t("clientPort")}
               <input
                 type="number"
-                value={client.config.port}
-                onChange={(event) => {
-                  if (client.config.kind !== "local_proxy") return;
-                  onConfig({
-                    ...client,
-                    config: {
-                      ...client.config,
-                      port: Number(event.target.value),
-                    },
-                  });
-                }}
+                value={draft.port ?? String(client.config.port)}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    port: event.target.value,
+                  }))
+                }
+                onBlur={() => commitDraft("port")}
+                onKeyDown={blurOnEnter}
                 className="mt-1 w-full rounded-xl border-ink/15 bg-canvas"
               />
             </label>
@@ -470,18 +505,16 @@ function ClientCard({
               <label className="text-xs font-medium">
                 {t("openvpnUsername")}
                 <input
-                  value={client.config.username ?? ""}
+                  value={draft.username ?? client.config.username ?? ""}
                   autoComplete="off"
-                  onChange={(event) => {
-                    if (client.config.kind !== "owned_side_tunnel") return;
-                    onConfig({
-                      ...client,
-                      config: {
-                        ...client.config,
-                        username: event.target.value || null,
-                      },
-                    });
-                  }}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      username: event.target.value,
+                    }))
+                  }
+                  onBlur={() => commitDraft("username")}
+                  onKeyDown={blurOnEnter}
                   className="mt-1 w-full rounded-xl border-ink/15 bg-canvas"
                 />
               </label>
@@ -490,24 +523,23 @@ function ClientCard({
                 <input
                   type="password"
                   value={
-                    client.config.password === "[REDACTED]"
+                    draft.password ??
+                    (client.config.password === "[REDACTED]"
                       ? ""
-                      : (client.config.password ?? "")
+                      : (client.config.password ?? ""))
                   }
                   placeholder={
                     client.config.password === "[REDACTED]" ? "••••••••" : ""
                   }
                   autoComplete="new-password"
-                  onChange={(event) => {
-                    if (client.config.kind !== "owned_side_tunnel") return;
-                    onConfig({
-                      ...client,
-                      config: {
-                        ...client.config,
-                        password: event.target.value || null,
-                      },
-                    });
-                  }}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      password: event.target.value,
+                    }))
+                  }
+                  onBlur={() => commitDraft("password")}
+                  onKeyDown={blurOnEnter}
                   className="mt-1 w-full rounded-xl border-ink/15 bg-canvas"
                 />
               </label>

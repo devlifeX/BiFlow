@@ -10,6 +10,8 @@ WINDOWS_TAURI_ARGS=()
 TAURI_SIGNING_CONFIG_ARGS=()
 FROM_STAGE=""
 FORCE=0
+# Which Linux bundles to produce: all (default), deb, or appimage.
+LINUX_BUNDLES="all"
 NODE_VERSION="24.11.1"
 PNPM_VERSION="9.0.1"
 # cargo-xwin 0.20+ requires rustc 1.89; pin the last release that builds on 1.88.
@@ -70,6 +72,8 @@ GitHub-hosted packaging entry points:
 
 Full packaging (machines with spare disk; not the local default):
   linux          Native Linux .deb and AppImage
+  linux deb      Only the Linux .deb
+  linux appimage Only the Linux AppImage
   windows        Windows app .exe and NSIS installer
   all            Linux and Windows (default when no mode is given)
 
@@ -426,6 +430,10 @@ stamp_is_current() {
   [[ "$(command cat "${file}")" == "${BUILD_VERSION}" ]]
 }
 
+linux_bundle_selected() {
+  [[ "${LINUX_BUNDLES}" == "all" || "${LINUX_BUNDLES}" == "$1" ]]
+}
+
 linux_stage_done() {
   local stage="$1"
   local deb
@@ -445,8 +453,12 @@ linux_stage_done() {
       [[ -s "$(linux_appimage_path)" ]]
       ;;
     collect)
-      [[ -f "${PROJECT_DIR}/$(plan linux.dir)/$(linux_deb_name)" ]] && \
-        [[ -s "${PROJECT_DIR}/$(plan linux.dir)/$(linux_appimage_name)" ]]
+      if linux_bundle_selected deb; then
+        [[ -f "${PROJECT_DIR}/$(plan linux.dir)/$(linux_deb_name)" ]] || return 1
+      fi
+      if linux_bundle_selected appimage; then
+        [[ -s "${PROJECT_DIR}/$(plan linux.dir)/$(linux_appimage_name)" ]] || return 1
+      fi
       ;;
     *) return 1 ;;
   esac
@@ -582,16 +594,20 @@ validate_from_stage() {
 collect_linux() {
   assert_build_version
   local source dest package_version
-  source="${TARGET_DIR}/release/bundle/deb/$(linux_deb_name)"
-  [[ -f "${source}" ]] || die "expected Linux package is missing: ${source}"
-  package_version="$(dpkg-deb -f "${source}" Version)"
-  [[ "${package_version}" == "${BUILD_VERSION}" ]] || \
-    die "Linux package version mismatch: expected ${BUILD_VERSION}, got ${package_version}"
-  dest="${PROJECT_DIR}/$(plan linux.dir)/$(linux_deb_name)"
-  copy_one "${source}" "${dest}"
-  source="${TARGET_DIR}/release/bundle/appimage/$(linux_appimage_name)"
-  dest="${PROJECT_DIR}/$(plan linux.dir)/$(linux_appimage_name)"
-  copy_one "${source}" "${dest}"
+  if linux_bundle_selected deb; then
+    source="${TARGET_DIR}/release/bundle/deb/$(linux_deb_name)"
+    [[ -f "${source}" ]] || die "expected Linux package is missing: ${source}"
+    package_version="$(dpkg-deb -f "${source}" Version)"
+    [[ "${package_version}" == "${BUILD_VERSION}" ]] || \
+      die "Linux package version mismatch: expected ${BUILD_VERSION}, got ${package_version}"
+    dest="${PROJECT_DIR}/$(plan linux.dir)/$(linux_deb_name)"
+    copy_one "${source}" "${dest}"
+  fi
+  if linux_bundle_selected appimage; then
+    source="${TARGET_DIR}/release/bundle/appimage/$(linux_appimage_name)"
+    dest="${PROJECT_DIR}/$(plan linux.dir)/$(linux_appimage_name)"
+    copy_one "${source}" "${dest}"
+  fi
 }
 
 collect_windows() {
@@ -642,7 +658,9 @@ build_linux() {
   else
     log "Skipping compile; already have $(linux_binary_path)"
   fi
-  if should_run_linux_stage deb; then
+  if ! linux_bundle_selected deb; then
+    log "Skipping deb; only the ${LINUX_BUNDLES} bundle was requested"
+  elif should_run_linux_stage deb; then
     log "Stage deb: $(linux_deb_name)"
     [[ -x "${PROJECT_DIR}/packaging/staged/iran-split-helper" ]] || \
       "${PROJECT_DIR}/scripts/stage-helper.sh"
@@ -652,7 +670,9 @@ build_linux() {
   else
     log "Skipping deb; already have $(linux_deb_path)"
   fi
-  if should_run_linux_stage appimage; then
+  if ! linux_bundle_selected appimage; then
+    log "Skipping appimage; only the ${LINUX_BUNDLES} bundle was requested"
+  elif should_run_linux_stage appimage; then
     [[ -x "$(linux_binary_path)" ]] || die "stage appimage needs a compiled binary; run ./build.sh linux --from compile"
     log "Stage appimage: $(linux_appimage_name)"
     [[ -x "${PROJECT_DIR}/packaging/staged/iran-split-helper" ]] || \
@@ -868,6 +888,16 @@ main() {
     linux|windows|all) ;;
     *) usage >&2; die "unknown target: ${target}" ;;
   esac
+
+  if [[ "${target}" == "linux" && "${#rest[@]}" -gt 1 ]]; then
+    case "${rest[1]}" in
+      deb|appimage) LINUX_BUNDLES="${rest[1]}" ;;
+      *) usage >&2; die "linux bundle must be deb or appimage, got: ${rest[1]}" ;;
+    esac
+  elif [[ "${#rest[@]}" -gt 1 ]]; then
+    usage >&2
+    die "unexpected extra argument: ${rest[1]}"
+  fi
 
   validate_from_stage "${target}"
   ensure_requirements "${target}"

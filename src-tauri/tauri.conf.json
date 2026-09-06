@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "BiFlow",
-  "version": "6.0.0",
+  "version": "6.1.0",
   "identifier": "app.biflow.desktop",
   "build": {
     "beforeDevCommand": "pnpm bundle:check && pnpm --dir apps/desktop dev",
