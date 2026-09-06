@@ -45,6 +45,11 @@ use uuid::Uuid;
 mod system_proxy;
 
 const IPC_TIMEOUT: Duration = Duration::from_secs(5);
+/// Starting a side tunnel is inherently slow: the helper waits for `OpenVPN`
+/// to bring a device up, and may retry through a proxy. The general 5s budget
+/// turned every slow start into "helper request timed out", hiding the real
+/// outcome, so this command gets a budget wider than the helper's own.
+const SIDE_TUNNEL_IPC_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Error)]
 pub enum LinuxBackendError {
@@ -142,7 +147,7 @@ impl HelperClient {
             client_version: env!("CARGO_PKG_VERSION").into(),
             supported_protocols: vec![PROTOCOL_VERSION],
         });
-        let hello_reply = exchange(&mut stream, &hello).await?;
+        let hello_reply = exchange(&mut stream, &hello, IPC_TIMEOUT).await?;
         match hello_reply.payload {
             HelperReply::Hello(reply) if reply.selected_protocol == PROTOCOL_VERSION => {}
             HelperReply::Error(error) => {
@@ -154,7 +159,12 @@ impl HelperClient {
             _ => return Err(LinuxBackendError::ResponseMismatch),
         }
         let request = Envelope::new(command);
-        let response = exchange(&mut stream, &request).await?;
+        let budget = if matches!(request.payload, HelperCommand::StartSideTunnel { .. }) {
+            SIDE_TUNNEL_IPC_TIMEOUT
+        } else {
+            IPC_TIMEOUT
+        };
+        let response = exchange(&mut stream, &request, budget).await?;
         match response.payload {
             HelperReply::Error(error) => Err(LinuxBackendError::Helper {
                 code: error.code,
@@ -168,11 +178,12 @@ impl HelperClient {
 async fn exchange(
     stream: &mut UnixStream,
     request: &Envelope<HelperCommand>,
+    budget: Duration,
 ) -> Result<Envelope<HelperReply>, LinuxBackendError> {
     tokio::time::timeout(IPC_TIMEOUT, write_frame(stream, request))
         .await
         .map_err(|_| LinuxBackendError::Timeout)??;
-    let reply: Envelope<HelperReply> = tokio::time::timeout(IPC_TIMEOUT, read_frame(stream))
+    let reply: Envelope<HelperReply> = tokio::time::timeout(budget, read_frame(stream))
         .await
         .map_err(|_| LinuxBackendError::Timeout)??;
     validate_envelope(&reply)?;

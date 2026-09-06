@@ -91,32 +91,30 @@ impl Supervisor {
         // Try the direct path first. A network that blocks the server by
         // address makes OpenVPN exit immediately; only then fall back to the
         // working client's SOCKS port, which costs a nested hop.
+        // Both attempts share the caller's budget, so a retry can never push
+        // the reply past the engine's IPC deadline.
+        let attempt_seconds = if socks_proxy.is_some() {
+            (timeout_seconds / 2).max(5)
+        } else {
+            timeout_seconds
+        };
         let mut child = spawn_openvpn(
             &binary,
             &openvpn_arguments(profile, &device, auth.as_ref(), pinned_remote, None),
         )?;
-        let mut outcome = wait_for_device(&mut child, &device, timeout_seconds).await;
-        if outcome.is_err() {
-            if let Some((proxy_host, proxy_port)) = socks_proxy {
-                self.push_log(
-                    "info",
-                    "side_tunnel_retry_via_proxy",
-                    BTreeMap::from([("driver".into(), "openvpn".into())]),
-                )
-                .await;
-                let _ = child.start_kill();
-                child = spawn_openvpn(
-                    &binary,
-                    &openvpn_arguments(
-                        profile,
-                        &device,
-                        auth.as_ref(),
-                        pinned_remote,
-                        Some((proxy_host, proxy_port)),
-                    ),
-                )?;
-                outcome = wait_for_device(&mut child, &device, timeout_seconds).await;
-            }
+        let mut outcome = wait_for_device(&mut child, &device, attempt_seconds).await;
+        if let (Err(_), Some(proxy)) = (&outcome, socks_proxy) {
+            self.push_log(
+                "info",
+                "side_tunnel_retry_via_proxy",
+                BTreeMap::from([("driver".into(), "openvpn".into())]),
+            )
+            .await;
+            let _ = child.start_kill();
+            let args =
+                openvpn_arguments(profile, &device, auth.as_ref(), pinned_remote, Some(proxy));
+            child = spawn_openvpn(&binary, &args)?;
+            outcome = wait_for_device(&mut child, &device, attempt_seconds).await;
         }
         outcome?;
 
