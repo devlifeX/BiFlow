@@ -17,3 +17,4 @@ resources/rules/cache/
 test-results/
 apps/desktop/test-results/
 test-results/.last-run.json
+.claude/launch.json

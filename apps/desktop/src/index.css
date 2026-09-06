@@ -60,6 +60,11 @@ body {
 
 button,
 input,
+/* The forms plugin sets 1rem on inputs WITH a type attribute, which made
+   password/number fields taller than their untyped text siblings (a
+   password box 42px tall next to a 34px username). input[type] outranks
+   the plugin's [type='...'] selectors so every input inherits alike. */
+input[type],
 select {
   font: inherit;
 }
