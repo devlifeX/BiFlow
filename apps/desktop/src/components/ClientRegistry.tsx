@@ -412,7 +412,11 @@ function ClientCard({
         </label>
 
         {client.config.kind === "local_proxy" ? (
-          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          // Grid children default to min-width:auto, and WebKit (the engine
+          // the desktop app ships) refuses to shrink an input below its
+          // intrinsic size, so fields spilled past the card edge on narrow
+          // two-column layouts. min-w-0 lets them shrink.
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 [&>label]:min-w-0">
             <label className="text-xs font-medium">
               {t("clientPort")}
               <input
@@ -501,7 +505,7 @@ function ClientCard({
                 ) : null}
               </div>
             </div>
-            <div className="grid gap-2 sm:grid-cols-2">
+            <div className="grid gap-2 sm:grid-cols-2 [&>label]:min-w-0">
               <label className="text-xs font-medium">
                 {t("openvpnUsername")}
                 <input

@@ -790,7 +790,10 @@ impl WindowsBackend {
                 {
                     ComponentStatus::new(ComponentPhase::Running, None)
                 } else {
-                    ComponentStatus::new(ComponentPhase::Stopped, None)
+                    ComponentStatus::new(
+                        ComponentPhase::Stopped,
+                        iran_split_clients::side_tunnel_stopped_reason(client),
+                    )
                 }
             }
             EgressKind::Unsupported => ComponentStatus::new(ComponentPhase::Unavailable, None),

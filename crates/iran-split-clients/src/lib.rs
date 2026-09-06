@@ -142,6 +142,40 @@ pub fn local_proxy_endpoint(instance: &ClientInstance) -> Option<(String, u16)> 
     }
 }
 
+/// Why a side tunnel is not running, in the operator's words.
+///
+/// A stopped side tunnel used to report no detail at all, so a client that
+/// failed at connect looked identical to one that was never started. Connect
+/// only warns for optional clients, so the card was the operator's only
+/// chance to learn the cause.
+#[must_use]
+pub fn side_tunnel_stopped_reason(instance: &ClientInstance) -> Option<String> {
+    let ClientConfig::OwnedSideTunnel { profile_path, .. } = &instance.config else {
+        return None;
+    };
+    let Some(path) = profile_path else {
+        return Some("choose a .ovpn profile on this card".into());
+    };
+    if path
+        .parent()
+        .is_none_or(|parent| parent.as_os_str().is_empty())
+    {
+        // A stored bare file name cannot be opened. Older builds truncated the
+        // path when other fields were saved; re-picking the file repairs it.
+        return Some(format!(
+            "the saved profile path is incomplete ({}); choose the file again",
+            path.display()
+        ));
+    }
+    if !path.is_file() {
+        return Some(format!(
+            "profile file not found: {}; choose the file again",
+            path.display()
+        ));
+    }
+    Some("the tunnel is not running; press Connect".into())
+}
+
 /// Synthesize a ready local-proxy handle from config (used when generate
 /// runs without a live ensure, e.g. unit tests).
 #[must_use]
@@ -180,5 +214,40 @@ mod tests {
         assert!(driver_for(PresetId::Happ).is_some());
         assert!(driver_for(PresetId::Wireguard).is_none());
         assert!(driver_for(PresetId::Windscribe).is_some());
+    }
+
+    #[test]
+    fn stopped_side_tunnel_explains_itself() {
+        let mut client = ClientInstance::from_preset(PresetId::Windscribe);
+        assert!(side_tunnel_stopped_reason(&client)
+            .expect("no profile")
+            .contains("choose a .ovpn profile"));
+
+        let set_profile = |client: &mut ClientInstance, value: &str| {
+            if let ClientConfig::OwnedSideTunnel { profile_path, .. } = &mut client.config {
+                *profile_path = Some(std::path::PathBuf::from(value));
+            }
+        };
+
+        // A bare file name is what older builds stored after a settings save.
+        set_profile(&mut client, "Windscribe-Berlin.ovpn");
+        assert!(side_tunnel_stopped_reason(&client)
+            .expect("bare name")
+            .contains("incomplete"));
+
+        set_profile(&mut client, "/nonexistent/office.ovpn");
+        assert!(side_tunnel_stopped_reason(&client)
+            .expect("missing file")
+            .contains("not found"));
+
+        let file = tempfile::NamedTempFile::new().expect("temp profile");
+        set_profile(&mut client, &file.path().to_string_lossy());
+        assert!(side_tunnel_stopped_reason(&client)
+            .expect("ready")
+            .contains("press Connect"));
+
+        // Local proxies keep their own detail text.
+        let hiddify = ClientInstance::from_preset(PresetId::Hiddify);
+        assert!(side_tunnel_stopped_reason(&hiddify).is_none());
     }
 }
