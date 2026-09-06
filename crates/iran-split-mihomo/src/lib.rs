@@ -1330,6 +1330,14 @@ mod tests {
         assert!(generated
             .yaml
             .contains(&format!("custom-{}-domains.txt", happ_id.as_hyphenated())));
+        // The Debian Happ daemon is lowercase `happd`; PROCESS-NAME is
+        // case-sensitive on Linux, so the bypass must name it exactly or
+        // the daemon's upstream traffic loops into the TUN.
+        assert!(generated.yaml.contains("PROCESS-NAME,happd,DIRECT"));
+        assert!(generated.yaml.contains("PROCESS-NAME,happ,DIRECT"));
+        assert!(generated
+            .yaml
+            .contains("PROCESS-NAME-WILDCARD,*happ*,DIRECT"));
         app.default_route = DefaultRoute::Direct;
         let direct = generate_config(
             &app,

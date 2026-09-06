@@ -181,6 +181,16 @@ impl Supervisor {
 
 fn resolve_binary(configured: Option<&Path>) -> Result<PathBuf, HelperServiceError> {
     if let Some(path) = configured {
+        // Same policy as the Mihomo binary: a configured executable must be a
+        // regular, non-symlink file before the helper will spawn it as root.
+        let metadata = std::fs::symlink_metadata(path).map_err(|_| {
+            HelperServiceError::SideTunnel("the openvpn executable is unreadable".into())
+        })?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            return Err(HelperServiceError::SideTunnel(
+                "the openvpn executable must be a regular, non-symlink file".into(),
+            ));
+        }
         return Ok(path.to_path_buf());
     }
     candidate_binaries()
@@ -429,4 +439,104 @@ async fn terminate(child: &mut Child) -> Result<(), HelperServiceError> {
         .map_err(|_| HelperServiceError::SideTunnel("openvpn did not stop in time".into()))?
         .map_err(|error| HelperServiceError::SideTunnel(error.to_string()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::HelperSettings;
+    use std::fs;
+
+    fn write_regular_file(directory: &Path, name: &str, contents: &str) -> PathBuf {
+        let path = directory.join(name);
+        fs::write(&path, contents).expect("fixture file");
+        path
+    }
+
+    #[test]
+    fn resolve_binary_accepts_configured_regular_file() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binary = write_regular_file(directory.path(), "openvpn", "not really a binary");
+        let resolved = resolve_binary(Some(&binary)).expect("regular file accepted");
+        assert_eq!(resolved, binary);
+    }
+
+    #[test]
+    fn resolve_binary_rejects_missing_configured_executable() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let missing = directory.path().join("does-not-exist");
+        let error = resolve_binary(Some(&missing)).expect_err("missing file rejected");
+        assert!(matches!(error, HelperServiceError::SideTunnel(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_binary_rejects_symlinked_executable() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = write_regular_file(directory.path(), "real-openvpn", "target");
+        let link = directory.path().join("openvpn");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let error = resolve_binary(Some(&link)).expect_err("symlink rejected");
+        assert!(matches!(error, HelperServiceError::SideTunnel(_)));
+        assert!(error.to_string().contains("regular, non-symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_binary_rejects_directory_executable() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let error =
+            resolve_binary(Some(directory.path())).expect_err("directory rejected");
+        assert!(matches!(error, HelperServiceError::SideTunnel(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn start_side_tunnel_rejects_symlinked_executable_without_spawning() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let profile = write_regular_file(
+            directory.path(),
+            "profile.ovpn",
+            "client\nremote 192.0.2.10 1194\ndev tun\n",
+        );
+        // The symlink points at a script that records execution, so the test
+        // proves the helper failed before spawning anything.
+        let marker = directory.path().join("executed-marker");
+        let script = write_regular_file(
+            directory.path(),
+            "fake-openvpn.sh",
+            &format!("#!/bin/sh\ntouch {}\n", marker.display()),
+        );
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let link = directory.path().join("openvpn");
+        std::os::unix::fs::symlink(&script, &link).expect("symlink");
+
+        let supervisor = Supervisor::new(HelperSettings {
+            authorized_uid: 1_000,
+            authorized_gid: 1_000,
+            socket_path: directory.path().join("helper.sock"),
+            staging_dir: directory.path().join("staging"),
+            runtime_dir: directory.path().join("runtime"),
+            mihomo_binary: directory.path().join("mihomo"),
+            mihomo_sha256: "0".repeat(64),
+            tun_name: "biflow-tun".into(),
+        });
+        let error = supervisor
+            .start_side_tunnel(
+                "openvpn",
+                Uuid::new_v4(),
+                &profile,
+                Some(&link),
+                None,
+                1,
+            )
+            .await
+            .expect_err("symlinked executable rejected");
+        assert!(matches!(error, HelperServiceError::SideTunnel(_)));
+        assert!(error.to_string().contains("regular, non-symlink"));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!marker.exists(), "helper spawned the symlinked executable");
+    }
 }
