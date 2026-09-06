@@ -81,6 +81,11 @@ const resources = {
       profileFileInvalid: "Choose an .ovpn or .conf profile.",
       openvpnUsername: "Username (optional)",
       openvpnPassword: "Password (optional)",
+      sideTunnelStartFailed:
+        "The OpenVPN side tunnel did not come up within {{seconds}} seconds.",
+      sideTunnelRetryWithTimeout: "Try again with {{seconds}}s timeout",
+      sideTunnelStartExhausted:
+        "The side tunnel still did not start after {{seconds}} seconds. Check the profile, OpenVPN install, and network, then disconnect and connect again.",
       clientPinPlaceholder: "example.com",
       pinToClient: "Pin",
       remove: "Remove",
@@ -375,6 +380,10 @@ const resources = {
       profileFileInvalid: "یک پروفایل ‎.ovpn یا ‎.conf انتخاب کنید.",
       openvpnUsername: "نام کاربری (اختیاری)",
       openvpnPassword: "گذرواژه (اختیاری)",
+      sideTunnelStartFailed: "تونل OpenVPN ظرف {{seconds}} ثانیه بالا نیامد.",
+      sideTunnelRetryWithTimeout: "تلاش دوباره با مهلت {{seconds}} ثانیه",
+      sideTunnelStartExhausted:
+        "تونل side حتی با {{seconds}} ثانیه هم بالا نیامد. پروفایل، نصب OpenVPN و شبکه را بررسی کنید، سپس قطع و دوباره وصل شوید.",
       clientPinPlaceholder: "example.com",
       pinToClient: "سنجاق",
       remove: "حذف",

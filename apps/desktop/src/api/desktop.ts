@@ -51,8 +51,17 @@ export const desktop = {
       ? invoke("list_active_connections")
       : mockApi.listActiveConnections();
   },
-  start(): Promise<OperationAccepted> {
-    return native ? invoke("start_stack") : mockApi.start();
+  start(sideTunnelTimeoutSeconds?: number): Promise<OperationAccepted> {
+    return native
+      ? invoke("start_stack", {
+          sideTunnelTimeoutSeconds: sideTunnelTimeoutSeconds ?? null,
+        })
+      : mockApi.start(sideTunnelTimeoutSeconds);
+  },
+  retrySideTunnels(sideTunnelTimeoutSeconds: number): Promise<boolean> {
+    return native
+      ? invoke("retry_side_tunnels", { sideTunnelTimeoutSeconds })
+      : mockApi.retrySideTunnels(sideTunnelTimeoutSeconds);
   },
   stop(): Promise<OperationAccepted> {
     return native ? invoke("stop_stack") : mockApi.stop();

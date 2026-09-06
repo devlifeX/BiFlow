@@ -9,6 +9,11 @@ import { useTranslation } from "react-i18next";
 import { desktop } from "../api/desktop";
 import type { ClientInstance, PinnedRoute, RuleListMeta } from "../api/models";
 import { canAddPreset, enabledClients, profileFileName } from "../lib/clients";
+import {
+  failedSideTunnelClients,
+  INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT,
+  nextSideTunnelRetryTimeout,
+} from "../lib/sideTunnelConnect";
 import { defaultRouteFromKey, outboundKey } from "../lib/outbound";
 import {
   downloadLinksFor,
@@ -41,6 +46,8 @@ export function ClientRegistry() {
     clearRouteFallbackNotice,
     actionPending,
     boot,
+    sideTunnelLastTimeout,
+    retrySideTunnelConnect,
   } = useAppStore();
   const platform = boot?.platform ?? "linux";
   const [catalogOpen, setCatalogOpen] = useState(false);
@@ -49,6 +56,11 @@ export function ClientRegistry() {
   const clients = settings?.clients ?? [];
   const pins = rules?.pins ?? [];
   const lists = rules?.lists ?? [];
+  const failedSideTunnels =
+    snapshot && settings ? failedSideTunnelClients(snapshot, clients) : [];
+  const sideTunnelRetryTimeout = sideTunnelLastTimeout
+    ? nextSideTunnelRetryTimeout(sideTunnelLastTimeout)
+    : nextSideTunnelRetryTimeout(INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT);
 
   if (!settings) return null;
 
@@ -82,6 +94,41 @@ export function ClientRegistry() {
           >
             {t("close")}
           </button>
+        </p>
+      ) : null}
+
+      {failedSideTunnels.length > 0 && sideTunnelRetryTimeout ? (
+        <div
+          data-testid="side-tunnel-retry-banner"
+          className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm"
+          role="status"
+        >
+          <p>
+            {t("sideTunnelStartFailed", {
+              seconds:
+                sideTunnelLastTimeout ?? INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT,
+            })}
+          </p>
+          <button
+            type="button"
+            className="mt-2 rounded-lg bg-brand px-3 py-2 text-xs font-semibold text-white disabled:opacity-55"
+            disabled={actionPending}
+            onClick={() => void retrySideTunnelConnect()}
+          >
+            {t("sideTunnelRetryWithTimeout", {
+              seconds: sideTunnelRetryTimeout,
+            })}
+          </button>
+        </div>
+      ) : null}
+
+      {failedSideTunnels.length > 0 && !sideTunnelRetryTimeout ? (
+        <p
+          data-testid="side-tunnel-retry-exhausted"
+          className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm"
+          role="status"
+        >
+          {t("sideTunnelStartExhausted", { seconds: 60 })}
         </p>
       ) : null}
 
@@ -180,6 +227,10 @@ export function ClientRegistry() {
               snapshot?.clients.find((item) => item.id === client.id)?.status
                 .phase ?? "stopped"
             }
+            statusMessage={
+              snapshot?.clients.find((item) => item.id === client.id)?.status
+                .message ?? null
+            }
             exitIp={
               snapshot?.clients.find((item) => item.id === client.id)
                 ?.exit_ip ?? null
@@ -226,6 +277,7 @@ function ClientCard({
   lists,
   isDefault,
   phase,
+  statusMessage,
   deleting,
   others,
   moveTo,
@@ -247,6 +299,7 @@ function ClientCard({
   lists: RuleListMeta[];
   isDefault: boolean;
   phase: string;
+  statusMessage: string | null;
   deleting: boolean;
   others: ClientInstance[];
   moveTo: string;
@@ -387,6 +440,14 @@ function ClientCard({
             platform={platform}
             labelKey="downloadOpenVpn"
           />
+        </p>
+      ) : null}
+
+      {client.config.kind === "owned_side_tunnel" &&
+      phase === "stopped" &&
+      statusMessage ? (
+        <p className="mt-2 rounded-xl border border-ink/10 bg-canvas px-3 py-2 text-xs text-muted">
+          {statusMessage}
         </p>
       ) : null}
 

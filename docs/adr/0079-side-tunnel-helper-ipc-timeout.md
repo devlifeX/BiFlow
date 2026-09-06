@@ -36,3 +36,17 @@ did not track custom `start_timeout_seconds` values above sixty.
   widening every helper call.
 - Regression tests in `iran-split-ipc` lock the short vs long budgets; platform
   source-contract tests ensure both backends call the shared helper.
+
+## Progressive connect UX (6.2.5)
+
+Connect passes an explicit side-tunnel start budget on each attempt:
+
+1. First Connect uses **15 seconds**.
+2. If an enabled side tunnel is still stopped afterward, the client registry
+   shows **Try again with 30s timeout**.
+3. After another failure, the button offers **60 seconds**; further retries
+   stop with an exhausted message.
+
+`retry_side_tunnels` re-starts failed side tunnels on a live stack without a
+full disconnect, and the IPC reply wait stays `timeout_seconds + 15` via
+`helper_ipc_reply_timeout`.

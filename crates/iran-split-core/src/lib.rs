@@ -480,6 +480,16 @@ pub trait PlatformBackend: Send + Sync + 'static {
     async fn recover_clients(&self) -> Result<bool, CoreError> {
         Ok(false)
     }
+    /// Overrides `StartSideTunnel` timeout for the next connect or retry attempt.
+    async fn set_side_tunnel_connect_timeout(&self, _seconds: Option<u64>) {}
+    /// Starts enabled side tunnels that failed during connect, using the
+    /// override from [`Self::set_side_tunnel_connect_timeout`].
+    async fn retry_failed_side_tunnels(
+        &self,
+        _cancel: CancellationToken,
+    ) -> Result<bool, CoreError> {
+        Ok(false)
+    }
     /// One end-to-end egress probe of the default-route local proxy.
     ///
     /// `None` when the default route is DIRECT, a side tunnel, or has no
@@ -594,6 +604,8 @@ pub struct Engine<B: PlatformBackend> {
     /// The Degraded phase was set by the egress watchdog (not an operation),
     /// so a later successful probe may restore Running.
     probe_degraded: AtomicBool,
+    /// Connect-time override for side-tunnel start (progressive 15/30/60s UX).
+    side_tunnel_connect_timeout: Mutex<Option<u64>>,
 }
 
 /// Health ticks run every ~10s; three consecutive egress failures (~30s)
@@ -636,6 +648,7 @@ impl<B: PlatformBackend> Engine<B> {
             route_refresh_pending: AtomicBool::new(false),
             primary_egress_failures: AtomicUsize::new(0),
             probe_degraded: AtomicBool::new(false),
+            side_tunnel_connect_timeout: Mutex::new(None),
         });
         runtime.spawn(Self::worker(Arc::clone(&engine), receiver));
         engine
@@ -863,7 +876,11 @@ impl<B: PlatformBackend> Engine<B> {
     ///
     /// Returns [`CoreError::QueueUnavailable`] when the operation worker is no
     /// longer available.
-    pub async fn start_stack(&self) -> Result<OperationAccepted, CoreError> {
+    pub async fn start_stack(
+        &self,
+        side_tunnel_timeout_seconds: Option<u64>,
+    ) -> Result<OperationAccepted, CoreError> {
+        *self.side_tunnel_connect_timeout.lock().await = side_tunnel_timeout_seconds;
         if self.snapshot().busy.is_some() && self.snapshot().busy != Some(LifecycleBusy::Connecting)
         {
             return Err(CoreError::OperationInProgress);
@@ -876,6 +893,42 @@ impl<B: PlatformBackend> Engine<B> {
             });
         }
         self.accept(OperationKind::Start).await
+    }
+
+    /// Retries enabled side tunnels that failed during connect while the stack
+    /// stays up. Uses `timeout_seconds` for the helper `StartSideTunnel` budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the stack is not live, another operation is
+    /// reserved, or the platform retry fails.
+    pub async fn retry_side_tunnels(&self, timeout_seconds: u64) -> Result<bool, CoreError> {
+        if !matches!(
+            self.snapshot().phase,
+            StackPhase::Running | StackPhase::Degraded
+        ) {
+            return Err(CoreError::Platform(
+                "side tunnel retry requires an active stack".into(),
+            ));
+        }
+        if self.snapshot().busy.is_some() {
+            return Err(CoreError::OperationInProgress);
+        }
+        self.backend
+            .set_side_tunnel_connect_timeout(Some(timeout_seconds))
+            .await;
+        let cancel = CancellationToken::new();
+        let recovered = self.backend.retry_failed_side_tunnels(cancel).await;
+        self.backend.set_side_tunnel_connect_timeout(None).await;
+        let recovered = recovered?;
+        if recovered {
+            self.apply_user_rules().await?;
+        }
+        let health = self.backend.runtime_health().await;
+        self.update(|snapshot| {
+            snapshot.clients = health.clients;
+        });
+        Ok(recovered)
     }
 
     /// Cancels an in-progress start and queues a stack stop.
@@ -1360,7 +1413,13 @@ impl<B: PlatformBackend> Engine<B> {
                 }
             }
         });
-        self.backend.ensure_clients(cancel.clone()).await?;
+        let connect_timeout = self.side_tunnel_connect_timeout.lock().await.take();
+        self.backend
+            .set_side_tunnel_connect_timeout(connect_timeout)
+            .await;
+        let ensure_result = self.backend.ensure_clients(cancel.clone()).await;
+        self.backend.set_side_tunnel_connect_timeout(None).await;
+        ensure_result?;
         check_cancelled(cancel)?;
         // An optional client may have failed alone; take the backend's view
         // instead of assuming every instance is running.
@@ -2000,7 +2059,7 @@ mod tests {
     async fn egress_watchdog_degrades_after_a_streak_and_recovers() {
         let backend = Arc::new(FakeBackend::default());
         let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
-        engine.start_stack().await.expect("start accepted");
+        engine.start_stack(None).await.expect("start accepted");
         engine
             .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
             .await
@@ -2041,7 +2100,7 @@ mod tests {
         assert_eq!(backend.starts.load(Ordering::SeqCst), 0);
         assert!(backend.recover_ready.load(Ordering::SeqCst));
 
-        engine.start_stack().await.expect("start accepted");
+        engine.start_stack(None).await.expect("start accepted");
         engine
             .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
             .await
@@ -2067,7 +2126,7 @@ mod tests {
     async fn pause_keeps_hiddify_and_removes_owned_state() {
         let backend = Arc::new(FakeBackend::default());
         let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
-        engine.start_stack().await.expect("start accepted");
+        engine.start_stack(None).await.expect("start accepted");
         engine
             .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
             .await
@@ -2101,7 +2160,7 @@ mod tests {
     async fn resume_from_paused_restores_running() {
         let backend = Arc::new(FakeBackend::default());
         let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
-        engine.start_stack().await.expect("start accepted");
+        engine.start_stack(None).await.expect("start accepted");
         engine
             .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
             .await
@@ -2129,7 +2188,7 @@ mod tests {
     async fn failed_resume_rolls_back_to_paused() {
         let backend = Arc::new(FakeBackend::default());
         let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
-        engine.start_stack().await.expect("start accepted");
+        engine.start_stack(None).await.expect("start accepted");
         engine
             .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
             .await
@@ -2168,8 +2227,8 @@ mod tests {
     async fn start_and_stop_are_idempotent() {
         let backend = Arc::new(FakeBackend::default());
         let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
-        let first = engine.start_stack().await.expect("start accepted");
-        let duplicate = engine.start_stack().await.expect("duplicate accepted");
+        let first = engine.start_stack(None).await.expect("start accepted");
+        let duplicate = engine.start_stack(None).await.expect("duplicate accepted");
         assert_eq!(first.operation_id, duplicate.operation_id);
         engine
             .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
@@ -2181,7 +2240,7 @@ mod tests {
         assert_eq!(backend.proxy_restores.load(Ordering::SeqCst), 0);
         assert!(
             engine
-                .start_stack()
+                .start_stack(None)
                 .await
                 .expect("idempotent")
                 .already_complete
@@ -2210,7 +2269,7 @@ mod tests {
         let backend = Arc::new(FakeBackend::default());
         backend.fail_readiness.store(true, Ordering::SeqCst);
         let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
-        engine.start_stack().await.expect("start accepted");
+        engine.start_stack(None).await.expect("start accepted");
         let mut receiver = engine.subscribe();
         tokio::time::timeout(Duration::from_secs(2), async {
             while receiver.borrow().phase != StackPhase::Error {
@@ -2228,8 +2287,8 @@ mod tests {
         let backend = Arc::new(FakeBackend::default());
         backend.slow_hiddify.store(true, Ordering::SeqCst);
         let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
-        let first = engine.start_stack().await.expect("start accepted");
-        let duplicate = engine.start_stack().await.expect("duplicate start");
+        let first = engine.start_stack(None).await.expect("start accepted");
+        let duplicate = engine.start_stack(None).await.expect("duplicate start");
         assert_eq!(first.operation_id, duplicate.operation_id);
         assert_eq!(engine.snapshot().busy, Some(LifecycleBusy::Connecting));
         assert!(matches!(
@@ -2258,7 +2317,7 @@ mod tests {
             Duration::from_millis(40),
             Duration::from_secs(1),
         );
-        engine.start_stack().await.expect("start accepted");
+        engine.start_stack(None).await.expect("start accepted");
         let mut receiver = engine.subscribe();
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -2377,7 +2436,7 @@ mod tests {
         let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
         let mut receiver = engine.subscribe();
         let collect = collect_stages_until(&mut receiver, StackPhase::Running);
-        let start = engine.start_stack();
+        let start = engine.start_stack(None);
         let (stages, accepted) = tokio::join!(collect, start);
         accepted.expect("start accepted");
         assert!(stages.contains(&OperationStage::StartingClient));
@@ -2408,7 +2467,7 @@ mod tests {
         let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
         engine.apply_user_rules().await.expect("stopped");
         assert_eq!(backend.starts.load(Ordering::SeqCst), 0);
-        engine.start_stack().await.expect("start");
+        engine.start_stack(None).await.expect("start");
         engine
             .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
             .await
@@ -2474,7 +2533,7 @@ mod tests {
         let backend = Arc::new(FakeBackend::default());
         backend.hiddify_missing.store(true, Ordering::SeqCst);
         let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
-        engine.start_stack().await.expect("start accepted");
+        engine.start_stack(None).await.expect("start accepted");
         let mut receiver = engine.subscribe();
         tokio::time::timeout(Duration::from_secs(2), async {
             while receiver.borrow().phase != StackPhase::Error {

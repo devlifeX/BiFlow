@@ -2,6 +2,12 @@ import { create } from "zustand";
 import { desktop } from "../api/desktop";
 import { extractHost } from "../lib/host";
 import { missingConnectRequirements } from "../lib/connectRequirements";
+import {
+  failedSideTunnelClients,
+  INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT,
+  nextSideTunnelRetryTimeout,
+  type SideTunnelConnectTimeout,
+} from "../lib/sideTunnelConnect";
 import { ACTION_TIMEOUT_MS, controlsLocked } from "../lib/lifecycle";
 import type {
   AppConfig,
@@ -105,6 +111,8 @@ interface AppStore {
   openRepository: () => Promise<void>;
   clearError: () => void;
   clearInstallGuide: () => void;
+  sideTunnelLastTimeout: SideTunnelConnectTimeout | null;
+  retrySideTunnelConnect: () => Promise<void>;
 }
 
 function message(error: unknown): string {
@@ -172,6 +180,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   settingsApplyNotice: null,
   installGuide: null,
   update: initialUpdateProgress(),
+  sideTunnelLastTimeout: null,
   setPage: (page) => set({ page }),
   initialize: async () => {
     try {
@@ -195,6 +204,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
           actionPending: snapshot.busy != null,
           settingsApplyNotice:
             snapshot.phase === "stopped" ? null : get().settingsApplyNotice,
+          sideTunnelLastTimeout:
+            snapshot.phase === "stopped" || snapshot.phase === "uninitialized"
+              ? null
+              : get().sideTunnelLastTimeout,
         });
         void get().refreshTrafficTotals();
       });
@@ -236,7 +249,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
         await desktop.stop();
       } else {
         await ensureRequiredServices(get, set);
-        await desktop.start();
+        await desktop.start(INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT);
+        set({ sideTunnelLastTimeout: INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT });
       }
     } catch (error) {
       set({
@@ -723,6 +737,34 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
   clearError: () => set({ error: null, routeFallbackNotice: null }),
   clearInstallGuide: () => set({ installGuide: null, error: null }),
+  retrySideTunnelConnect: async () => {
+    const snapshot = get().snapshot;
+    const settings = get().settings;
+    if (!snapshot || !settings || get().actionPending) {
+      return;
+    }
+    const lastTimeout =
+      get().sideTunnelLastTimeout ?? INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT;
+    const nextTimeout = nextSideTunnelRetryTimeout(lastTimeout);
+    if (!nextTimeout) {
+      return;
+    }
+    if (failedSideTunnelClients(snapshot, settings.clients).length === 0) {
+      return;
+    }
+    set({
+      actionPending: true,
+      error: null,
+      sideTunnelLastTimeout: nextTimeout,
+    });
+    try {
+      await desktop.retrySideTunnels(nextTimeout);
+    } catch (error) {
+      set({ error: message(error) });
+    } finally {
+      set({ actionPending: false });
+    }
+  },
 }));
 
 function updateStatusToProgress(status: UpdateStatus): UpdateProgress {

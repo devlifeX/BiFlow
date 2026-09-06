@@ -89,7 +89,7 @@ async fn demo() -> Result<(), CoreError> {
             }
         }
     });
-    engine.start_stack().await?;
+    engine.start_stack(None).await?;
     engine
         .wait_for_phase(StackPhase::Running, Duration::from_secs(5))
         .await?;

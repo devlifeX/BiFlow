@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { desktop } from "../api/desktop";
 import type { BootstrapResult } from "../api/models";
 import { baseSettings } from "../test/fixtures";
+import { createClientInstance } from "../lib/clients";
 import { useAppStore } from "./app";
 
 vi.mock("../api/desktop", () => ({
@@ -10,6 +11,7 @@ vi.mock("../api/desktop", () => ({
     subscribe: vi.fn(async () => () => undefined),
     subscribeUpdateProgress: vi.fn(async () => () => undefined),
     start: vi.fn(),
+    retrySideTunnels: vi.fn(),
     stop: vi.fn(),
     pause: vi.fn(),
     resume: vi.fn(),
@@ -191,6 +193,8 @@ describe("app store", () => {
     await useAppStore.getState().toggleConnection();
     await first;
     expect(desktop.start).toHaveBeenCalledOnce();
+    expect(desktop.start).toHaveBeenCalledWith(15);
+    expect(useAppStore.getState().sideTunnelLastTimeout).toBe(15);
     expect(useAppStore.getState().actionPending).toBe(true);
   });
 
@@ -571,5 +575,39 @@ describe("app store", () => {
     });
     await useAppStore.getState().saveSettings(next);
     expect(useAppStore.getState().settingsApplyNotice).toBeNull();
+  });
+
+  it("escalates side-tunnel retries from 15 to 30 seconds", async () => {
+    vi.mocked(desktop.retrySideTunnels).mockResolvedValue(false);
+    const windscribe = createClientInstance("windscribe");
+    useAppStore.setState({
+      settings: {
+        ...baseSettings(),
+        clients: [...baseSettings().clients, windscribe],
+      },
+      snapshot: {
+        ...boot.snapshot,
+        phase: "running",
+        clients: [
+          ...boot.snapshot.clients,
+          {
+            id: windscribe.id,
+            preset: "windscribe",
+            enabled: true,
+            exit_ip: null,
+            status: {
+              phase: "stopped",
+              message: "timed out",
+              since: "now",
+            },
+          },
+        ],
+      },
+      sideTunnelLastTimeout: 15,
+      actionPending: false,
+    });
+    await useAppStore.getState().retrySideTunnelConnect();
+    expect(desktop.retrySideTunnels).toHaveBeenCalledWith(30);
+    expect(useAppStore.getState().sideTunnelLastTimeout).toBe(30);
   });
 });

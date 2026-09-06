@@ -1,4 +1,5 @@
 import { APP_VERSION } from "../version";
+import { INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT } from "../lib/sideTunnelConnect";
 import type {
   AppConfig,
   BootstrapResult,
@@ -543,6 +544,43 @@ async function simulateInstallProgress(version: string) {
 }
 
 let lifecycleBusy: LifecycleBusy | null = null;
+let mockSideTunnelConnectTimeout: number = INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT;
+
+function sideTunnelStatusForTimeout(
+  timeoutSeconds: number,
+  preset: string,
+): ReturnType<typeof component> {
+  if (timeoutSeconds >= 30) {
+    return component("running", `${preset} side tunnel is ready`);
+  }
+  return component(
+    "stopped",
+    "OpenVPN did not come up before the connect timeout",
+  );
+}
+
+function clientsWithMockSideTunnelOutcomes(timeoutSeconds: number) {
+  return settings.clients.map((client) => {
+    const existing = snapshot.clients.find((item) => item.id === client.id);
+    const base = {
+      id: client.id,
+      preset: client.preset,
+      enabled: client.enabled,
+      exit_ip: existing?.exit_ip ?? null,
+    };
+    if (client.config.kind === "owned_side_tunnel" && client.enabled) {
+      return {
+        ...base,
+        status: sideTunnelStatusForTimeout(timeoutSeconds, client.preset),
+      };
+    }
+    return {
+      ...base,
+      status:
+        existing?.status ?? component("running", `${client.preset} is ready`),
+    };
+  });
+}
 
 function emit(
   phase: StackPhase,
@@ -595,10 +633,7 @@ async function runStart(accepted: OperationAccepted) {
   }
   snapshot = {
     ...snapshot,
-    clients: snapshot.clients.map((client) => ({
-      ...client,
-      status: component("running", `${client.preset} is ready`),
-    })),
+    clients: clientsWithMockSideTunnelOutcomes(mockSideTunnelConnectTimeout),
     mihomo: component("running", "Mihomo controller is ready"),
     tun: component("running", "TUN interface is active"),
     dns: component("running", "DNS listener is active"),
@@ -678,7 +713,9 @@ export const mockApi = {
       },
     ];
   },
-  async start(): Promise<OperationAccepted> {
+  async start(sideTunnelTimeoutSeconds?: number) {
+    mockSideTunnelConnectTimeout =
+      sideTunnelTimeoutSeconds ?? INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT;
     if (lifecycleBusy && lifecycleBusy !== "connecting") {
       throw new Error("operation is already in progress");
     }
@@ -690,6 +727,21 @@ export const mockApi = {
     emit(snapshot.phase, accepted.operation_id, "connecting", "preparing");
     void runStart(accepted);
     return accepted;
+  },
+  async retrySideTunnels(sideTunnelTimeoutSeconds: number): Promise<boolean> {
+    if (!["running", "degraded"].includes(snapshot.phase)) {
+      throw new Error("side tunnel retry requires an active stack");
+    }
+    mockSideTunnelConnectTimeout = sideTunnelTimeoutSeconds;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    snapshot = {
+      ...snapshot,
+      revision: snapshot.revision + 1,
+      clients: clientsWithMockSideTunnelOutcomes(sideTunnelTimeoutSeconds),
+      updated_at: now(),
+    };
+    for (const listener of listeners) listener(structuredClone(snapshot));
+    return sideTunnelTimeoutSeconds >= 30;
   },
   async stop(): Promise<OperationAccepted> {
     if (lifecycleBusy && lifecycleBusy !== "disconnecting") {

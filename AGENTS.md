@@ -120,6 +120,9 @@ If a required command fails or emits a warning from project code, fix it in the 
   wait `timeout_seconds + margin` for that reply only; a flat 5s read on
   Windows turned every slow Windscribe start into `helper request timed out`.
   Use `iran-split-ipc::helper_ipc_reply_timeout` on both platform backends.
+- Connect uses progressive side-tunnel budgets (15s, then 30s, then 60s) with
+  a client-registry retry button; pass the chosen seconds through
+  `start_stack` / `retry_side_tunnels` so the helper and IPC stay aligned.
 - `sr-only` labels are absolutely positioned; without a positioned
   ancestor they anchor to the page and extend
   `documentElement.scrollHeight` once their form scrolls below the fold,

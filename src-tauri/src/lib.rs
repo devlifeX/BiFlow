@@ -873,14 +873,20 @@ fn get_stack_snapshot(app: AppHandle) -> Result<StackSnapshot, String> {
 }
 
 #[tauri::command]
-async fn start_stack(app: AppHandle) -> Result<OperationAccepted, String> {
+async fn start_stack(
+    app: AppHandle,
+    side_tunnel_timeout_seconds: Option<u64>,
+) -> Result<OperationAccepted, String> {
     diagnostics::trace_action("stack", "tauri_command", "start_stack", async move {
-        start_stack_inner(&app).await
+        start_stack_inner(&app, side_tunnel_timeout_seconds).await
     })
     .await
 }
 
-async fn start_stack_inner<R: Runtime>(app: &AppHandle<R>) -> Result<OperationAccepted, String> {
+async fn start_stack_inner<R: Runtime>(
+    app: &AppHandle<R>,
+    side_tunnel_timeout_seconds: Option<u64>,
+) -> Result<OperationAccepted, String> {
     let engine = &services(app)?.engine;
     if engine.snapshot().phase == StackPhase::Running {
         return Ok(OperationAccepted {
@@ -897,9 +903,28 @@ async fn start_stack_inner<R: Runtime>(app: &AppHandle<R>) -> Result<OperationAc
         return Err(error);
     }
     engine
-        .start_stack()
+        .start_stack(side_tunnel_timeout_seconds)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn retry_side_tunnels(
+    app: AppHandle,
+    side_tunnel_timeout_seconds: u64,
+) -> Result<bool, String> {
+    diagnostics::trace_action("stack", "tauri_command", "retry_side_tunnels", async move {
+        let services = services(&app)?;
+        if side_tunnel_timeout_seconds == 0 || side_tunnel_timeout_seconds > 300 {
+            return Err("side tunnel timeout must be between 1 and 300 seconds".into());
+        }
+        services
+            .engine
+            .retry_side_tunnels(side_tunnel_timeout_seconds)
+            .await
+            .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 async fn prepare_stack_start<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
@@ -1028,7 +1053,7 @@ async fn restart_stack(app: AppHandle) -> Result<OperationAccepted, String> {
             .map_err(|error| error.to_string())?;
         services
             .engine
-            .start_stack()
+            .start_stack(None)
             .await
             .map_err(|error| error.to_string())
     })
@@ -2909,7 +2934,7 @@ fn connect_from_tray<R: Runtime>(app: &AppHandle<R>) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = diagnostics::trace_action("stack", "tray_menu", "start_stack", async move {
-            start_stack_inner(&app).await
+            start_stack_inner(&app, Some(15)).await
         })
         .await;
         if let Err(cause) = result {
@@ -3453,6 +3478,7 @@ pub fn run() {
             pause_stack,
             resume_stack,
             restart_stack,
+            retry_side_tunnels,
             cancel_operation,
             get_settings,
             validate_settings,

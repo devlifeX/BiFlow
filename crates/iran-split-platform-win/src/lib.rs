@@ -271,6 +271,8 @@ pub struct WindowsBackend {
     /// Why each client failed at its last start attempt; mirrors Linux so a
     /// stopped card explains itself instead of showing no detail.
     client_failures: Mutex<std::collections::HashMap<iran_split_config::ClientId, String>>,
+    /// Connect-time override for `StartSideTunnel` (progressive 15/30/60s UX).
+    side_tunnel_connect_timeout: Mutex<Option<u64>>,
 }
 
 impl WindowsBackend {
@@ -288,7 +290,15 @@ impl WindowsBackend {
             launched_clients: Mutex::new(Vec::new()),
             client_exit_ips: Mutex::new(std::collections::HashMap::new()),
             client_failures: Mutex::new(std::collections::HashMap::new()),
+            side_tunnel_connect_timeout: Mutex::new(None),
         }
+    }
+
+    async fn effective_side_tunnel_timeout(&self, configured: u64) -> u64 {
+        self.side_tunnel_connect_timeout
+            .lock()
+            .await
+            .unwrap_or(configured)
     }
 
     pub async fn update_config(&self, config: AppConfig) {
@@ -434,6 +444,9 @@ impl WindowsBackend {
         let auth_file = write_side_tunnel_auth(username.as_deref(), password.as_deref())?;
         let proxy = self.ready_proxy_endpoint(ready).await;
         let pinned_remote = self.pin_side_tunnel_remote(&profile, proxy.as_ref()).await;
+        let timeout_seconds = self
+            .effective_side_tunnel_timeout(*start_timeout_seconds)
+            .await;
         let result = self
             .helper_request(HelperCommand::StartSideTunnel {
                 driver: "openvpn".into(),
@@ -441,7 +454,7 @@ impl WindowsBackend {
                 profile,
                 executable,
                 auth_file: auth_file.as_ref().map(|file| file.path().to_path_buf()),
-                timeout_seconds: *start_timeout_seconds,
+                timeout_seconds,
                 pinned_remote,
                 socks_proxy: proxy,
             })
@@ -1204,6 +1217,61 @@ impl PlatformBackend for WindowsBackend {
         self.recover_local_proxy_clients().await
     }
 
+    async fn retry_failed_side_tunnels(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<bool, CoreError> {
+        let config = self.config.read().await.clone();
+        let handles = self.egress_handles.lock().await.clone();
+        let mut recovered = false;
+        for client in side_tunnels_missing_egress(&config, &handles) {
+            if cancel.is_cancelled() {
+                return Err(CoreError::Cancelled);
+            }
+            let ready = self.egress_handles.lock().await.clone();
+            match self
+                .start_openvpn_client(client, cancel.clone(), &ready)
+                .await
+            {
+                Ok(handle) => {
+                    self.client_failures.lock().await.remove(&client.id);
+                    self.egress_handles.lock().await.push(handle);
+                    recovered = true;
+                    info!(
+                        event = "side_tunnel.retry_succeeded",
+                        section = "clients",
+                        initiator = "retry_side_tunnels",
+                        cause = "openvpn_started",
+                        trace_route =
+                            "desktop->engine->windows_platform_backend->retry_side_tunnels",
+                        client = client.spec().id,
+                        "side tunnel started after a longer timeout"
+                    );
+                }
+                Err(error) => {
+                    self.client_failures
+                        .lock()
+                        .await
+                        .insert(client.id, error.to_string());
+                    warn!(
+                        event = "side_tunnel.retry_failed",
+                        section = "clients",
+                        initiator = "retry_side_tunnels",
+                        cause = %error,
+                        trace_route = "desktop->engine->windows_platform_backend->retry_side_tunnels",
+                        client = client.spec().id,
+                        "side tunnel retry did not start"
+                    );
+                }
+            }
+        }
+        Ok(recovered)
+    }
+
+    async fn set_side_tunnel_connect_timeout(&self, seconds: Option<u64>) {
+        *self.side_tunnel_connect_timeout.lock().await = seconds;
+    }
+
     async fn probe_primary_egress(&self) -> Option<Result<(), String>> {
         let config = self.config.read().await.clone();
         let client = config.client(config.default_route.client_id()?)?;
@@ -1582,6 +1650,22 @@ fn platform_error(error: &io::Error) -> CoreError {
 /// Enabled local-proxy clients whose connect-time egress handle is missing —
 /// the only candidates for live recovery (ADR 0076). Side tunnels are owned
 /// processes with their own lifecycle and are never re-attached here.
+fn side_tunnels_missing_egress<'config>(
+    config: &'config AppConfig,
+    handles: &[EgressHandle],
+) -> Vec<&'config ClientInstance> {
+    config
+        .enabled_clients()
+        .into_iter()
+        .filter(|client| client.spec().kind == EgressKind::OwnedSideTunnel)
+        .filter(|client| {
+            !handles
+                .iter()
+                .any(|handle| handle.client_id == client.id && handle.ready)
+        })
+        .collect()
+}
+
 fn clients_missing_egress<'config>(
     config: &'config AppConfig,
     handles: &[EgressHandle],
