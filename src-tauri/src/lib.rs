@@ -2627,29 +2627,74 @@ async fn install_update(app: AppHandle) -> Result<OperationAccepted, String> {
     .await
 }
 
+/// The UI only ever sees `redacted()` configs, so a settings save echoes the
+/// redaction markers back: the password as "[REDACTED]", and profile/executable
+/// paths truncated to their bare file names. Every marker must be swapped back
+/// for the stored value or a save destroys it — a username edit used to
+/// overwrite the full profile path with its basename, leaving the side tunnel
+/// dead with "profile is unreadable" at the next connect.
 fn restore_redacted_secrets(current: &AppConfig, draft: &mut AppConfig) {
+    use iran_split_config::{ClientConfig, ExecutableSetting};
+
+    // A draft path is a redaction echo when it is a bare file name matching
+    // the stored path's file name. A picker always produces absolute paths,
+    // so a genuinely new choice never looks like this.
+    fn is_redacted_echo(draft: &std::path::Path, current: &std::path::Path) -> bool {
+        draft
+            .parent()
+            .is_none_or(|parent| parent.as_os_str().is_empty())
+            && current.file_name() == Some(draft.as_os_str())
+    }
+
+    fn restore_executable(draft: &mut ExecutableSetting, current: &ExecutableSetting) {
+        if let (ExecutableSetting::Path(draft_path), ExecutableSetting::Path(current_path)) =
+            (&*draft, current)
+        {
+            if is_redacted_echo(draft_path, current_path) {
+                *draft = ExecutableSetting::Path(current_path.clone());
+            }
+        }
+    }
+
     for draft_client in &mut draft.clients {
         let Some(current_client) = current.client(draft_client.id) else {
             continue;
         };
-        if let (
-            iran_split_config::ClientConfig::OwnedSideTunnel {
-                password: Some(password),
-                ..
-            },
-            iran_split_config::ClientConfig::OwnedSideTunnel {
-                password: current_password,
-                ..
-            },
-        ) = (&draft_client.config, &current_client.config)
-        {
-            if password == "[REDACTED]" {
-                if let iran_split_config::ClientConfig::OwnedSideTunnel { password: dest, .. } =
-                    &mut draft_client.config
-                {
-                    dest.clone_from(current_password);
+        match (&mut draft_client.config, &current_client.config) {
+            (
+                ClientConfig::OwnedSideTunnel {
+                    profile_path,
+                    executable,
+                    password,
+                    ..
+                },
+                ClientConfig::OwnedSideTunnel {
+                    profile_path: current_profile,
+                    executable: current_executable,
+                    password: current_password,
+                    ..
+                },
+            ) => {
+                if password.as_deref() == Some("[REDACTED]") {
+                    password.clone_from(current_password);
                 }
+                if let (Some(draft_path), Some(current_path)) =
+                    (profile_path.as_ref(), current_profile.as_ref())
+                {
+                    if is_redacted_echo(draft_path, current_path) {
+                        *profile_path = Some(current_path.clone());
+                    }
+                }
+                restore_executable(executable, current_executable);
             }
+            (
+                ClientConfig::LocalProxy { executable, .. },
+                ClientConfig::LocalProxy {
+                    executable: current_executable,
+                    ..
+                },
+            ) => restore_executable(executable, current_executable),
+            _ => {}
         }
     }
 }
@@ -3466,6 +3511,72 @@ mod tests {
         BUNDLE_IDENTIFIER, UPDATE_CHECK_ATTEMPTS, UPDATE_CHECK_FIRST_BACKOFF,
     };
     use std::{fs, time::Duration};
+
+    #[test]
+    fn settings_save_restores_redacted_profile_path_and_password() {
+        use iran_split_config::{AppConfig, ClientConfig, ClientInstance, PresetId};
+        use std::path::PathBuf;
+
+        let mut stored = ClientInstance::from_preset(PresetId::Windscribe);
+        stored.config = ClientConfig::OwnedSideTunnel {
+            profile_path: Some(PathBuf::from("/home/user/vpn/Windscribe-Berlin.ovpn")),
+            executable: iran_split_config::ExecutableSetting::Auto,
+            username: Some("user".into()),
+            password: Some("secret".into()),
+            start_timeout_seconds: 45,
+        };
+        let mut current = AppConfig::default();
+        current.clients.push(stored.clone());
+
+        // The UI edits a redacted copy: bare file name, masked password.
+        let mut draft = current.clone();
+        draft.clients.last_mut().expect("client").config = ClientConfig::OwnedSideTunnel {
+            profile_path: Some(PathBuf::from("Windscribe-Berlin.ovpn")),
+            executable: iran_split_config::ExecutableSetting::Auto,
+            username: Some("edited".into()),
+            password: Some("[REDACTED]".into()),
+            start_timeout_seconds: 45,
+        };
+        super::restore_redacted_secrets(&current, &mut draft);
+        let ClientConfig::OwnedSideTunnel {
+            profile_path,
+            username,
+            password,
+            ..
+        } = &draft.clients.last().expect("client").config
+        else {
+            panic!("side tunnel config expected");
+        };
+        assert_eq!(
+            profile_path.as_deref(),
+            Some(std::path::Path::new(
+                "/home/user/vpn/Windscribe-Berlin.ovpn"
+            )),
+            "a redaction echo must restore the stored absolute path"
+        );
+        assert_eq!(username.as_deref(), Some("edited"));
+        assert_eq!(password.as_deref(), Some("secret"));
+
+        // A genuinely new absolute path must survive untouched.
+        let mut fresh = current.clone();
+        fresh.clients.last_mut().expect("client").config = ClientConfig::OwnedSideTunnel {
+            profile_path: Some(PathBuf::from("/tmp/other.ovpn")),
+            executable: iran_split_config::ExecutableSetting::Auto,
+            username: None,
+            password: None,
+            start_timeout_seconds: 45,
+        };
+        super::restore_redacted_secrets(&current, &mut fresh);
+        let ClientConfig::OwnedSideTunnel { profile_path, .. } =
+            &fresh.clients.last().expect("client").config
+        else {
+            panic!("side tunnel config expected");
+        };
+        assert_eq!(
+            profile_path.as_deref(),
+            Some(std::path::Path::new("/tmp/other.ovpn"))
+        );
+    }
 
     #[test]
     fn update_check_attempt_timeout_bounds_a_hang() {
