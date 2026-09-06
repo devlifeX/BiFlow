@@ -25,12 +25,15 @@ describe("ConnectionActionButton", () => {
     expect(button).toHaveAttribute("data-processing", "false");
     expect(button).toHaveAttribute("data-connect-glow", "available");
     expect(button.className).toMatch(/connect-button-glow/);
-    expect(button.querySelector(".connection-action-label")?.className).toMatch(
-      /break-words/,
+    expect(button.className).toMatch(/\bh-14\b/);
+    const label = button.querySelector(".connection-action-label");
+    expect(label?.className).toMatch(/truncate/);
+    expect(label?.className).toMatch(/whitespace-nowrap/);
+    expect(label?.className).not.toMatch(/break-words/);
+    const reserve = button.querySelector(".connection-action-reserve");
+    expect(reserve?.textContent?.length ?? 0).toBeGreaterThanOrEqual(
+      label?.textContent?.length ?? 0,
     );
-    expect(
-      button.querySelector(".connection-action-label")?.className,
-    ).not.toMatch(/truncate|whitespace-nowrap/);
   });
 
   it("shows the current stage and fill while processing", () => {

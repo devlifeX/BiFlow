@@ -1,8 +1,9 @@
-import type { ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { StackSnapshot } from "../api/models";
 import {
   connectionButtonProgress,
+  longestConnectionActionLabel,
   type ConnectionAction,
 } from "../lib/connectionProgress";
 
@@ -33,6 +34,7 @@ export function ConnectionActionButton({
     actionPending,
   );
   const label = t(progress.labelKey);
+  const reserveLabel = useMemo(() => longestConnectionActionLabel(t), [t]);
   const glow = action === "connect" && !disabled && !progress.processing;
 
   return (
@@ -51,7 +53,7 @@ export function ConnectionActionButton({
         variant === "primary"
           ? "bg-brand text-white shadow-lg shadow-brand/20"
           : "border border-ink/15 bg-surface"
-      } relative isolate inline-flex min-h-14 min-w-0 flex-1 basis-[9.5rem] items-center justify-center rounded-2xl px-5 py-3.5 text-sm font-semibold sm:text-base disabled:cursor-not-allowed disabled:opacity-55`}
+      } relative isolate inline-flex h-14 shrink-0 items-center justify-center rounded-2xl px-5 text-sm font-semibold sm:text-base disabled:cursor-not-allowed disabled:opacity-55`}
     >
       <span className="connection-action-fill-clip" aria-hidden>
         <span
@@ -59,10 +61,19 @@ export function ConnectionActionButton({
           style={{ width: `${progress.percent}%` }}
         />
       </span>
-      <span className="relative z-10 inline-flex min-w-0 max-w-full items-center justify-center gap-2">
-        {icon}
-        <span className="connection-action-label min-w-0 text-center leading-tight break-words">
-          {label}
+      <span className="relative z-10 inline-grid min-w-0 max-w-full">
+        <span
+          className="connection-action-reserve invisible col-start-1 row-start-1 inline-flex items-center gap-2 whitespace-nowrap"
+          aria-hidden
+        >
+          {icon}
+          <span>{reserveLabel}</span>
+        </span>
+        <span className="connection-action-content col-start-1 row-start-1 inline-flex min-w-0 items-center justify-center gap-2 overflow-hidden">
+          <span className="shrink-0">{icon}</span>
+          <span className="connection-action-label min-w-0 truncate whitespace-nowrap text-center">
+            {label}
+          </span>
         </span>
       </span>
     </button>

@@ -34,6 +34,25 @@ const INSTALL_STAGES: Record<string, { percent: number; labelKey: string }> = {
   mihomo: { percent: 20, labelKey: "stages.installMihomo" },
 };
 
+/** Every idle or in-progress label a connection action button can show. */
+export const CONNECTION_ACTION_LABEL_KEYS: readonly string[] = [
+  "connect",
+  "disconnect",
+  "pause",
+  "resume",
+  ...Object.values(STAGE_META).map((stage) => stage.labelKey),
+  ...Object.values(INSTALL_STAGES).map((stage) => stage.labelKey),
+];
+
+export function longestConnectionActionLabel(
+  translate: (key: string) => string,
+): string {
+  return CONNECTION_ACTION_LABEL_KEYS.reduce((longest, key) => {
+    const value = translate(key);
+    return value.length > longest.length ? value : longest;
+  }, "");
+}
+
 export function busyAction(
   busy: LifecycleBusy | null | undefined,
 ): ConnectionAction | null {

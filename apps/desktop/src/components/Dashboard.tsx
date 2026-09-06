@@ -24,9 +24,10 @@ import type {
 } from "../api/models";
 import { controlsLocked, isOperating } from "../lib/lifecycle";
 import { useAppStore } from "../store/app";
-import { AppButton, BUTTON_ICON_PX } from "./AppButton";
+import { BUTTON_ICON_PX } from "./AppButton";
 import { ConnectionActionButton } from "./ConnectionActionButton";
 import { ClientRegistry } from "./ClientRegistry";
+import { LifecycleCancelButton } from "./LifecycleCancelButton";
 import { StatusPill } from "./StatusPill";
 import { isHiddenProductionHost } from "../lib/hiddenHosts";
 import { clientColor } from "../lib/outbound";
@@ -82,13 +83,10 @@ export function Dashboard({ snapshot }: { snapshot: StackSnapshot }) {
         </div>
         <div className="flex w-full max-w-xl flex-wrap gap-3 sm:w-auto sm:flex-nowrap">
           {operating && snapshot.operation_id ? (
-            <AppButton
+            <LifecycleCancelButton
               icon={<X size={BUTTON_ICON_PX} aria-hidden />}
               onClick={() => void cancel()}
-              className="rounded-2xl border border-ink/15 bg-surface px-5 py-3.5 font-semibold"
-            >
-              {t("cancel")}
-            </AppButton>
+            />
           ) : null}
           {active ? (
             <ConnectionActionButton

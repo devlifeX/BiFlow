@@ -70,6 +70,10 @@ border-ink/10 pt-3`, with small buttons
   centered spinner.
 - Pause/Disconnect (and Cancel) stay on one row on `sm+`
   (`sm:flex-nowrap`).
+- Connection lifecycle buttons (`ConnectionActionButton`, cancel) use a fixed
+  `h-14` height, `whitespace-nowrap`, and an invisible reserve label sized to
+  the longest EN/FA idle or stage string so labels never wrap and the control
+  row does not shift while Connect/Pause/Resume/Disconnect progress runs.
 
 ## Accessibility guardrails
 

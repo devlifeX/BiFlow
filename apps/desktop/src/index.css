@@ -222,6 +222,7 @@ select:focus-visible,
 
 .connection-action {
   max-width: 100%;
+  flex-shrink: 0;
 }
 
 .connection-action-fill-clip {

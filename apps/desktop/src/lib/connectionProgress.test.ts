@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { StackSnapshot } from "../api/models";
 import { baseSnapshot } from "../test/fixtures";
 import {
+  CONNECTION_ACTION_LABEL_KEYS,
   connectionButtonProgress,
+  longestConnectionActionLabel,
   resolveOperationStage,
 } from "./connectionProgress";
 
@@ -106,5 +108,18 @@ describe("connectionButtonProgress", () => {
       labelKey: "stages.preparing",
       processing: true,
     });
+  });
+});
+
+describe("longestConnectionActionLabel", () => {
+  it("uses stage labels that are longer than idle connect", () => {
+    const labels = Object.fromEntries(
+      CONNECTION_ACTION_LABEL_KEYS.map((key) => [
+        key,
+        key === "stages.checkReadiness" ? "Check readiness" : "Connect",
+      ]),
+    ) as Record<string, string>;
+    const translate = (key: string) => labels[key] ?? key;
+    expect(longestConnectionActionLabel(translate)).toBe("Check readiness");
   });
 });

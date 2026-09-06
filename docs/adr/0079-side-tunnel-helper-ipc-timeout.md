@@ -68,3 +68,10 @@ engine publishes partial `StackSnapshot` updates as real readiness arrives:
 
 The mock transport mirrors the same staged snapshot updates for Playwright and
 unit tests.
+
+## Fixed connection control layout (6.2.7)
+
+Connect, Pause, Resume, Disconnect, and Cancel use a fixed `h-14` button
+height with `whitespace-nowrap` labels. `ConnectionActionButton` reserves
+width using the longest EN/FA idle or stage string so lifecycle label changes
+do not wrap or shift the control row.

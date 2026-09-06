@@ -5,6 +5,7 @@ import { controlsLocked, isOperating } from "../lib/lifecycle";
 import { useAppStore } from "../store/app";
 import { AppButton, BUTTON_ICON_PX } from "./AppButton";
 import { ConnectionActionButton } from "./ConnectionActionButton";
+import { LifecycleCancelButton } from "./LifecycleCancelButton";
 
 export function BasicDashboard({ snapshot }: { snapshot: StackSnapshot }) {
   const { t } = useTranslation();
@@ -64,13 +65,10 @@ export function BasicDashboard({ snapshot }: { snapshot: StackSnapshot }) {
 
       <div className="flex w-full max-w-xl flex-wrap items-center justify-center gap-3">
         {operating && snapshot.operation_id ? (
-          <AppButton
+          <LifecycleCancelButton
             icon={<X size={BUTTON_ICON_PX} aria-hidden />}
             onClick={() => void cancel()}
-            className="rounded-2xl border border-ink/15 bg-surface px-5 py-3.5 font-semibold"
-          >
-            {t("cancel")}
-          </AppButton>
+          />
         ) : null}
         {active ? (
           <ConnectionActionButton
