@@ -13,8 +13,8 @@ use iran_split_core::{
     RuntimeHealth, TunStatus,
 };
 use iran_split_ipc::{
-    read_frame, validate_envelope, write_frame, Envelope, HelperCommand, HelperReply,
-    PROTOCOL_VERSION,
+    helper_ipc_reply_timeout, read_frame, validate_envelope, write_frame, Envelope, HelperCommand,
+    HelperReply, HELPER_IPC_FRAME_TIMEOUT_SECS, PROTOCOL_VERSION,
 };
 use iran_split_mihomo::{
     generate_config_with_handles, probe_hiddify_egress, validate_with_binary, ControllerClient,
@@ -44,12 +44,7 @@ use uuid::Uuid;
 
 mod system_proxy;
 
-const IPC_TIMEOUT: Duration = Duration::from_secs(5);
-/// Starting a side tunnel is inherently slow: the helper waits for `OpenVPN`
-/// to bring a device up, and may retry through a proxy. The general 5s budget
-/// turned every slow start into "helper request timed out", hiding the real
-/// outcome, so this command gets a budget wider than the helper's own.
-const SIDE_TUNNEL_IPC_TIMEOUT: Duration = Duration::from_secs(60);
+const IPC_TIMEOUT: Duration = Duration::from_secs(HELPER_IPC_FRAME_TIMEOUT_SECS);
 
 #[derive(Debug, Error)]
 pub enum LinuxBackendError {
@@ -159,11 +154,7 @@ impl HelperClient {
             _ => return Err(LinuxBackendError::ResponseMismatch),
         }
         let request = Envelope::new(command);
-        let budget = if matches!(request.payload, HelperCommand::StartSideTunnel { .. }) {
-            SIDE_TUNNEL_IPC_TIMEOUT
-        } else {
-            IPC_TIMEOUT
-        };
+        let budget = helper_ipc_reply_timeout(&request.payload);
         let response = exchange(&mut stream, &request, budget).await?;
         match response.payload {
             HelperReply::Error(error) => Err(LinuxBackendError::Helper {
@@ -1960,5 +1951,15 @@ mod tests {
         fs::write(&binary, b"elf").expect("write");
         let found = discover_local_proxy_binary_in(&PresetId::Happ.spec(), &[], &[binary.clone()]);
         assert_eq!(found, Some(binary));
+    }
+
+    #[test]
+    fn side_tunnel_ipc_budget_follows_the_command_timeout() {
+        let production = include_str!("lib.rs")
+            .split("mod tests {")
+            .next()
+            .expect("production source");
+        assert!(production.contains("helper_ipc_reply_timeout"));
+        assert!(!production.contains("SIDE_TUNNEL_IPC_TIMEOUT"));
     }
 }

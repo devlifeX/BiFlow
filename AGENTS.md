@@ -115,6 +115,11 @@ If a required command fails or emits a warning from project code, fix it in the 
 - An inner timeout must exceed the operations it wraps: the 5s live-apply
   budget raced `validate_with_binary`'s own 10s, so every pin move timed
   out and silently restored the previous document ("moves don't apply").
+- `StartSideTunnel` can legitimately run for the command's
+  `timeout_seconds` while OpenVPN starts. The desktop helper IPC client must
+  wait `timeout_seconds + margin` for that reply only; a flat 5s read on
+  Windows turned every slow Windscribe start into `helper request timed out`.
+  Use `iran-split-ipc::helper_ipc_reply_timeout` on both platform backends.
 - `sr-only` labels are absolutely positioned; without a positioned
   ancestor they anchor to the page and extend
   `documentElement.scrollHeight` once their form scrolls below the fold,

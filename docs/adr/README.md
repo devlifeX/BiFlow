@@ -82,3 +82,4 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0076](./0076-local-proxy-live-recovery.md)                    | Live recovery of local-proxy clients           | Accepted   |
 | [0077](./0077-multi-client-primary-and-hiddify-requirement.md) | Multi-client primaries and Hiddify requirement | Accepted   |
 | [0078](./0078-fast-connect-and-egress-watchdog.md)             | Fast Connect and primary-egress watchdog       | Accepted   |
+| [0079](./0079-side-tunnel-helper-ipc-timeout.md)               | Side-tunnel helper IPC timeout                 | Accepted   |

@@ -1,11 +1,36 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{collections::BTreeMap, io};
+use std::{collections::BTreeMap, io, time::Duration};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+
+/// Per-frame write/connect budget for helper IPC.
+pub const HELPER_IPC_FRAME_TIMEOUT_SECS: u64 = 5;
+
+/// Small margin beyond [`HelperCommand::StartSideTunnel`]'s
+/// `timeout_seconds` so route installation and reply framing do not
+/// race the engine's read deadline after `OpenVPN` comes up.
+pub const HELPER_IPC_SIDE_TUNNEL_MARGIN_SECS: u64 = 15;
+
+/// How long the desktop waits for a helper reply after sending a command.
+///
+/// Most commands finish in milliseconds; side tunnels inherit the caller's
+/// `OpenVPN` budget plus a fixed margin so slow bring-up is not reported as
+/// `"helper request timed out"`.
+#[must_use]
+pub fn helper_ipc_reply_timeout(command: &HelperCommand) -> Duration {
+    match command {
+        HelperCommand::StartSideTunnel {
+            timeout_seconds, ..
+        } => {
+            Duration::from_secs(timeout_seconds.saturating_add(HELPER_IPC_SIDE_TUNNEL_MARGIN_SECS))
+        }
+        _ => Duration::from_secs(HELPER_IPC_FRAME_TIMEOUT_SECS),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Envelope<T> {
@@ -369,5 +394,35 @@ mod tests {
         assert!(HelperCommand::CollectServiceLogs { max_entries: 2_001 }
             .validate()
             .is_err());
+    }
+
+    #[test]
+    fn start_side_tunnel_ipc_budget_tracks_command_timeout() {
+        let command = HelperCommand::StartSideTunnel {
+            driver: "openvpn".into(),
+            client_id: Uuid::new_v4(),
+            profile: "/tmp/profile.ovpn".into(),
+            executable: None,
+            auth_file: None,
+            timeout_seconds: 45,
+            pinned_remote: None,
+            socks_proxy: None,
+        };
+        assert_eq!(
+            helper_ipc_reply_timeout(&command),
+            Duration::from_secs(45 + HELPER_IPC_SIDE_TUNNEL_MARGIN_SECS)
+        );
+    }
+
+    #[test]
+    fn routine_helper_commands_keep_short_ipc_budget() {
+        assert_eq!(
+            helper_ipc_reply_timeout(&HelperCommand::GetServiceStatus),
+            Duration::from_secs(HELPER_IPC_FRAME_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            helper_ipc_reply_timeout(&HelperCommand::StopMihomo),
+            Duration::from_secs(HELPER_IPC_FRAME_TIMEOUT_SECS)
+        );
     }
 }

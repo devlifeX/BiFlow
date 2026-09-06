@@ -20,8 +20,8 @@ use iran_split_core::{
     RuntimeHealth, TunStatus,
 };
 use iran_split_ipc::{
-    read_frame, validate_envelope, write_frame, Envelope, HelperCommand, HelperReply,
-    PROTOCOL_VERSION,
+    helper_ipc_reply_timeout, read_frame, validate_envelope, write_frame, Envelope, HelperCommand,
+    HelperReply, HELPER_IPC_FRAME_TIMEOUT_SECS, PROTOCOL_VERSION,
 };
 use iran_split_mihomo::{
     generate_config_with_handles, probe_hiddify_egress, validate_with_binary, ControllerClient,
@@ -56,7 +56,7 @@ mod system_proxy;
 
 pub const HELPER_PIPE: &str = r"\\.\pipe\iran-split-helper-v1";
 
-const IPC_TIMEOUT: Duration = Duration::from_secs(5);
+const IPC_TIMEOUT: Duration = Duration::from_secs(HELPER_IPC_FRAME_TIMEOUT_SECS);
 const PIPE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const PIPE_RETRY_DELAY: Duration = Duration::from_millis(50);
 const EGRESS_PROBE_BUDGET: Duration = Duration::from_secs(45);
@@ -159,7 +159,7 @@ impl HelperClient {
             client_version: env!("CARGO_PKG_VERSION").into(),
             supported_protocols: vec![PROTOCOL_VERSION],
         });
-        let hello_reply = exchange(&mut pipe, &hello).await?;
+        let hello_reply = exchange(&mut pipe, &hello, IPC_TIMEOUT).await?;
         match hello_reply.payload {
             HelperReply::Hello(reply) if reply.selected_protocol == PROTOCOL_VERSION => {}
             HelperReply::Error(error) => {
@@ -171,7 +171,8 @@ impl HelperClient {
             _ => return Err(WindowsBackendError::ResponseMismatch),
         }
         let request = Envelope::new(command);
-        let response = exchange(&mut pipe, &request).await?;
+        let budget = helper_ipc_reply_timeout(&request.payload);
+        let response = exchange(&mut pipe, &request, budget).await?;
         match response.payload {
             HelperReply::Error(error) => Err(WindowsBackendError::Helper {
                 code: error.code,
@@ -220,11 +221,12 @@ fn is_helper_absent(error: &io::Error) -> bool {
 async fn exchange(
     pipe: &mut NamedPipeClient,
     request: &Envelope<HelperCommand>,
+    budget: Duration,
 ) -> Result<Envelope<HelperReply>, WindowsBackendError> {
     tokio::time::timeout(IPC_TIMEOUT, write_frame(pipe, request))
         .await
         .map_err(|_| WindowsBackendError::Timeout)??;
-    let reply: Envelope<HelperReply> = tokio::time::timeout(IPC_TIMEOUT, read_frame(pipe))
+    let reply: Envelope<HelperReply> = tokio::time::timeout(budget, read_frame(pipe))
         .await
         .map_err(|_| WindowsBackendError::Timeout)??;
     validate_envelope(&reply)?;
@@ -1952,5 +1954,14 @@ mod tests {
         fs::write(&binary, b"mz").expect("write");
         let found = discover_local_proxy_binary_in(&PresetId::Happ.spec(), &[], &[binary.clone()]);
         assert_eq!(found, Some(binary));
+    }
+
+    #[test]
+    fn side_tunnel_ipc_budget_follows_the_command_timeout() {
+        let production = include_str!("lib.rs")
+            .split("mod tests {")
+            .next()
+            .expect("production source");
+        assert!(production.contains("helper_ipc_reply_timeout"));
     }
 }
