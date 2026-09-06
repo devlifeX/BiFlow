@@ -417,10 +417,14 @@ test.describe("primary BiFlow flows", () => {
     await expect(openvpn.getByText("biflow-mock-profile.ovpn")).toBeVisible();
 
     await page.getByRole("button", { name: "Add client" }).click();
-    await page
-      .getByTestId("client-catalog")
-      .getByRole("button", { name: /^Windscribe/ })
-      .click();
+    const windscribeRow = page.getByTestId("client-catalog-windscribe");
+    await expect(
+      windscribeRow.getByRole("button", { name: "Download OpenVPN" }),
+    ).toBeVisible();
+    await expect(
+      windscribeRow.getByRole("button", { name: "Get Windscribe config" }),
+    ).toBeVisible();
+    await windscribeRow.getByRole("button", { name: /^Windscribe/ }).click();
     const windscribe = page.getByTestId("client-card-windscribe");
     await windscribe.getByText("Settings & pinned hosts").click();
     await expect(windscribe.getByText("No file chosen")).toBeVisible();

@@ -2,7 +2,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use iran_split_config::{ClientId, PresetId};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::Arc,
+    time::Duration,
+};
 use thiserror::Error;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -467,6 +472,23 @@ pub trait PlatformBackend: Send + Sync + 'static {
     async fn ensure_clients(&self, cancel: CancellationToken) -> Result<(), CoreError> {
         self.ensure_hiddify(cancel).await
     }
+    /// Re-attaches optional egress clients that came alive after the stack
+    /// started (e.g. the operator connected Happ minutes after Connect failed
+    /// its one-shot probe). Returns `true` when at least one egress was
+    /// verified and its handle added, so the engine can regenerate the live
+    /// Mihomo config and move pinned traffic off the REJECT/DIRECT fallback.
+    async fn recover_clients(&self) -> Result<bool, CoreError> {
+        Ok(false)
+    }
+    /// One end-to-end egress probe of the default-route local proxy.
+    ///
+    /// `None` when the default route is DIRECT, a side tunnel, or has no
+    /// local endpoint. The engine turns a persistent `Err` into a visible
+    /// Degraded phase so "everything green but nothing works" gets a
+    /// user-facing explanation (ADR 0078).
+    async fn probe_primary_egress(&self) -> Option<Result<(), String>> {
+        None
+    }
     async fn prepare_runtime(&self) -> Result<RuntimeGeneration, CoreError>;
     async fn validate_runtime(&self, generation: &RuntimeGeneration) -> Result<(), CoreError>;
     async fn start_core(&self, generation: &RuntimeGeneration) -> Result<(), CoreError>;
@@ -564,7 +586,19 @@ pub struct Engine<B: PlatformBackend> {
     operations: Mutex<HashMap<Uuid, OperationRecord>>,
     pending: Mutex<HashMap<OperationKind, Uuid>>,
     timeouts: OperationTimeouts,
+    /// A client recovered but the live routing refresh has not landed yet;
+    /// the next health tick retries `apply_user_rules` until it succeeds.
+    route_refresh_pending: AtomicBool,
+    /// Consecutive failed end-to-end probes of the default-route egress.
+    primary_egress_failures: AtomicUsize,
+    /// The Degraded phase was set by the egress watchdog (not an operation),
+    /// so a later successful probe may restore Running.
+    probe_degraded: AtomicBool,
 }
+
+/// Health ticks run every ~10s; three consecutive egress failures (~30s)
+/// separate a real outage from one slow probe before the UI goes Degraded.
+const PRIMARY_EGRESS_FAILURE_THRESHOLD: usize = 3;
 
 impl<B: PlatformBackend> std::fmt::Debug for Engine<B> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -599,6 +633,9 @@ impl<B: PlatformBackend> Engine<B> {
             operations: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             timeouts,
+            route_refresh_pending: AtomicBool::new(false),
+            primary_egress_failures: AtomicUsize::new(0),
+            probe_degraded: AtomicBool::new(false),
         });
         runtime.spawn(Self::worker(Arc::clone(&engine), receiver));
         engine
@@ -671,6 +708,143 @@ impl<B: PlatformBackend> Engine<B> {
             trace_route = "engine->platform_backend->runtime_health",
             "runtime health refresh completed"
         );
+    }
+
+    /// Re-checks optional egress clients while the stack is live and
+    /// hot-applies routing when one of them recovered (ADR 0076).
+    ///
+    /// Connect probes a local proxy such as Happ exactly once; when the
+    /// operator connects that client minutes later its pinned domains stay on
+    /// the REJECT/DIRECT fallback until the next full reconnect. This runs on
+    /// the periodic health tick, so a recovered client rejoins routing without
+    /// restarting the stack. A failed apply is retried on the next tick.
+    pub async fn recover_clients(&self) {
+        let snapshot = self.snapshot();
+        if !matches!(snapshot.phase, StackPhase::Running | StackPhase::Degraded) {
+            // Stop/start rebuilds every handle, so a leftover pending refresh
+            // or watchdog streak from a previous run must not fire after the
+            // next connect.
+            self.route_refresh_pending.store(false, Ordering::SeqCst);
+            self.primary_egress_failures.store(0, Ordering::SeqCst);
+            self.probe_degraded.store(false, Ordering::SeqCst);
+            return;
+        }
+        if snapshot.busy.is_some() {
+            return;
+        }
+        self.watch_primary_egress().await;
+        match self.backend.recover_clients().await {
+            Ok(true) => {
+                info!(
+                    event = "client.recovered",
+                    section = "clients",
+                    initiator = "engine",
+                    cause = "egress_probe_succeeded",
+                    trace_route = "engine->platform_backend->recover_clients",
+                    "an optional client egress came back; refreshing live routing"
+                );
+                self.route_refresh_pending.store(true, Ordering::SeqCst);
+            }
+            Ok(false) => {}
+            Err(cause) => info!(
+                event = "client.recover_failed",
+                section = "clients",
+                initiator = "engine",
+                cause = %cause,
+                trace_route = "engine->platform_backend->recover_clients",
+                "optional client recovery check failed; retrying on the next health tick"
+            ),
+        }
+        if !self.route_refresh_pending.load(Ordering::SeqCst) {
+            return;
+        }
+        match self.apply_user_rules().await {
+            Ok(()) => {
+                self.route_refresh_pending.store(false, Ordering::SeqCst);
+                info!(
+                    event = "client.recovery_applied",
+                    section = "clients",
+                    initiator = "engine",
+                    cause = "apply_rules_succeeded",
+                    trace_route = "engine->apply_user_rules->recover_clients",
+                    "live routing now includes the recovered client"
+                );
+            }
+            Err(cause) => warn!(
+                event = "client.recovery_apply_failed",
+                section = "clients",
+                initiator = "engine",
+                cause = %cause,
+                trace_route = "engine->apply_user_rules->recover_clients",
+                "could not refresh live routing after client recovery; retrying on the next health tick"
+            ),
+        }
+    }
+
+    /// End-to-end watchdog for the default-route egress (ADR 0078).
+    ///
+    /// Component checks are TCP-listening only, so a proxy whose upstream
+    /// died still shows green while every MATCH connection blackholes. Three
+    /// consecutive failed egress probes flip the stack to Degraded with a
+    /// retryable error the UI can explain; one successful probe restores
+    /// Running. Routing is never changed here — a false Degraded must not be
+    /// able to cut a working connection.
+    async fn watch_primary_egress(&self) {
+        match self.backend.probe_primary_egress().await {
+            Some(Err(cause)) => {
+                let failures = self.primary_egress_failures.fetch_add(1, Ordering::SeqCst) + 1;
+                warn!(
+                    event = "primary_egress.probe_failed",
+                    section = "runtime_health",
+                    initiator = "engine",
+                    cause = cause.as_str(),
+                    consecutive_failures = failures,
+                    trace_route = "engine->platform_backend->probe_primary_egress",
+                    "the default-route egress did not answer"
+                );
+                if failures >= PRIMARY_EGRESS_FAILURE_THRESHOLD
+                    && self.snapshot().phase == StackPhase::Running
+                {
+                    self.probe_degraded.store(true, Ordering::SeqCst);
+                    let error = CoreError::HiddifyEgressUnavailable.to_app_error(Uuid::new_v4());
+                    self.update(move |snapshot| {
+                        snapshot.phase = StackPhase::Degraded;
+                        snapshot.last_error = Some(error);
+                    });
+                    warn!(
+                        event = "stack.degraded_by_watchdog",
+                        section = "runtime_health",
+                        initiator = "engine",
+                        cause = "primary_egress_unreachable",
+                        trace_route = "engine->watch_primary_egress->degraded",
+                        "stack marked Degraded: the primary client is open but its egress is dead"
+                    );
+                }
+            }
+            Some(Ok(())) => {
+                self.primary_egress_failures.store(0, Ordering::SeqCst);
+                if self.probe_degraded.swap(false, Ordering::SeqCst)
+                    && self.snapshot().phase == StackPhase::Degraded
+                {
+                    self.update(|snapshot| {
+                        snapshot.phase = StackPhase::Running;
+                        snapshot.last_error = None;
+                    });
+                    info!(
+                        event = "stack.recovered_by_watchdog",
+                        section = "runtime_health",
+                        initiator = "engine",
+                        cause = "primary_egress_reachable",
+                        trace_route = "engine->watch_primary_egress->recovered",
+                        "primary egress answers again; stack restored to Running"
+                    );
+                }
+            }
+            None => {
+                self.primary_egress_failures.store(0, Ordering::SeqCst);
+                self.probe_degraded.store(false, Ordering::SeqCst);
+            }
+        }
     }
 
     /// Queues startup reconciliation of helper and network state.
@@ -1631,6 +1805,9 @@ mod tests {
         slow_hiddify: AtomicBool,
         hiddify_missing: AtomicBool,
         helper_missing: AtomicBool,
+        recover_ready: AtomicBool,
+        /// 0 = no primary to probe, 1 = egress OK, 2 = egress dead.
+        primary_probe: AtomicUsize,
         starts: AtomicUsize,
         cleanups: AtomicUsize,
         proxy_stops: AtomicUsize,
@@ -1723,6 +1900,18 @@ mod tests {
             Ok(())
         }
 
+        async fn recover_clients(&self) -> Result<bool, CoreError> {
+            Ok(self.recover_ready.swap(false, Ordering::SeqCst))
+        }
+
+        async fn probe_primary_egress(&self) -> Option<Result<(), String>> {
+            match self.primary_probe.load(Ordering::SeqCst) {
+                1 => Some(Ok(())),
+                2 => Some(Err("egress dead".into())),
+                _ => None,
+            }
+        }
+
         async fn prepare_runtime(&self) -> Result<RuntimeGeneration, CoreError> {
             Ok(RuntimeGeneration {
                 generation_id: Uuid::new_v4(),
@@ -1805,6 +1994,73 @@ mod tests {
                 warnings: vec![],
             })
         }
+    }
+
+    #[tokio::test]
+    async fn egress_watchdog_degrades_after_a_streak_and_recovers() {
+        let backend = Arc::new(FakeBackend::default());
+        let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+        engine.start_stack().await.expect("start accepted");
+        engine
+            .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
+            .await
+            .expect("running");
+
+        // Two failures are treated as a possible transient: still Running.
+        backend.primary_probe.store(2, Ordering::SeqCst);
+        engine.recover_clients().await;
+        engine.recover_clients().await;
+        assert_eq!(engine.snapshot().phase, StackPhase::Running);
+        assert!(engine.snapshot().last_error.is_none());
+
+        // The third consecutive failure flips to Degraded with an error the
+        // UI can explain ("open but not connected"), without touching routing.
+        engine.recover_clients().await;
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.phase, StackPhase::Degraded);
+        let error = snapshot.last_error.expect("watchdog error");
+        assert!(error.retryable);
+        assert_eq!(backend.starts.load(Ordering::SeqCst), 1, "no reroute");
+
+        // One good probe restores Running and clears the error.
+        backend.primary_probe.store(1, Ordering::SeqCst);
+        engine.recover_clients().await;
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.phase, StackPhase::Running);
+        assert!(snapshot.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn recovered_client_triggers_a_live_routing_refresh() {
+        let backend = Arc::new(FakeBackend::default());
+        let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+
+        // Nothing happens while the stack is down.
+        backend.recover_ready.store(true, Ordering::SeqCst);
+        engine.recover_clients().await;
+        assert_eq!(backend.starts.load(Ordering::SeqCst), 0);
+        assert!(backend.recover_ready.load(Ordering::SeqCst));
+
+        engine.start_stack().await.expect("start accepted");
+        engine
+            .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
+            .await
+            .expect("running");
+        assert_eq!(backend.starts.load(Ordering::SeqCst), 1);
+
+        // A quiet tick applies nothing.
+        backend.recover_ready.store(false, Ordering::SeqCst);
+        engine.recover_clients().await;
+        assert_eq!(backend.starts.load(Ordering::SeqCst), 1);
+
+        // A recovered client re-stages and hot-applies the runtime config.
+        backend.recover_ready.store(true, Ordering::SeqCst);
+        engine.recover_clients().await;
+        assert_eq!(backend.starts.load(Ordering::SeqCst), 2);
+
+        // The pending flag is consumed: the next tick stays quiet.
+        engine.recover_clients().await;
+        assert_eq!(backend.starts.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

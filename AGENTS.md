@@ -117,6 +117,14 @@ If a required command fails or emits a warning from project code, fix it in the 
 - Preset defaults are guesses until verified on a real install: Happ runs
   an Xray core listening on 10808 (not 3067), and its process bypass must
   include `xray`/`v2ray` or the core's own egress loops back into the TUN.
+  Debian installs `/usr/bin/happ` → `/opt/happ/bin/Happ`; a case-sensitive
+  PATH lookup for `Happ` reports "executable was not found". Search
+  well-known paths and ignore filename case. `google.com` is a debug-only
+  reachability/live-host label — release builds still route it, they just
+  omit the hostname from the UI.
+- Windscribe rides the OpenVPN driver. The missing-binary banner and
+  catalog row must offer the OpenVPN installer page, not only the
+  Windscribe config generator. Do not tell operators to run the Windscribe GUI.
 - Backticks inside a double-quoted shell search pattern are command
   substitutions. Quote `rg` patterns with single quotes when they contain
   Markdown code spans so validation does not accidentally execute the text.
@@ -260,3 +268,8 @@ already in progress"`. Cache the last `UpdateInfo` (never log asset URLs).
 - Playwright `getByRole("cell", { name: "DIRECT" })` on live connections matches both the route badge and the outbound `<select>` that also lists DIRECT. Assert the badge `span` or the select value.
 - `test_route` is `RuleSet::decide` only. A DIRECT pin can still resolve to Mihomo fake-ip (`198.18.0.0/16`) while Cloudflare DoH answers the lookup. Default DIRECT DNS is Mihomo fake-ip; do not emit `nameserver-policy` or DIRECT `fake-ip-filter` entries unless the operator picks Shecan/Electro/Radar/Mokhaberat/Custom. Pause/Connect after a DNS or pin change. Log the preset name, never custom resolver IPs. Radar `10.x` is a valid DIRECT DNS address; do not reject all RFC1918 resolvers. Schema 2 rewrites the 3.9 implicit Shecan default back to fake-ip. Schema 3 moves `[hiddify]` into `clients` and sets `default_route` to that Hiddify id.
 - Do not add `Outbound::OpenVpn`, `openvpn_rules`, `AppConfig.openvpn`, `StackSnapshot.openvpn`, or `starting_openvpn`. New products are catalog presets on `LocalProxy` or `OwnedSideTunnel`. YAML group names come from the ClientId, never the UI label.
+- `docs/adr/README.md` is Prettier-formatted like every markdown table: a hand-added index row with different column widths fails `pnpm check`. Run `pnpm exec prettier --write` on any touched ADR/markdown before the gate.
+- `createClientInstance`'s `id` parameter inherits `crypto.randomUUID()`'s template-literal type, so a plain literal like `"happ-id"` fails `tsc`. Use UUID-shaped constants (`"11111111-1111-1111-1111-111111111111"`) in tests.
+- An import used only by `mod tests` in a platform crate (e.g. `DefaultRoute`) must live inside the test module; at the top of the file the lib build fails `-D unused-imports`.
+- Happ and v2rayN share catalog default port 10808 and `generate_config` rejects duplicate local ports (`configured ports must be unique`). Multi-client tests (and operators) must move one client off the shared default.
+- Backend tests that call ensure/recover paths must `config.clients.clear()` before pushing fixtures: the default Hiddify instance points at 127.0.0.1:12334, and on a dev host a real Hiddify may be listening — the test would probe a live proxy.

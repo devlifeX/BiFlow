@@ -26,6 +26,7 @@ import type {
 } from "../api/models";
 import type { ConnectionGroup } from "../lib/connectionGroups";
 import { formatGroupIps, groupConnections } from "../lib/connectionGroups";
+import { isHiddenProductionHost } from "../lib/hiddenHosts";
 import { extractHost } from "../lib/host";
 import type { SortState } from "../lib/tableSort";
 import { sortRows, toggleSort } from "../lib/tableSort";
@@ -551,7 +552,10 @@ function ReachabilityCard() {
     void runCheck();
   }, [connected]);
 
-  const selected = rows?.find((row) => row.id === selectedId) ?? null;
+  const visibleRows = (rows ?? []).filter(
+    (row) => !isHiddenProductionHost(row.domain),
+  );
+  const selected = visibleRows.find((row) => row.id === selectedId) ?? null;
   const statusLabel = (status: ReachabilityResult["status"]) =>
     status === "ok"
       ? t("reachability.statusOk")
@@ -587,7 +591,7 @@ function ReachabilityCard() {
         <p className="mt-3 text-sm text-muted">{t("reachability.checking")}</p>
       ) : (
         <ul className="mt-3 divide-y divide-ink/10 rounded-xl border border-ink/10">
-          {rows.map((row) => {
+          {visibleRows.map((row) => {
             const inner = (
               <>
                 <span
@@ -766,7 +770,9 @@ function LiveConnectionsCard() {
     };
   }, [live]);
 
-  const groups = groupConnections(rows);
+  const groups = groupConnections(
+    rows.filter((row) => !isHiddenProductionHost(row.host)),
+  );
   const ruleOptions = [
     ...new Set(groups.map((group) => group.rule).filter(Boolean)),
   ].sort();

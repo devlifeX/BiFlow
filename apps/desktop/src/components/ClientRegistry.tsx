@@ -6,10 +6,14 @@ import type { ClientInstance, PinnedRoute, RuleListMeta } from "../api/models";
 import { canAddPreset, enabledClients, profileFileName } from "../lib/clients";
 import { defaultRouteFromKey, outboundKey } from "../lib/outbound";
 import {
+  downloadLinksFor,
   downloadUrlFor,
   PRESETS,
   presetById,
+  runtimeBinarySpec,
+  type PresetDownloadLink,
   type PresetId,
+  type PresetSpec,
 } from "../lib/presets";
 import { useAppStore } from "../store/app";
 import { StatusPill } from "./StatusPill";
@@ -107,6 +111,7 @@ export function ClientRegistry() {
             return (
               <div
                 key={preset.id}
+                data-testid={`client-catalog-${preset.id}`}
                 className={`flex flex-col rounded-xl border border-ink/10 p-3 text-start ${
                   disabled ? "opacity-60" : ""
                 }`}
@@ -135,16 +140,11 @@ export function ClientRegistry() {
                   ) : null}
                 </button>
                 {preset.status === "working" ? (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      void desktop.openUrl(downloadUrlFor(preset, platform))
-                    }
-                    className="mt-2 inline-flex items-center gap-1 self-start text-xs font-semibold text-brand underline"
-                  >
-                    <Download size={12} aria-hidden />
-                    {t("downloadInstall")}
-                  </button>
+                  <PresetDownloadButtons
+                    spec={preset}
+                    platform={platform}
+                    className="mt-2"
+                  />
                 ) : null}
               </div>
             );
@@ -345,14 +345,11 @@ function ClientCard({
       {binaryInstalled === false ? (
         <p className="mt-2 flex flex-wrap items-center gap-2 rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs">
           {t("binaryMissing")}
-          <button
-            type="button"
-            onClick={() => void desktop.openUrl(downloadUrlFor(spec, platform))}
-            className="inline-flex items-center gap-1 font-semibold text-brand underline"
-          >
-            <Download size={12} aria-hidden />
-            {t("downloadInstall")}
-          </button>
+          <DownloadLinkButton
+            spec={runtimeBinarySpec(spec.id) ?? spec}
+            platform={platform}
+            labelKey="downloadOpenVpn"
+          />
         </p>
       ) : null}
 
@@ -362,14 +359,11 @@ function ClientCard({
         </summary>
 
         <p className="mt-2 text-xs text-muted">{spec.installHint}</p>
-        <button
-          type="button"
-          onClick={() => void desktop.openUrl(downloadUrlFor(spec, platform))}
-          className="mt-1 inline-flex items-center gap-1 text-xs font-semibold text-brand underline"
-        >
-          <Download size={12} aria-hidden />
-          {t("downloadInstall")}
-        </button>
+        <PresetDownloadButtons
+          spec={spec}
+          platform={platform}
+          className="mt-1"
+        />
 
         <label className="mt-3 flex items-center gap-2 text-xs text-muted">
           <input
@@ -630,5 +624,52 @@ function ClientCard({
         </div>
       </details>
     </article>
+  );
+}
+
+function PresetDownloadButtons({
+  spec,
+  platform,
+  className,
+}: {
+  spec: PresetSpec;
+  platform: string;
+  className?: string;
+}) {
+  return (
+    <div
+      className={`flex flex-wrap items-center gap-x-3 gap-y-1 ${className ?? ""}`}
+    >
+      {downloadLinksFor(spec).map((link) => (
+        <DownloadLinkButton
+          key={link.id}
+          spec={link.spec}
+          platform={platform}
+          labelKey={link.labelKey}
+        />
+      ))}
+    </div>
+  );
+}
+
+function DownloadLinkButton({
+  spec,
+  platform,
+  labelKey,
+}: {
+  spec: PresetSpec;
+  platform: string;
+  labelKey: PresetDownloadLink["labelKey"];
+}) {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      onClick={() => void desktop.openUrl(downloadUrlFor(spec, platform))}
+      className="inline-flex items-center gap-1 self-start text-xs font-semibold text-brand underline"
+    >
+      <Download size={12} aria-hidden />
+      {t(labelKey)}
+    </button>
   );
 }

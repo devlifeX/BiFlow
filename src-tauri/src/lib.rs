@@ -699,27 +699,48 @@ async fn check_reachability(
         "check_reachability",
         async move {
             let services = services(&app)?;
-            // Route VPN-path probes through Hiddify only while it is actually
-            // serving; otherwise fall back to direct requests so the UI can
-            // say "connect first" instead of showing a phantom proxy failure.
+            // Route VPN-path probes through a running local proxy. google.com
+            // prefers Happ; facebook.com prefers Hiddify. Mixed-port probes
+            // would silently hit DIRECT because the desktop is bypassed.
             let snapshot = services.engine.snapshot();
-            let proxy_running = snapshot.clients.iter().any(|client| {
-                client.preset == PresetId::Hiddify && client.status.phase == ComponentPhase::Running
-            });
-            let proxy = if proxy_running {
-                let config = services
-                    .config_store
-                    .load()
-                    .or_else(|_| services.config_store.load_or_create())
-                    .map_err(|error| error.to_string())?;
-                Some(config.hiddify_endpoint())
-            } else {
-                None
-            };
-            Ok(reachability::check_all(proxy).await)
+            let config = services
+                .config_store
+                .load()
+                .or_else(|_| services.config_store.load_or_create())
+                .map_err(|error| error.to_string())?;
+            Ok(reachability::check_all(reachability_proxies(&snapshot, &config)).await)
         },
     )
     .await
+}
+
+fn client_preset_running(snapshot: &StackSnapshot, preset: PresetId) -> bool {
+    snapshot
+        .clients
+        .iter()
+        .any(|client| client.preset == preset && client.status.phase == ComponentPhase::Running)
+}
+
+fn running_local_proxy(
+    snapshot: &StackSnapshot,
+    config: &AppConfig,
+    preset: PresetId,
+) -> Option<(String, u16)> {
+    if !client_preset_running(snapshot, preset) {
+        return None;
+    }
+    config
+        .clients
+        .iter()
+        .find(|client| client.enabled && client.preset == preset)
+        .and_then(iran_split_clients::local_proxy_endpoint)
+}
+
+fn reachability_proxies(snapshot: &StackSnapshot, config: &AppConfig) -> reachability::VpnProxies {
+    reachability::VpnProxies {
+        default: running_local_proxy(snapshot, config, PresetId::Hiddify),
+        happ: running_local_proxy(snapshot, config, PresetId::Happ),
+    }
 }
 
 const TRAFFIC_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -808,7 +829,13 @@ async fn list_active_connections(app: AppHandle) -> Result<Vec<ActiveConnection>
                 count = rows.len(),
                 "listed live Mihomo connections without host values"
             );
-            Ok(rows)
+            Ok(if reachability::hide_google_in_this_build() {
+                rows.into_iter()
+                    .filter(|row| !reachability::is_google_host(&row.host))
+                    .collect()
+            } else {
+                rows
+            })
         },
     )
     .await
@@ -3168,6 +3195,9 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
                     | StackPhase::Error
             ) {
                 health_engine.refresh_health().await;
+                // ADR 0076: a local proxy (e.g. Happ) the operator connected
+                // after Connect rejoins live routing without a full reconnect.
+                health_engine.recover_clients().await;
             }
         }
     });

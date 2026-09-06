@@ -365,6 +365,54 @@ impl LinuxBackend {
         Ok(())
     }
 
+    /// Live recovery for local proxies that were dead at connect time
+    /// (ADR 0076). Connect probes each optional client exactly once; when the
+    /// operator starts and connects Happ minutes later, its pinned domains
+    /// stay on the REJECT/DIRECT fallback until this re-check attaches the
+    /// missing egress handle. The engine then hot-applies the routing.
+    async fn recover_local_proxy_clients(&self) -> Result<bool, CoreError> {
+        let config = self.config.read().await.clone();
+        let handles = self.egress_handles.lock().await.clone();
+        let mut recovered = false;
+        for client in clients_missing_egress(&config, &handles) {
+            let Some((host, port)) = local_proxy_endpoint(client) else {
+                continue;
+            };
+            if !Self::tcp_listening(&host, port).await {
+                continue;
+            }
+            match probe_hiddify_egress(&host, port, Duration::from_secs(3)).await {
+                Ok(exit_ip) => {
+                    let Some(handle) = synthesized_local_handle(client) else {
+                        continue;
+                    };
+                    info!(
+                        event = "client.recovered_egress",
+                        section = "clients",
+                        initiator = "recover_clients",
+                        cause = "egress_probe_succeeded",
+                        trace_route = "engine->linux_platform_backend->recover_clients",
+                        client = client.spec().id,
+                        "a local proxy egress became reachable after connect"
+                    );
+                    self.client_exit_ips.lock().await.insert(client.id, exit_ip);
+                    self.egress_handles.lock().await.push(handle);
+                    recovered = true;
+                }
+                Err(error) => info!(
+                    event = "client.recover_probe_failed",
+                    section = "clients",
+                    initiator = "recover_clients",
+                    cause = %error,
+                    trace_route = "engine->linux_platform_backend->recover_clients",
+                    client = client.spec().id,
+                    "local proxy port answers but its egress is not usable yet"
+                ),
+            }
+        }
+        Ok(recovered)
+    }
+
     async fn start_hiddify_client(
         &self,
         client: &ClientInstance,
@@ -373,9 +421,22 @@ impl LinuxBackend {
     ) -> Result<EgressHandle, CoreError> {
         let config = self.config.read().await.clone();
         self.launch_hiddify_if_needed(&config, cancel).await?;
-        let exit_ip = self
-            .probe_hiddify_until_ready(&config, cancel.clone())
-            .await?;
+        let exit_ip = if required {
+            self.probe_hiddify_until_ready(&config, cancel.clone())
+                .await?
+        } else {
+            // An optional Hiddify must not hold Connect for the 45s retry
+            // window (measured 21s stalls in production debug.log). One quick
+            // probe decides; ADR 0076 recovery attaches it once it serves.
+            let (host, port) = config.hiddify_endpoint();
+            probe_hiddify_egress(&host, port, Duration::from_secs(3))
+                .await
+                .map_err(|error| {
+                    CoreError::Platform(format!(
+                        "hiddify egress probe failed on {host}:{port}: {error}"
+                    ))
+                })?
+        };
         self.client_exit_ips
             .lock()
             .await
@@ -399,8 +460,20 @@ impl LinuxBackend {
             ));
         };
         if !Self::tcp_listening(&host, port).await {
-            self.launch_local_proxy_if_needed(client, &host, port, cancel)
-                .await?;
+            if required {
+                self.launch_local_proxy_if_needed(client, &host, port, cancel)
+                    .await?;
+            } else {
+                // An optional client must not block Connect while its port
+                // opens (production debug.log shows ~18s stalls waiting for
+                // Happ). Launch it and let ADR 0076 recovery attach the
+                // egress once it actually serves.
+                self.spawn_local_proxy(client).await?;
+                return Err(CoreError::Platform(format!(
+                    "{} was launched in the background; its egress joins routing once it serves",
+                    client.spec().id
+                )));
+            }
         }
         // ADR 0018: every local-proxy egress is verified before the TUN starts,
         // so pinned or MATCH traffic cannot blackhole into a dead proxy.
@@ -423,22 +496,10 @@ impl LinuxBackend {
             .ok_or_else(|| CoreError::ConfigInvalid("local proxy handle is missing".into()))
     }
 
-    /// Launches a local-proxy client that is not listening yet (same
-    /// contract as the Hiddify auto-launch): configured path first, then the
-    /// preset's process names on PATH; waits until the port answers.
-    async fn launch_local_proxy_if_needed(
-        &self,
-        client: &ClientInstance,
-        host: &str,
-        port: u16,
-        cancel: &CancellationToken,
-    ) -> Result<(), CoreError> {
-        let ClientConfig::LocalProxy {
-            executable,
-            start_timeout_seconds,
-            ..
-        } = &client.config
-        else {
+    /// Resolves and spawns a local-proxy binary without waiting for its port:
+    /// configured path first, then the preset's process names on PATH.
+    async fn spawn_local_proxy(&self, client: &ClientInstance) -> Result<(), CoreError> {
+        let ClientConfig::LocalProxy { executable, .. } = &client.config else {
             return Err(CoreError::ConfigInvalid(
                 "client is not a local proxy".into(),
             ));
@@ -461,6 +522,29 @@ impl LinuxBackend {
             .spawn()
             .map_err(|error| CoreError::Platform(error.to_string()))?;
         self.launched_clients.lock().await.push(child);
+        Ok(())
+    }
+
+    /// Launches a required local-proxy client that is not listening yet and
+    /// waits until the port answers (the default-route egress must be
+    /// verified before the TUN starts).
+    async fn launch_local_proxy_if_needed(
+        &self,
+        client: &ClientInstance,
+        host: &str,
+        port: u16,
+        cancel: &CancellationToken,
+    ) -> Result<(), CoreError> {
+        let ClientConfig::LocalProxy {
+            start_timeout_seconds,
+            ..
+        } = &client.config
+        else {
+            return Err(CoreError::ConfigInvalid(
+                "client is not a local proxy".into(),
+            ));
+        };
+        self.spawn_local_proxy(client).await?;
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs((*start_timeout_seconds).max(1));
         loop {
@@ -893,6 +977,30 @@ impl PlatformBackend for LinuxBackend {
         self.ensure_enabled_clients(cancel).await
     }
 
+    async fn recover_clients(&self) -> Result<bool, CoreError> {
+        self.recover_local_proxy_clients().await
+    }
+
+    async fn probe_primary_egress(&self) -> Option<Result<(), String>> {
+        let config = self.config.read().await.clone();
+        let client = config.client(config.default_route.client_id()?)?;
+        if !client.enabled || client.spec().kind != EgressKind::LocalProxy {
+            return None;
+        }
+        let (host, port) = local_proxy_endpoint(client)?;
+        Some(
+            probe_hiddify_egress(&host, port, Duration::from_secs(3))
+                .await
+                .map(|_| ())
+                .map_err(|error| {
+                    format!(
+                        "{} egress probe failed on {host}:{port}: {error}",
+                        client.spec().id
+                    )
+                }),
+        )
+    }
+
     async fn prepare_runtime(&self) -> Result<RuntimeGeneration, CoreError> {
         let config = self.config.read().await.clone();
         let generation_id = Uuid::new_v4();
@@ -1220,18 +1328,90 @@ fn platform_error(error: &std::io::Error) -> CoreError {
 
 /// Finds a launchable binary for a `LocalProxy` preset by its process names
 /// (wildcards excluded), preferring the first — the GUI app — over cores.
+///
+/// Debian's Happ package installs `/usr/bin/happ` → `/opt/happ/bin/Happ`.
+/// PATH lookup must ignore case and must also try those well-known paths,
+/// because a packaged Tauri PATH often omits `/usr/bin` or only has the
+/// lowercase symlink.
 fn discover_local_proxy_binary(spec: &iran_split_config::PresetSpec) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    let directories: Vec<PathBuf> = std::env::split_paths(&path).collect();
-    for name in spec.linux_bypass.iter().filter(|name| !name.contains('*')) {
-        for directory in &directories {
-            let candidate = directory.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
+    let directories = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    discover_local_proxy_binary_in(spec, &directories, &well_known_local_proxy_binaries(spec))
+}
+
+fn well_known_local_proxy_binaries(spec: &iran_split_config::PresetSpec) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if spec.preset == PresetId::Happ {
+        candidates.extend([
+            PathBuf::from("/usr/bin/happ"),
+            PathBuf::from("/usr/bin/Happ"),
+            PathBuf::from("/opt/happ/bin/Happ"),
+            PathBuf::from("/opt/happ/bin/happ"),
+        ]);
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = PathBuf::from(home);
+            candidates.push(home.join(".local/bin/happ"));
+            candidates.push(home.join(".local/bin/Happ"));
+        }
+    }
+    candidates
+}
+
+fn discover_local_proxy_binary_in(
+    spec: &iran_split_config::PresetSpec,
+    directories: &[PathBuf],
+    extra: &[PathBuf],
+) -> Option<PathBuf> {
+    if let Some(path) = extra.iter().find(|path| path.is_file()) {
+        return Some(path.clone());
+    }
+    let names = spec
+        .linux_bypass
+        .iter()
+        .copied()
+        .filter(|name| !name.contains('*'));
+    for name in names {
+        for directory in directories {
+            if let Some(path) = file_named_ignore_case(directory, name) {
+                return Some(path);
             }
         }
     }
     None
+}
+
+/// Enabled local-proxy clients whose connect-time egress handle is missing —
+/// the only candidates for live recovery (ADR 0076). Side tunnels are owned
+/// processes with their own lifecycle and are never re-attached here.
+fn clients_missing_egress<'config>(
+    config: &'config AppConfig,
+    handles: &[EgressHandle],
+) -> Vec<&'config ClientInstance> {
+    config
+        .enabled_clients()
+        .into_iter()
+        .filter(|client| client.spec().kind == EgressKind::LocalProxy)
+        .filter(|client| !handles.iter().any(|handle| handle.client_id == client.id))
+        .collect()
+}
+
+fn file_named_ignore_case(directory: &Path, name: &str) -> Option<PathBuf> {
+    let exact = directory.join(name);
+    if exact.is_file() {
+        return Some(exact);
+    }
+    let entries = fs::read_dir(directory).ok()?;
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|file| file.to_str())
+                    .is_some_and(|file| file.eq_ignore_ascii_case(name))
+        })
 }
 
 /// Writes `username\npassword` to a 0600 temp file for `--auth-user-pass`.
@@ -1354,6 +1534,7 @@ fn hash_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iran_split_config::DefaultRoute;
 
     #[tokio::test]
     async fn preparation_publishes_only_allowlisted_generation_files() {
@@ -1417,5 +1598,183 @@ mod tests {
         fs::write(&appimage, b"elf").expect("appimage");
         let found = LinuxBackend::discover_hiddify(&AppConfig::default(), directory.path());
         assert_eq!(found, Some(appimage));
+    }
+
+    fn test_paths(directory: &tempfile::TempDir) -> LinuxPaths {
+        LinuxPaths {
+            socket_path: directory.path().join("helper.sock"),
+            user_data_dir: directory.path().join("user-data"),
+            system_runtime_dir: PathBuf::from("/var/lib/iran-split"),
+            resources_dir: directory.path().join("resources"),
+            rules_cache_dir: directory.path().join("rules-cache"),
+            mihomo_binary: directory.path().join("mihomo"),
+        }
+    }
+
+    /// A Happ instance that can never start: closed port and missing binary.
+    fn unstartable_happ(directory: &tempfile::TempDir) -> ClientInstance {
+        let mut happ = ClientInstance::from_preset(PresetId::Happ);
+        if let ClientConfig::LocalProxy {
+            host,
+            port,
+            executable,
+            ..
+        } = &mut happ.config
+        {
+            *host = "127.0.0.1".into();
+            *port = 1;
+            *executable = ExecutableSetting::Path(directory.path().join("missing-happ"));
+        }
+        happ
+    }
+
+    #[tokio::test]
+    async fn a_required_primary_that_cannot_start_aborts_connect() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let happ = unstartable_happ(&directory);
+        let mut config = AppConfig::default();
+        config.clients.clear();
+        config.default_route = DefaultRoute::client(happ.id);
+        config.clients.push(happ);
+        let backend = LinuxBackend::new(config, test_paths(&directory));
+        let error = backend
+            .ensure_enabled_clients(CancellationToken::new())
+            .await;
+        assert!(error.is_err(), "the default-route client must be required");
+    }
+
+    #[tokio::test]
+    async fn an_optional_local_proxy_launch_does_not_wait_for_its_port() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut config = AppConfig::default();
+        config.clients.clear();
+        config.default_route = DefaultRoute::Direct;
+        // A binary that exists and exits immediately: the old code waited the
+        // full start timeout for port 1 to open; the new code returns at once.
+        let mut happ = ClientInstance::from_preset(PresetId::Happ);
+        if let ClientConfig::LocalProxy {
+            host,
+            port,
+            executable,
+            start_timeout_seconds,
+            ..
+        } = &mut happ.config
+        {
+            *host = "127.0.0.1".into();
+            *port = 1;
+            *executable = ExecutableSetting::Path(PathBuf::from("/usr/bin/true"));
+            *start_timeout_seconds = 45;
+        }
+        config.clients.push(happ);
+        let backend = LinuxBackend::new(config, test_paths(&directory));
+        let started = tokio::time::Instant::now();
+        backend
+            .ensure_enabled_clients(CancellationToken::new())
+            .await
+            .expect("optional launch must not abort connect");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "optional client launch must not block on its port"
+        );
+        assert!(backend.egress_handles.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_dead_optional_secondary_does_not_block_connect() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut config = AppConfig::default();
+        // Drop the default Hiddify instance so a live dev-host proxy is
+        // never probed; DIRECT keeps every remaining client optional.
+        config.clients.clear();
+        config.default_route = DefaultRoute::Direct;
+        config.clients.push(unstartable_happ(&directory));
+        let backend = LinuxBackend::new(config, test_paths(&directory));
+        backend
+            .ensure_enabled_clients(CancellationToken::new())
+            .await
+            .expect("optional client failure must not abort connect");
+        assert!(backend.egress_handles.lock().await.is_empty());
+    }
+
+    #[test]
+    fn recovery_candidates_are_enabled_local_proxies_without_handles() {
+        let mut config = AppConfig::default();
+        let happ = ClientInstance::from_preset(PresetId::Happ);
+        let happ_id = happ.id;
+        let mut disabled = ClientInstance::from_preset(PresetId::V2rayn);
+        disabled.enabled = false;
+        let side_tunnel = ClientInstance::from_preset(PresetId::Windscribe);
+        config.clients.push(happ);
+        config.clients.push(disabled);
+        config.clients.push(side_tunnel);
+
+        // The default Hiddify instance and Happ lack handles; only the
+        // disabled client and the side tunnel are excluded.
+        let candidates = clients_missing_egress(&config, &[]);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().any(|client| client.id == happ_id));
+
+        // A handle from connect (or a previous recovery) removes a candidate.
+        let handled = config
+            .clients
+            .iter()
+            .find(|client| client.id == happ_id)
+            .and_then(synthesized_local_handle)
+            .expect("happ handle");
+        let candidates = clients_missing_egress(&config, &[handled]);
+        assert!(!candidates.iter().any(|client| client.id == happ_id));
+    }
+
+    #[tokio::test]
+    async fn recovery_skips_clients_whose_port_is_closed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let paths = LinuxPaths {
+            socket_path: directory.path().join("helper.sock"),
+            user_data_dir: directory.path().join("user-data"),
+            system_runtime_dir: PathBuf::from("/var/lib/iran-split"),
+            resources_dir: directory.path().join("resources"),
+            rules_cache_dir: directory.path().join("rules-cache"),
+            mihomo_binary: directory.path().join("mihomo"),
+        };
+        let mut config = AppConfig::default();
+        // Drop the default Hiddify instance: on a dev host a real Hiddify may
+        // be listening, and this test must never probe a live proxy.
+        config.clients.clear();
+        // Port 1 on loopback is never listening in the test environment.
+        let mut happ = ClientInstance::from_preset(PresetId::Happ);
+        if let ClientConfig::LocalProxy { host, port, .. } = &mut happ.config {
+            *host = "127.0.0.1".into();
+            *port = 1;
+        }
+        config.clients.push(happ);
+        let backend = LinuxBackend::new(config, paths);
+        let recovered = backend
+            .recover_local_proxy_clients()
+            .await
+            .expect("recovery");
+        assert!(!recovered);
+        assert!(backend.egress_handles.lock().await.is_empty());
+    }
+
+    #[test]
+    fn discovers_happ_when_path_filename_is_lowercase() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binary = directory.path().join("happ");
+        fs::write(&binary, b"elf").expect("write");
+        let found = discover_local_proxy_binary_in(
+            &PresetId::Happ.spec(),
+            &[directory.path().to_path_buf()],
+            &[],
+        );
+        assert_eq!(found, Some(binary));
+    }
+
+    #[test]
+    fn discovers_happ_from_a_well_known_install_path() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binary = directory.path().join("Happ");
+        fs::write(&binary, b"elf").expect("write");
+        let found = discover_local_proxy_binary_in(&PresetId::Happ.spec(), &[], &[binary.clone()]);
+        assert_eq!(found, Some(binary));
     }
 }

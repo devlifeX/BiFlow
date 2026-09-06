@@ -66,6 +66,8 @@ const resources = {
       clientPort: "Local port",
       stopWithStack: "Stop with stack",
       downloadInstall: "Download & install",
+      downloadOpenVpn: "Download OpenVPN",
+      downloadWindscribeConfig: "Get Windscribe config",
       directTooltip:
         "Traffic leaves over your physical network with your real IP.",
       clientDetails: "Settings & pinned hosts",
@@ -359,6 +361,8 @@ const resources = {
       clientPort: "پورت محلی",
       stopWithStack: "توقف همراه پشته",
       downloadInstall: "دانلود و نصب",
+      downloadOpenVpn: "دانلود OpenVPN",
+      downloadWindscribeConfig: "دانلود کانفیگ Windscribe",
       directTooltip: "ترافیک با آی‌پی واقعی از شبکه فیزیکی خارج می‌شود.",
       clientDetails: "تنظیمات و میزبان‌های سنجاق‌شده",
       pinSummary: "{{domains}} دامنه · {{ips}} آی‌پی",

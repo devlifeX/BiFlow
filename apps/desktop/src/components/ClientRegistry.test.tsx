@@ -25,6 +25,9 @@ const pickProfileFile = vi.mocked(desktop.pickProfileFile);
 beforeEach(() => {
   pickProfileFile.mockReset();
   pickProfileFile.mockResolvedValue("/tmp/office.ovpn");
+  vi.mocked(desktop.clientBinaryInstalled).mockReset();
+  vi.mocked(desktop.clientBinaryInstalled).mockResolvedValue(true);
+  vi.mocked(desktop.openUrl).mockClear();
   const openvpn = createClientInstance(
     "openvpn",
     "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -136,6 +139,41 @@ describe("ClientRegistry profile picker", () => {
         password: null,
         start_timeout_seconds: 45,
       },
+    );
+  });
+
+  it("offers OpenVPN download on the Windscribe catalog and missing-binary banner", async () => {
+    vi.mocked(desktop.clientBinaryInstalled).mockResolvedValue(false);
+    render(<ClientRegistry />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Add client" }));
+    const row = screen.getByTestId("client-catalog-windscribe");
+    expect(
+      within(row).getByRole("button", { name: "Download OpenVPN" }),
+    ).toBeVisible();
+    expect(
+      within(row).getByRole("button", { name: "Get Windscribe config" }),
+    ).toBeVisible();
+    await userEvent.click(
+      within(row).getByRole("button", { name: "Download OpenVPN" }),
+    );
+    expect(desktop.openUrl).toHaveBeenCalledWith(
+      "https://openvpn.net/community-downloads/",
+    );
+
+    const card = screen.getByTestId("client-card-windscribe");
+    expect(
+      await within(card).findByText("OpenVPN is not installed on this system."),
+    ).toBeVisible();
+    const missingBanner = within(card)
+      .getByText("OpenVPN is not installed on this system.")
+      .closest("p");
+    if (!missingBanner) throw new Error("expected the OpenVPN missing banner");
+    await userEvent.click(
+      within(missingBanner).getByRole("button", { name: "Download OpenVPN" }),
+    );
+    expect(desktop.openUrl).toHaveBeenLastCalledWith(
+      "https://openvpn.net/community-downloads/",
     );
   });
 

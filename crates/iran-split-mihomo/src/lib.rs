@@ -1342,6 +1342,136 @@ mod tests {
         assert!(!direct.yaml.contains("dns-query#client-"));
     }
 
+    fn pin(domain: &str, outbound: Outbound) -> PinnedRoute {
+        PinnedRoute {
+            target: DirectTarget::Domain(domain.into()),
+            outbound,
+            list_id: None,
+            resolved_ips: vec![],
+            created_at: chrono::Utc::now(),
+            refreshed_at: None,
+        }
+    }
+
+    #[test]
+    fn match_routes_to_a_non_hiddify_primary_without_hiddify_present() {
+        // The operator removed Hiddify and promoted Happ to the default
+        // route: MATCH and DoH must follow the Happ group.
+        let mut app = AppConfig::default();
+        app.clients.clear();
+        let happ =
+            iran_split_config::ClientInstance::from_preset(iran_split_config::PresetId::Happ);
+        app.default_route = DefaultRoute::client(happ.id);
+        app.clients.push(happ);
+        let handle = synthesized_local_handle(&app.clients[0]).expect("happ handle");
+        let group = app.clients[0].group_name();
+        let generated = generate_config_with_handles(
+            &app,
+            Platform::Linux,
+            &paths(),
+            &RoutePinsDocument::default(),
+            &[handle],
+        )
+        .expect("config");
+        assert!(generated.yaml.contains(&format!("MATCH,{group}")));
+        assert!(generated.yaml.contains(&format!("dns-query#{group}")));
+        assert!(!generated.yaml.contains("MATCH,REJECT"));
+        assert!(!generated.yaml.contains("MATCH,DIRECT"));
+    }
+
+    #[test]
+    fn dead_secondary_keeps_match_on_the_healthy_primary() {
+        // Hiddify stays primary; a second client (Happ) is enabled but its
+        // egress never came up. Only the dead client's pins fail closed —
+        // unmatched traffic must keep flowing through the primary.
+        let mut app = AppConfig::default();
+        let happ =
+            iran_split_config::ClientInstance::from_preset(iran_split_config::PresetId::Happ);
+        let happ_id = happ.id;
+        app.clients.push(happ);
+        let hiddify_group = app.clients[0].group_name();
+        let hiddify_handle = synthesized_local_handle(&app.clients[0]).expect("hiddify handle");
+        let pinned = RoutePinsDocument {
+            revision: 1,
+            pins: vec![
+                pin("pinned-to-happ.example", Outbound::client(happ_id)),
+                pin(
+                    "pinned-to-hiddify.example",
+                    Outbound::client(app.clients[0].id),
+                ),
+            ],
+            lists: vec![],
+        };
+        let generated = generate_config_with_handles(
+            &app,
+            Platform::Linux,
+            &paths(),
+            &pinned,
+            &[hiddify_handle],
+        )
+        .expect("config");
+        assert!(generated.yaml.contains(&format!("MATCH,{hiddify_group}")));
+        assert!(generated
+            .yaml
+            .contains("DOMAIN-SUFFIX,pinned-to-happ.example,REJECT"));
+        assert!(generated.yaml.contains(&format!(
+            "DOMAIN-SUFFIX,pinned-to-hiddify.example,{hiddify_group}"
+        )));
+    }
+
+    #[test]
+    fn three_ready_clients_route_their_own_pins() {
+        // Hiddify primary plus two more local proxies, all serving: every
+        // pin follows its own client group and MATCH stays on the primary.
+        let mut app = AppConfig::default();
+        for preset in [
+            iran_split_config::PresetId::Happ,
+            iran_split_config::PresetId::V2rayn,
+        ] {
+            app.clients
+                .push(iran_split_config::ClientInstance::from_preset(preset));
+        }
+        // Happ and v2rayN share the catalog default 10808; generation
+        // enforces unique local ports, so the third client moves off it.
+        if let iran_split_config::ClientConfig::LocalProxy { port, .. } = &mut app.clients[2].config
+        {
+            *port = 10_809;
+        }
+        let handles: Vec<EgressHandle> = app
+            .clients
+            .iter()
+            .map(|client| synthesized_local_handle(client).expect("handle"))
+            .collect();
+        let pinned = RoutePinsDocument {
+            revision: 1,
+            pins: app
+                .clients
+                .iter()
+                .enumerate()
+                .map(|(index, client)| {
+                    pin(
+                        &format!("client-{index}.example"),
+                        Outbound::client(client.id),
+                    )
+                })
+                .collect(),
+            lists: vec![],
+        };
+        let generated =
+            generate_config_with_handles(&app, Platform::Linux, &paths(), &pinned, &handles)
+                .expect("config");
+        for (index, client) in app.clients.iter().enumerate() {
+            assert!(
+                generated.yaml.contains(&format!(
+                    "DOMAIN-SUFFIX,client-{index}.example,{}",
+                    client.group_name()
+                )),
+                "pin {index} must route to its own client group"
+            );
+        }
+        assert!(generated.yaml.contains(&match_needle(&app)));
+    }
+
     #[test]
     fn domain_pins_emit_most_specific_first_across_outbounds() {
         let app = AppConfig::default();

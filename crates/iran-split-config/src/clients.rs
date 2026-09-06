@@ -221,6 +221,7 @@ const HAPP_SPEC: PresetSpec = PresetSpec {
     status: PresetStatus::Working,
     default_host: "127.0.0.1",
     // Happ runs an Xray core; its local SOCKS listener defaults to 10808.
+    // The GUI process is `Happ`; Debian's PATH symlink is lowercase `happ`.
     default_port: Some(10_808),
     linux_bypass: &["Happ", "*Happ*", "sing-box", "xray", "v2ray"],
     windows_bypass: &[

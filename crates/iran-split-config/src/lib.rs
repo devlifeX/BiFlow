@@ -799,6 +799,22 @@ mod tests {
     }
 
     #[test]
+    fn happ_primary_without_hiddify_is_a_valid_config() {
+        // The operator removed the Hiddify instance and promoted Happ to the
+        // default route: the config must validate and the legacy Hiddify
+        // endpoint helpers must fall back to catalog defaults, not panic.
+        let mut config = AppConfig::default();
+        config.clients.clear();
+        let happ = ClientInstance::from_preset(PresetId::Happ);
+        config.default_route = DefaultRoute::client(happ.id);
+        config.clients.push(happ);
+        assert!(config.validate().is_empty());
+        assert!(config.hiddify_client().is_none());
+        assert_eq!(config.enabled_clients().len(), 1);
+        assert_eq!(config.hiddify_endpoint(), ("127.0.0.1".into(), 12_334));
+    }
+
+    #[test]
     fn mokhaberat_and_radar_presets_are_valid_addresses() {
         let mut config = AppConfig::default();
         config.mihomo.direct_dns_preset = DirectDnsPreset::Mokhaberat;

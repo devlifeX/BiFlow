@@ -421,6 +421,53 @@ impl WindowsBackend {
         Ok(())
     }
 
+    /// Live recovery for local proxies that were dead at connect time
+    /// (ADR 0076). Mirrors the Linux backend: one egress re-check per health
+    /// tick once the client's port answers; on success its handle joins
+    /// routing and the engine hot-applies the runtime config.
+    async fn recover_local_proxy_clients(&self) -> Result<bool, CoreError> {
+        let config = self.config.read().await.clone();
+        let handles = self.egress_handles.lock().await.clone();
+        let mut recovered = false;
+        for client in clients_missing_egress(&config, &handles) {
+            let Some((host, port)) = local_proxy_endpoint(client) else {
+                continue;
+            };
+            if !Self::tcp_listening(&host, port).await {
+                continue;
+            }
+            match probe_hiddify_egress(&host, port, Duration::from_secs(3)).await {
+                Ok(exit_ip) => {
+                    let Some(handle) = synthesized_local_handle(client) else {
+                        continue;
+                    };
+                    info!(
+                        event = "client.recovered_egress",
+                        section = "clients",
+                        initiator = "recover_clients",
+                        cause = "egress_probe_succeeded",
+                        trace_route = "engine->windows_platform_backend->recover_clients",
+                        client = client.spec().id,
+                        "a local proxy egress became reachable after connect"
+                    );
+                    self.client_exit_ips.lock().await.insert(client.id, exit_ip);
+                    self.egress_handles.lock().await.push(handle);
+                    recovered = true;
+                }
+                Err(error) => info!(
+                    event = "client.recover_probe_failed",
+                    section = "clients",
+                    initiator = "recover_clients",
+                    cause = %error,
+                    trace_route = "engine->windows_platform_backend->recover_clients",
+                    client = client.spec().id,
+                    "local proxy port answers but its egress is not usable yet"
+                ),
+            }
+        }
+        Ok(recovered)
+    }
+
     async fn hiddify_listening(config: &AppConfig) -> bool {
         let (host, port) = config.hiddify_endpoint();
         Self::tcp_listening(&host, port).await
@@ -758,9 +805,22 @@ impl WindowsBackend {
     ) -> Result<EgressHandle, CoreError> {
         let config = self.config.read().await.clone();
         self.launch_hiddify_if_needed(&config, cancel).await?;
-        let exit_ip = self
-            .probe_hiddify_until_ready(&config, cancel.clone())
-            .await?;
+        let exit_ip = if required {
+            self.probe_hiddify_until_ready(&config, cancel.clone())
+                .await?
+        } else {
+            // An optional Hiddify must not hold Connect for the 45s retry
+            // window; one quick probe decides and ADR 0076 recovery attaches
+            // it later once it really serves.
+            let (host, port) = config.hiddify_endpoint();
+            probe_hiddify_egress(&host, port, Duration::from_secs(3))
+                .await
+                .map_err(|error| {
+                    CoreError::Platform(format!(
+                        "hiddify egress probe failed on {host}:{port}: {error}"
+                    ))
+                })?
+        };
         self.client_exit_ips
             .lock()
             .await
@@ -784,8 +844,19 @@ impl WindowsBackend {
             ));
         };
         if !Self::tcp_listening(&host, port).await {
-            self.launch_local_proxy_if_needed(client, &host, port, cancel)
-                .await?;
+            if required {
+                self.launch_local_proxy_if_needed(client, &host, port, cancel)
+                    .await?;
+            } else {
+                // An optional client must not block Connect while its port
+                // opens. Launch it and let ADR 0076 recovery attach the
+                // egress once it actually serves.
+                self.spawn_local_proxy(client).await?;
+                return Err(CoreError::Platform(format!(
+                    "{} was launched in the background; its egress joins routing once it serves",
+                    client.spec().id
+                )));
+            }
         }
         // ADR 0018: every local-proxy egress is verified before the TUN starts,
         // so pinned or MATCH traffic cannot blackhole into a dead proxy.
@@ -808,22 +879,10 @@ impl WindowsBackend {
             .ok_or_else(|| CoreError::ConfigInvalid("local proxy handle is missing".into()))
     }
 
-    /// Launches a local-proxy client that is not listening yet (same
-    /// contract as the Hiddify auto-launch): configured path first, then the
-    /// preset's process names on PATH; waits until the port answers.
-    async fn launch_local_proxy_if_needed(
-        &self,
-        client: &ClientInstance,
-        host: &str,
-        port: u16,
-        cancel: &CancellationToken,
-    ) -> Result<(), CoreError> {
-        let ClientConfig::LocalProxy {
-            executable,
-            start_timeout_seconds,
-            ..
-        } = &client.config
-        else {
+    /// Resolves and spawns a local-proxy binary without waiting for its port:
+    /// configured path first, then the preset's process names on PATH.
+    async fn spawn_local_proxy(&self, client: &ClientInstance) -> Result<(), CoreError> {
+        let ClientConfig::LocalProxy { executable, .. } = &client.config else {
             return Err(CoreError::ConfigInvalid(
                 "client is not a local proxy".into(),
             ));
@@ -846,6 +905,29 @@ impl WindowsBackend {
             .spawn()
             .map_err(|error| CoreError::Platform(error.to_string()))?;
         self.launched_clients.lock().await.push(child);
+        Ok(())
+    }
+
+    /// Launches a required local-proxy client that is not listening yet and
+    /// waits until the port answers (the default-route egress must be
+    /// verified before the TUN starts).
+    async fn launch_local_proxy_if_needed(
+        &self,
+        client: &ClientInstance,
+        host: &str,
+        port: u16,
+        cancel: &CancellationToken,
+    ) -> Result<(), CoreError> {
+        let ClientConfig::LocalProxy {
+            start_timeout_seconds,
+            ..
+        } = &client.config
+        else {
+            return Err(CoreError::ConfigInvalid(
+                "client is not a local proxy".into(),
+            ));
+        };
+        self.spawn_local_proxy(client).await?;
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs((*start_timeout_seconds).max(1));
         loop {
@@ -1004,6 +1086,30 @@ impl PlatformBackend for WindowsBackend {
 
     async fn ensure_clients(&self, cancel: CancellationToken) -> Result<(), CoreError> {
         self.ensure_enabled_clients(cancel).await
+    }
+
+    async fn recover_clients(&self) -> Result<bool, CoreError> {
+        self.recover_local_proxy_clients().await
+    }
+
+    async fn probe_primary_egress(&self) -> Option<Result<(), String>> {
+        let config = self.config.read().await.clone();
+        let client = config.client(config.default_route.client_id()?)?;
+        if !client.enabled || client.spec().kind != EgressKind::LocalProxy {
+            return None;
+        }
+        let (host, port) = local_proxy_endpoint(client)?;
+        Some(
+            probe_hiddify_egress(&host, port, Duration::from_secs(3))
+                .await
+                .map(|_| ())
+                .map_err(|error| {
+                    format!(
+                        "{} egress probe failed on {host}:{port}: {error}",
+                        client.spec().id
+                    )
+                }),
+        )
     }
 
     async fn prepare_runtime(&self) -> Result<RuntimeGeneration, CoreError> {
@@ -1361,14 +1467,31 @@ fn platform_error(error: &io::Error) -> CoreError {
 
 /// Finds a launchable binary for a `LocalProxy` preset by its process names
 /// (wildcards excluded), preferring the first — the GUI app — over cores.
+/// Enabled local-proxy clients whose connect-time egress handle is missing —
+/// the only candidates for live recovery (ADR 0076). Side tunnels are owned
+/// processes with their own lifecycle and are never re-attached here.
+fn clients_missing_egress<'config>(
+    config: &'config AppConfig,
+    handles: &[EgressHandle],
+) -> Vec<&'config ClientInstance> {
+    config
+        .enabled_clients()
+        .into_iter()
+        .filter(|client| client.spec().kind == EgressKind::LocalProxy)
+        .filter(|client| !handles.iter().any(|handle| handle.client_id == client.id))
+        .collect()
+}
+
 fn discover_local_proxy_binary(spec: &iran_split_config::PresetSpec) -> Option<PathBuf> {
-    let names: Vec<&str> = spec
-        .windows_bypass
-        .iter()
-        .copied()
-        .filter(|name| !name.contains('*'))
-        .collect();
-    let mut directories: Vec<PathBuf> = Vec::new();
+    discover_local_proxy_binary_in(
+        spec,
+        &local_proxy_search_dirs(),
+        &well_known_local_proxy_binaries(spec),
+    )
+}
+
+fn local_proxy_search_dirs() -> Vec<PathBuf> {
+    let mut directories = Vec::new();
     for variable in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"] {
         if let Some(root) = std::env::var_os(variable) {
             let root = PathBuf::from(root);
@@ -1379,9 +1502,43 @@ fn discover_local_proxy_binary(spec: &iran_split_config::PresetSpec) -> Option<P
     if let Some(path) = std::env::var_os("PATH") {
         directories.extend(std::env::split_paths(&path));
     }
+    directories
+}
+
+fn well_known_local_proxy_binaries(spec: &iran_split_config::PresetSpec) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if spec.preset != PresetId::Happ {
+        return candidates;
+    }
+    for variable in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(root) = std::env::var_os(variable) {
+            let root = PathBuf::from(root);
+            candidates.push(root.join("Happ").join("Happ.exe"));
+            candidates.push(root.join("Programs").join("Happ").join("Happ.exe"));
+        }
+    }
+    candidates
+}
+
+fn discover_local_proxy_binary_in(
+    spec: &iran_split_config::PresetSpec,
+    directories: &[PathBuf],
+    extra: &[PathBuf],
+) -> Option<PathBuf> {
+    if let Some(path) = extra.iter().find(|path| path.is_file()) {
+        return Some(path.clone());
+    }
+    let names = spec
+        .windows_bypass
+        .iter()
+        .copied()
+        .filter(|name| !name.contains('*'));
     for name in names {
-        let stem = name.trim_end_matches(".exe");
-        for directory in &directories {
+        let stem = Path::new(name)
+            .file_stem()
+            .and_then(|file| file.to_str())
+            .unwrap_or(name);
+        for directory in directories {
             for candidate in [directory.join(name), directory.join(stem).join(name)] {
                 if candidate.is_file() {
                     return Some(candidate);
@@ -1507,9 +1664,10 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<(), CoreError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_helper_absent, is_pipe_busy, tun_enabled, AppConfig, WindowsBackend, WindowsPaths,
-        HELPER_PIPE,
+        discover_local_proxy_binary_in, is_helper_absent, is_pipe_busy, tun_enabled, AppConfig,
+        WindowsBackend, WindowsPaths, HELPER_PIPE,
     };
+    use iran_split_config::PresetId;
     use iran_split_core::PlatformBackend;
     use serde_json::json;
     use std::{fs, io, path::PathBuf};
@@ -1675,5 +1833,14 @@ mod tests {
         assert!(candidates
             .iter()
             .all(|path| !path.to_string_lossy().contains("..")));
+    }
+
+    #[test]
+    fn discovers_happ_from_a_well_known_install_path() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binary = directory.path().join("Happ.exe");
+        fs::write(&binary, b"mz").expect("write");
+        let found = discover_local_proxy_binary_in(&PresetId::Happ.spec(), &[], &[binary.clone()]);
+        assert_eq!(found, Some(binary));
     }
 }

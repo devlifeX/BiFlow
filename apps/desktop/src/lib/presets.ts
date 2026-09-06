@@ -140,3 +140,47 @@ export function presetById(id: PresetId): PresetSpec {
 export function downloadUrlFor(spec: PresetSpec, platform: string): string {
   return platform === "windows" ? spec.downloads.windows : spec.downloads.linux;
 }
+
+export type PresetDownloadLabel =
+  | "downloadInstall"
+  | "downloadOpenVpn"
+  | "downloadWindscribeConfig";
+
+export interface PresetDownloadLink {
+  id: string;
+  spec: PresetSpec;
+  labelKey: PresetDownloadLabel;
+}
+
+/**
+ * Windscribe rides the OpenVPN driver, so its catalog/card must offer the
+ * OpenVPN installer as well as the Windscribe config generator.
+ */
+export function downloadLinksFor(spec: PresetSpec): PresetDownloadLink[] {
+  if (spec.id === "windscribe") {
+    return [
+      {
+        id: "openvpn",
+        spec: presetById("openvpn"),
+        labelKey: "downloadOpenVpn",
+      },
+      {
+        id: "windscribe-config",
+        spec,
+        labelKey: "downloadWindscribeConfig",
+      },
+    ];
+  }
+  if (spec.id === "openvpn") {
+    return [{ id: spec.id, spec, labelKey: "downloadOpenVpn" }];
+  }
+  return [{ id: spec.id, spec, labelKey: "downloadInstall" }];
+}
+
+/** System binary this preset actually launches, when it is not itself. */
+export function runtimeBinarySpec(id: PresetId): PresetSpec | null {
+  if (id === "openvpn" || id === "windscribe") {
+    return presetById("openvpn");
+  }
+  return null;
+}
