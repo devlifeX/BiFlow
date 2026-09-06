@@ -134,14 +134,14 @@ flowchart TB
   Helper --> Net[TUN and routes]
 ```
 
-| Piece       | Role                                                                                                                                                                                 |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **UI**      | Basic or Advanced shell, Connect/Pause/Resume/Disconnect, install missing apps, cloud and custom DIRECT rules, flow tests, About/updates. No shell and no general filesystem access. |
-| **Engine**  | Owns configuration, rule decisions, Mihomo YAML, and rollback. Talks to the UI only through the typed API.                                                                           |
+| Piece       | Role                                                                                                                                                                                                                 |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **UI**      | Basic or Advanced shell, Connect/Pause/Resume/Disconnect, install missing apps, cloud and custom DIRECT rules, flow tests, About/updates. No shell and no general filesystem access.                                 |
+| **Engine**  | Owns configuration, rule decisions, Mihomo YAML, and rollback. Talks to the UI only through the typed API.                                                                                                           |
 | **Helper**  | Applies TUN and routes. The split stack accepts generation IDs and hashes only; OpenVPN side-tunnel profiles are audited and executables must be regular, non-symlink files — never shell strings or arbitrary URLs. |
-| **Mihomo**  | Enforces split routing. Controller binds to loopback with a generated secret.                                                                                                        |
-| **Clients** | Upstream proxies you already use — Hiddify, Happ, v2rayN, Nekoray, Shadowsocks, or an OpenVPN side tunnel. BiFlow does not log into them or replace them.                            |
-| **Rules**   | Bundled Iran lists, optional refresh from `devlifeX/BiFlow`, plus your extra DIRECT domains and IPs.                                                                                 |
+| **Mihomo**  | Enforces split routing. Controller binds to loopback with a generated secret.                                                                                                                                        |
+| **Clients** | Upstream proxies you already use — Hiddify, Happ, v2rayN, Nekoray, Shadowsocks, or an OpenVPN side tunnel. BiFlow does not log into them or replace them.                                                            |
+| **Rules**   | Bundled Iran lists, optional refresh from `devlifeX/BiFlow`, plus your extra DIRECT domains and IPs.                                                                                                                 |
 
 Internal Rust crates still use the `iran-split-*` names. The product name, window
 title, and install identifiers are **BiFlow**.

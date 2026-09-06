@@ -19,7 +19,9 @@ while IFS= read -r file; do
     *.rs | */Cargo.toml | Cargo.toml | Cargo.lock) has_rust=true ;;
   esac
   case "${file}" in
-    apps/* | scripts/* | e2e/* | package.json | pnpm-lock.yaml | version | *.mjs | *.ts | *.tsx) has_frontend=true ;;
+    # pnpm check runs prettier --check over the whole repo, so any file
+    # prettier formats (md/json/yml/css/html included) must trigger it.
+    apps/* | scripts/* | e2e/* | package.json | pnpm-lock.yaml | version | *.mjs | *.ts | *.tsx | *.md | *.json | *.yml | *.yaml | *.css | *.html) has_frontend=true ;;
   esac
 done <<<"${staged}"
 

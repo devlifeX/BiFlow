@@ -444,6 +444,8 @@ async fn terminate(child: &mut Child) -> Result<(), HelperServiceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the unix end-to-end test builds a Supervisor.
+    #[cfg(unix)]
     use crate::HelperSettings;
     use std::fs;
 
