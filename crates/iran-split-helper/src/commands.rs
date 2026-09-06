@@ -122,16 +122,18 @@ async fn execute(supervisor: &Supervisor, command: HelperCommand) -> HelperReply
                 executable,
                 auth_file,
                 timeout_seconds,
+                pinned_remote,
             } => HelperReply::SideTunnel(
                 supervisor
-                    .start_side_tunnel(
-                        &driver,
+                    .start_side_tunnel(crate::openvpn::SideTunnelRequest {
+                        driver: &driver,
                         client_id,
-                        &profile,
-                        executable.as_deref(),
-                        auth_file.as_deref(),
+                        profile: &profile,
+                        executable: executable.as_deref(),
+                        auth_file: auth_file.as_deref(),
                         timeout_seconds,
-                    )
+                        pinned_remote,
+                    })
                     .await?,
             ),
             HelperCommand::StopSideTunnel { client_id } => {

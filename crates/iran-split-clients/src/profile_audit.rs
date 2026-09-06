@@ -43,6 +43,8 @@ pub enum OpenVpnProfileError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenVpnProfileFacts {
     pub remote_hosts: Vec<String>,
+    /// Port of the first `remote` line, needed to pin a resolved address.
+    pub remote_port: Option<u16>,
     pub server_networks: Vec<IpNet>,
 }
 
@@ -59,6 +61,7 @@ pub fn audit_openvpn_profile(path: &Path) -> Result<OpenVpnProfileFacts, OpenVpn
     }
     let text = std::fs::read_to_string(path).map_err(|_| OpenVpnProfileError::Unreadable)?;
     let mut remote_hosts = Vec::new();
+    let mut remote_port = None;
     let mut inline_block: Option<String> = None;
     for line in text.lines() {
         let line = line.trim();
@@ -91,6 +94,9 @@ pub fn audit_openvpn_profile(path: &Path) -> Result<OpenVpnProfileFacts, OpenVpn
         if directive == "remote" {
             if let Some(host) = parts.next() {
                 remote_hosts.push(host.to_owned());
+                if remote_port.is_none() {
+                    remote_port = parts.next().and_then(|port| port.parse::<u16>().ok());
+                }
             }
         }
     }
@@ -110,15 +116,33 @@ pub fn audit_openvpn_profile(path: &Path) -> Result<OpenVpnProfileFacts, OpenVpn
         .collect();
     Ok(OpenVpnProfileFacts {
         remote_hosts,
+        remote_port,
         server_networks,
     })
 }
 
 /// Helper-owned `OpenVPN` argv. Always includes `--route-noexec` and pins
 /// `--script-security 0` after `--config`.
+///
+/// `pinned_remote` goes **before** `--config` so it becomes the first entry in
+/// `OpenVPN`'s connection list and wins over the profile's own `remote`. The
+/// profile's `verify-x509-name` still authenticates the server by name, so
+/// pinning an address never weakens TLS; it only removes the dependency on a
+/// system resolver that a filtered network can poison.
 #[must_use]
-pub fn openvpn_arguments(profile: &Path, device: &str, auth_file: Option<&PathBuf>) -> Vec<String> {
-    let mut args = vec![
+pub fn openvpn_arguments(
+    profile: &Path,
+    device: &str,
+    auth_file: Option<&PathBuf>,
+    pinned_remote: Option<(IpAddr, u16)>,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some((address, port)) = pinned_remote {
+        args.push("--remote".into());
+        args.push(address.to_string());
+        args.push(port.to_string());
+    }
+    args.extend([
         "--config".into(),
         profile.to_string_lossy().into_owned(),
         "--script-security".into(),
@@ -128,7 +152,7 @@ pub fn openvpn_arguments(profile: &Path, device: &str, auth_file: Option<&PathBu
         device.into(),
         "--dev-type".into(),
         "tun".into(),
-    ];
+    ]);
     if let Some(auth) = auth_file {
         args.push("--auth-user-pass".into());
         args.push(auth.to_string_lossy().into_owned());
@@ -166,7 +190,7 @@ mod tests {
 
     #[test]
     fn arguments_pin_script_security_after_config() {
-        let args = openvpn_arguments(Path::new("/tmp/office.ovpn"), "tun-ovpn", None);
+        let args = openvpn_arguments(Path::new("/tmp/office.ovpn"), "tun-ovpn", None, None);
         let config = args
             .iter()
             .position(|arg| arg == "--config")

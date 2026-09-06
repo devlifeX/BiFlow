@@ -68,6 +68,11 @@ pub enum HelperCommand {
         executable: Option<std::path::PathBuf>,
         auth_file: Option<std::path::PathBuf>,
         timeout_seconds: u64,
+        /// Address the engine resolved over `DoH` through a working client, so
+        /// `OpenVPN` never depends on a resolver the network can poison. The
+        /// helper still rejects anything that is not a routable public IP.
+        #[serde(default)]
+        pinned_remote: Option<(std::net::IpAddr, u16)>,
     },
     StopSideTunnel {
         client_id: Uuid,

@@ -267,6 +267,62 @@ impl LinuxBackend {
             .map_err(|error| CoreError::Platform(error.to_string()))
     }
 
+    /// Resolves the profile's server name over `DoH` through a client that is
+    /// already serving traffic, so a poisoned resolver cannot send `OpenVPN` to
+    /// an unroutable address. Returns `None` when nothing is serving yet or
+    /// the name already is an address; `OpenVPN` then uses the profile as-is.
+    async fn pin_side_tunnel_remote(&self, profile: &Path) -> Option<(std::net::IpAddr, u16)> {
+        let facts = iran_split_clients::audit_openvpn_profile(profile).ok()?;
+        let host = facts.remote_hosts.first()?.clone();
+        let port = facts.remote_port?;
+        if host.parse::<std::net::IpAddr>().is_ok() {
+            return None;
+        }
+        let config = self.config.read().await.clone();
+        let handles = self.egress_handles.lock().await.clone();
+        // Prefer the default route; any ready local proxy will do.
+        let endpoint = config
+            .enabled_clients()
+            .into_iter()
+            .filter(|candidate| {
+                handles
+                    .iter()
+                    .any(|handle| handle.client_id == candidate.id && handle.ready)
+            })
+            .find_map(local_proxy_endpoint)?;
+        match iran_split_clients::resolve_through_proxy(
+            &host,
+            (&endpoint.0, endpoint.1),
+            Duration::from_secs(5),
+        )
+        .await
+        {
+            Ok(addresses) => {
+                let address = *addresses.first()?;
+                info!(
+                    event = "side_tunnel.remote_resolved",
+                    section = "clients",
+                    initiator = "start_openvpn_client",
+                    cause = "doh_through_ready_client",
+                    trace_route = "engine->platform_backend->doh_resolver",
+                    "resolved the side-tunnel server over DoH without logging the address"
+                );
+                Some((address, port))
+            }
+            Err(error) => {
+                warn!(
+                    event = "side_tunnel.remote_resolve_failed",
+                    section = "clients",
+                    initiator = "start_openvpn_client",
+                    cause = %error,
+                    trace_route = "engine->platform_backend->doh_resolver",
+                    "could not pin the side-tunnel server address; using the profile as written"
+                );
+                None
+            }
+        }
+    }
+
     async fn start_openvpn_client(
         &self,
         client: &ClientInstance,
@@ -296,6 +352,7 @@ impl LinuxBackend {
             ExecutableSetting::Path(path) => Some(path.clone()),
         };
         let auth_file = write_side_tunnel_auth(username.as_deref(), password.as_deref())?;
+        let pinned_remote = self.pin_side_tunnel_remote(&profile).await;
         let result = self
             .helper_request(HelperCommand::StartSideTunnel {
                 driver: "openvpn".into(),
@@ -304,6 +361,7 @@ impl LinuxBackend {
                 executable,
                 auth_file: auth_file.as_ref().map(|file| file.path().to_path_buf()),
                 timeout_seconds: *start_timeout_seconds,
+                pinned_remote,
             })
             .await?;
         // OpenVPN re-reads the auth file on soft restarts, so it must outlive

@@ -6,6 +6,7 @@
 mod local_proxy;
 mod openvpn;
 mod profile_audit;
+mod remote_resolver;
 
 use async_trait::async_trait;
 use ipnet::IpNet;
@@ -19,6 +20,7 @@ pub use openvpn::OpenVpnDriver;
 pub use profile_audit::{
     audit_openvpn_profile, openvpn_arguments, OpenVpnProfileError, OpenVpnProfileFacts,
 };
+pub use remote_resolver::{is_routable_public, resolve_through_proxy, RemoteResolveError};
 
 /// Process-name DIRECT rule so TUN cannot recurse into a local proxy.
 #[derive(Debug, Clone, PartialEq, Eq)]

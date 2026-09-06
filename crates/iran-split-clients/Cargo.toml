@@ -10,12 +10,15 @@ publish.workspace = true
 async-trait.workspace = true
 iran-split-config = { path = "../iran-split-config" }
 ipnet.workspace = true
+reqwest.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

@@ -10,6 +10,7 @@ use iran_split_clients::{audit_openvpn_profile, openvpn_arguments};
 use iran_split_ipc::SideTunnelStatus;
 use std::{
     collections::BTreeMap,
+    net::IpAddr,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -21,6 +22,19 @@ const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const OPENVPN_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_MARK: u32 = 0x1780;
 const DEFAULT_TABLE: u32 = 178;
+
+/// One `StartSideTunnel` request, grouped so the privileged entry point keeps
+/// a single argument instead of a long positional list.
+#[derive(Debug, Clone, Copy)]
+pub struct SideTunnelRequest<'a> {
+    pub driver: &'a str,
+    pub client_id: Uuid,
+    pub profile: &'a Path,
+    pub executable: Option<&'a Path>,
+    pub auth_file: Option<&'a Path>,
+    pub timeout_seconds: u64,
+    pub pinned_remote: Option<(IpAddr, u16)>,
+}
 
 #[derive(Debug)]
 pub(crate) struct RunningSideTunnel {
@@ -41,13 +55,17 @@ impl Supervisor {
     /// the binary cannot be spawned, or the tunnel does not come up.
     pub async fn start_side_tunnel(
         &self,
-        driver: &str,
-        client_id: Uuid,
-        profile: &Path,
-        executable: Option<&Path>,
-        auth_file: Option<&Path>,
-        timeout_seconds: u64,
+        request: SideTunnelRequest<'_>,
     ) -> Result<SideTunnelStatus, HelperServiceError> {
+        let SideTunnelRequest {
+            driver,
+            client_id,
+            profile,
+            executable,
+            auth_file,
+            timeout_seconds,
+            pinned_remote,
+        } = request;
         if driver != "openvpn" {
             return Err(HelperServiceError::SideTunnel(
                 "unsupported side-tunnel driver".into(),
@@ -58,7 +76,21 @@ impl Supervisor {
         self.stop_side_tunnel(client_id).await?;
         let binary = resolve_binary(executable)?;
         let device = format!("tun-{}", &client_id.to_string()[..8]);
-        let args = openvpn_arguments(profile, &device, auth_file.map(PathBuf::from).as_ref());
+        // Never spawn with an address the engine could not vouch for: a
+        // poisoned or fake-ip answer must not become a --remote.
+        if let Some((address, _)) = pinned_remote {
+            if !iran_split_clients::is_routable_public(address) {
+                return Err(HelperServiceError::SideTunnel(
+                    "the pinned remote address is not routable".into(),
+                ));
+            }
+        }
+        let args = openvpn_arguments(
+            profile,
+            &device,
+            auth_file.map(PathBuf::from).as_ref(),
+            pinned_remote,
+        );
         let mut command = Command::new(&binary);
         command
             .args(&args)
@@ -72,24 +104,7 @@ impl Supervisor {
             .spawn()
             .map_err(|error| HelperServiceError::SideTunnel(redact(&error.to_string())))?;
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds.max(1));
-        loop {
-            if let Ok(Some(status)) = child.try_wait() {
-                return Err(HelperServiceError::SideTunnel(format!(
-                    "openvpn exited early with status {status}"
-                )));
-            }
-            if device_is_up(&device).await {
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                let _ = child.start_kill();
-                return Err(HelperServiceError::SideTunnel(
-                    "openvpn did not bring the tunnel up in time".into(),
-                ));
-            }
-            tokio::time::sleep(DEVICE_POLL_INTERVAL).await;
-        }
+        wait_for_device(&mut child, &device, timeout_seconds).await?;
 
         let mut routes = facts.server_networks;
         routes.retain(|network| network.prefix_len() > 0);
@@ -176,6 +191,32 @@ impl Supervisor {
                 .await;
             }
         }
+    }
+}
+
+/// Waits for `OpenVPN` to bring `device` up, failing fast when it exits.
+async fn wait_for_device(
+    child: &mut Child,
+    device: &str,
+    timeout_seconds: u64,
+) -> Result<(), HelperServiceError> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds.max(1));
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(HelperServiceError::SideTunnel(format!(
+                "openvpn exited early with status {status}"
+            )));
+        }
+        if device_is_up(device).await {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let _ = child.start_kill();
+            return Err(HelperServiceError::SideTunnel(
+                "openvpn did not bring the tunnel up in time".into(),
+            ));
+        }
+        tokio::time::sleep(DEVICE_POLL_INTERVAL).await;
     }
 }
 
@@ -525,7 +566,15 @@ mod tests {
             tun_name: "biflow-tun".into(),
         });
         let error = supervisor
-            .start_side_tunnel("openvpn", Uuid::new_v4(), &profile, Some(&link), None, 1)
+            .start_side_tunnel(SideTunnelRequest {
+                driver: "openvpn",
+                client_id: Uuid::new_v4(),
+                profile: &profile,
+                executable: Some(&link),
+                auth_file: None,
+                timeout_seconds: 1,
+                pinned_remote: None,
+            })
             .await
             .expect_err("symlinked executable rejected");
         assert!(matches!(error, HelperServiceError::SideTunnel(_)));
