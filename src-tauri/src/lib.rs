@@ -906,13 +906,25 @@ async fn prepare_stack_start<R: Runtime>(app: &AppHandle<R>) -> Result<(), Strin
     let services = services(app)?;
     let helper_ready = connect_prep::helper_is_ready(services.engine.snapshot().helper.phase);
     let statuses = deps::dependency_status(&services.paths.data);
+    let hiddify_required = services
+        .config_store
+        .load()
+        .map(|config| {
+            config
+                .clients
+                .iter()
+                .any(|client| client.preset == PresetId::Hiddify && client.enabled)
+        })
+        .unwrap_or(true);
     let hiddify = statuses
         .iter()
         .any(|item| item.id == "hiddify" && item.installed);
     let mihomo = statuses
         .iter()
         .any(|item| item.id == "mihomo" && item.installed);
-    for requirement in connect_prep::missing_requirements(helper_ready, hiddify, mihomo) {
+    let hiddify_satisfied = hiddify || !hiddify_required;
+    for requirement in connect_prep::missing_requirements(helper_ready, hiddify_satisfied, mihomo)
+    {
         info!(
             event = "connect.install_required",
             section = "stack",

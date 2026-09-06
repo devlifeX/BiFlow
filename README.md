@@ -8,7 +8,7 @@
 
 <p align="center">
   Iranian and private traffic stays on the local internet.<br />
-  Everything else follows the Hiddify connection you already use.
+  Everything else follows the VPN client you already use — Hiddify, Happ, and friends.
 </p>
 
 <p align="center">
@@ -39,7 +39,8 @@
 
 ## Features
 
-- **Split routing** — Iranian sites, Iranian IP ranges, and private/LAN traffic stay **DIRECT**. Everything else uses the Hiddify connection you already have.
+- **Split routing** — Iranian sites, Iranian IP ranges, and private/LAN traffic stay **DIRECT**. Everything else uses the VPN client you already have.
+- **Multiple clients, your choice of primary** — Register Hiddify, Happ, v2rayN, Nekoray, or Shadowsocks side by side and promote any of them to the default route; Hiddify is not required when another client is primary. OpenVPN profiles (including Windscribe) run as an audited side tunnel. Pin single domains to a specific client — e.g. keep Google on Happ while everything else rides Hiddify — and a client that comes up minutes after Connect is attached to live routing automatically.
 - **Connect, Pause, Resume, Disconnect** — One operation at a time. The active button shows the real stage (Start Hiddify, Start Mihomo, and so on) with an in-button progress fill.
 - **Basic and Advanced** — First launch opens Basic. Advanced adds component health, live traffic routes, and extra tools.
 - **Direct rules** — Pin hosts to DIRECT or VPN in a sortable table with one-click route switching. Refresh the bundled Iran domain and IP lists from the BiFlow cloud snapshot.
@@ -48,7 +49,7 @@
 - **DIRECT DNS presets** — Fake-ip by default; Shecan, Electro, Radar, Mokhaberat, or custom resolvers are one Settings choice away for DIRECT domains. DIRECT domains always resolve to their real addresses.
 - **Browser-friendly routing** — Clears a Hiddify-owned system proxy while connected so browsers actually use the split routing, and rejects VPN-bound QUIC so pages fall back to working TCP instead of hanging.
 - **Status bar** — Internet reachability, public IP, approximate country, and lifetime sent/received totals.
-- **In-app install** — Connect can install the privileged helper, Hiddify, and the bundled Mihomo build when they are missing.
+- **In-app install** — Connect can install the privileged helper, the bundled Mihomo build, and Hiddify when they are missing. Hiddify is only fetched while an enabled Hiddify client exists.
 - **English and Persian** — Built-in UI languages, with a tray menu for Connect/Disconnect, Pause/Resume, and Quit.
 - **Linux and Windows** — Debian package, AppImage, portable `.exe`, and NSIS setup. Signed AppImage and NSIS builds can update in-app.
 - **Fits the window** — Desktop sidebar, phone-sized bottom navigation, and a resizable window down to 390×640.
@@ -57,11 +58,15 @@
 
 BiFlow is a desktop app for split routing. It keeps Iranian websites, Iranian IP
 ranges, and private/local networks **DIRECT**. Other destinations go through
-your existing **Hiddify** local proxy, using **Mihomo** as the split engine.
+your existing local VPN client — **Hiddify** by default, with **Happ**, v2rayN,
+Nekoray, and Shadowsocks as first-class alternatives — using **Mihomo** as the
+split engine. Any registered client can be the default route, and individual
+domains can be pinned to a specific client.
 
 The window always runs as your normal user. Privileged work (TUN device, routes)
 stays in a small helper process with a strict command list. BiFlow does not
-replace Hiddify. It sits beside it and chooses the path for each destination.
+replace your VPN client. It sits beside it and chooses the path for each
+destination.
 
 English and Persian are built in. The dashboard reports exact helper, Hiddify,
 Mihomo, TUN, and DNS state; its status bar shows internet reachability, public
@@ -72,8 +77,9 @@ allowlisted official download when it is missing.
 ## How it works
 
 1. Install BiFlow (Linux `.deb`, or Windows app / NSIS setup).
-2. Keep Hiddify installed and able to listen locally. BiFlow installs its
-   bundled Mihomo build when needed.
+2. Keep your VPN client installed and able to listen locally — Hiddify by
+   default, or any other client you promoted to the default route. BiFlow
+   installs its bundled Mihomo build when needed.
 3. Open **Direct rules** if you want extra sites or IPs to stay DIRECT, or to
    refresh Iran domain and IP lists from the cloud.
 4. Press **Connect**. BiFlow prepares a routing generation, starts Mihomo, and
@@ -82,7 +88,7 @@ allowlisted official download when it is missing.
    stack. **Disconnect** tears owned state down and may also stop Hiddify when
    that setting is on.
 5. Iranian, private, and your custom rules stay DIRECT. Other traffic uses
-   Hiddify. The dashboard animates both routes while connected, and
+   your VPN client. The dashboard animates both routes while connected, and
    **Diagnostics** can test a host and show DIRECT vs VPN before you rely on it.
    Its support export includes the permanent, locally redacted `debug.log`,
    which records Rust actions, warnings, errors, causes, initiators, and trace
@@ -103,8 +109,8 @@ flowchart LR
   BiFlow --> Decide{Match rules?}
   Decide -->|Iran, private, or custom| Direct[DIRECT / local internet]
   Decide -->|Everything else| Mihomo
-  Mihomo --> Hiddify[Hiddify local proxy]
-  Hiddify --> World[Rest of the internet]
+  Mihomo --> Client[Your VPN client<br/>Hiddify, Happ, ...]
+  Client --> World[Rest of the internet]
 ```
 
 ## Architecture
@@ -119,12 +125,12 @@ flowchart TB
   Engine[Rust engine<br/>lifecycle, rules, Mihomo config]
   Helper[Privileged helper<br/>TUN, routes, process control]
   Mihomo[Mihomo split core]
-  Hiddify[Hiddify<br/>already running locally]
+  Clients[VPN clients<br/>Hiddify, Happ, ... already running locally]
 
   UI --> API --> Engine
   Engine -->|framed, allowlisted IPC| Helper
   Engine --> Mihomo
-  Mihomo --> Hiddify
+  Mihomo --> Clients
   Helper --> Net[TUN and routes]
 ```
 
@@ -132,9 +138,9 @@ flowchart TB
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **UI**      | Basic or Advanced shell, Connect/Pause/Resume/Disconnect, install missing apps, cloud and custom DIRECT rules, flow tests, About/updates. No shell and no general filesystem access. |
 | **Engine**  | Owns configuration, rule decisions, Mihomo YAML, and rollback. Talks to the UI only through the typed API.                                                                           |
-| **Helper**  | Applies TUN and routes. Accepts generation IDs and hashes, never executable paths, shell strings, or arbitrary URLs.                                                                 |
+| **Helper**  | Applies TUN and routes. The split stack accepts generation IDs and hashes only; OpenVPN side-tunnel profiles are audited and executables must be regular, non-symlink files — never shell strings or arbitrary URLs. |
 | **Mihomo**  | Enforces split routing. Controller binds to loopback with a generated secret.                                                                                                        |
-| **Hiddify** | Upstream proxy you already use. BiFlow does not log into it or replace it.                                                                                                           |
+| **Clients** | Upstream proxies you already use — Hiddify, Happ, v2rayN, Nekoray, Shadowsocks, or an OpenVPN side tunnel. BiFlow does not log into them or replace them.                            |
 | **Rules**   | Bundled Iran lists, optional refresh from `devlifeX/BiFlow`, plus your extra DIRECT domains and IPs.                                                                                 |
 
 Internal Rust crates still use the `iran-split-*` names. The product name, window
@@ -205,13 +211,19 @@ Deeper notes: [helper IPC](docs/protocol/helper-ipc-v1.md),
 ## FAQ
 
 **Does BiFlow replace my VPN?**
-No. It uses the Hiddify connection you already have. Iranian and private
-destinations skip that tunnel; other destinations still use it.
+No. It uses the VPN connection you already have — Hiddify by default, or any
+other registered client. Iranian and private destinations skip that tunnel;
+other destinations still use it.
+
+**Can I use Happ (or another client) instead of Hiddify?**
+Yes. Register the client, promote it to the default route, and disable the
+Hiddify client. BiFlow then connects without requiring Hiddify at all. You can
+also keep several clients and pin specific domains to each.
 
 **Do I have to install Hiddify and Mihomo myself?**
 Mihomo is included in each OS package and installs locally. Hiddify is detected
-from common locations; if it is missing, BiFlow offers the official release and
-keeps a manual guide as fallback.
+from common locations; if it is missing while an enabled Hiddify client exists,
+BiFlow offers the official release and keeps a manual guide as fallback.
 
 **Will sites like Digikala go through the VPN?**
 No, if they match the Iran domain or IP lists, or a custom DIRECT rule you

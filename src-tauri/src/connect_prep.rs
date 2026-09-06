@@ -23,17 +23,22 @@ pub fn helper_is_ready(phase: ComponentPhase) -> bool {
     !matches!(phase, ComponentPhase::Unavailable | ComponentPhase::Error)
 }
 
+/// `hiddify_satisfied` is "installed, or not required at all": Hiddify is
+/// only a connect requirement while an enabled Hiddify client exists. An
+/// operator who disabled Hiddify and promoted another client (e.g. Happ)
+/// to the default route must not be forced to install it. Mirrors
+/// `missingConnectRequirements` in the desktop frontend.
 #[must_use]
 pub fn missing_requirements(
     helper_ready: bool,
-    hiddify_installed: bool,
+    hiddify_satisfied: bool,
     mihomo_installed: bool,
 ) -> Vec<ConnectRequirement> {
     let mut missing = Vec::new();
     if !helper_ready {
         missing.push(ConnectRequirement::Helper);
     }
-    if !hiddify_installed {
+    if !hiddify_satisfied {
         missing.push(ConnectRequirement::Hiddify);
     }
     if !mihomo_installed {
@@ -59,6 +64,16 @@ mod tests {
         assert_eq!(
             missing_requirements(true, true, true),
             [] as [ConnectRequirement; 0]
+        );
+    }
+
+    #[test]
+    fn hiddify_satisfied_covers_the_no_enabled_client_case() {
+        // Not installed but also not required: an operator without an
+        // enabled Hiddify client connects without being forced to install.
+        assert_eq!(
+            missing_requirements(true, true, false),
+            [ConnectRequirement::Mihomo]
         );
     }
 
