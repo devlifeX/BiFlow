@@ -6,6 +6,13 @@ Follow these rules in every change. If a rule is missing or a new failure mode a
 
 A change is **not done** until the parts you touched build and test with **zero failures and zero warnings from project code**. Do not report the task complete, skip the gate, or leave a warning or red command.
 
+**Commits are gated.** `.githooks/pre-commit` runs the CI-mirror checks
+(`cargo fmt --all --check`, workspace Clippy with `-D warnings`, workspace
+tests, `cargo deny check`, `pnpm check`) on the areas a commit touches.
+Activate it once per clone with `git config core.hooksPath .githooks`.
+Never commit with `--no-verify` to skip a failing check; fix the failure.
+A red GitHub Actions run on a plain push is a process failure, not bad luck.
+
 After every change, run only what that change affects:
 
 1. Frontend (TypeScript, UI, scripts, or package manifests): `pnpm check` and `pnpm build`
