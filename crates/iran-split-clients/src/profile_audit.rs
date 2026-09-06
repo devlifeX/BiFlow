@@ -135,8 +135,14 @@ pub fn openvpn_arguments(
     device: &str,
     auth_file: Option<&PathBuf>,
     pinned_remote: Option<(IpAddr, u16)>,
+    socks_proxy: Option<(&str, u16)>,
 ) -> Vec<String> {
     let mut args = Vec::new();
+    if let Some((host, port)) = socks_proxy {
+        args.push("--socks-proxy".into());
+        args.push(host.to_owned());
+        args.push(port.to_string());
+    }
     if let Some((address, port)) = pinned_remote {
         args.push("--remote".into());
         args.push(address.to_string());
@@ -190,7 +196,7 @@ mod tests {
 
     #[test]
     fn arguments_pin_script_security_after_config() {
-        let args = openvpn_arguments(Path::new("/tmp/office.ovpn"), "tun-ovpn", None, None);
+        let args = openvpn_arguments(Path::new("/tmp/office.ovpn"), "tun-ovpn", None, None, None);
         let config = args
             .iter()
             .position(|arg| arg == "--config")
@@ -201,5 +207,50 @@ mod tests {
             .expect("script");
         assert!(config < script);
         assert!(args.iter().any(|arg| arg == "--route-noexec"));
+    }
+
+    #[test]
+    fn pinned_remote_and_proxy_come_before_config() {
+        let args = openvpn_arguments(
+            Path::new("/tmp/office.ovpn"),
+            "tun-ovpn",
+            None,
+            Some(("152.233.20.207".parse().expect("ip"), 587)),
+            Some(("127.0.0.1", 12_334)),
+        );
+        let config = args
+            .iter()
+            .position(|arg| arg == "--config")
+            .expect("config");
+        let remote = args
+            .iter()
+            .position(|arg| arg == "--remote")
+            .expect("remote");
+        let socks = args
+            .iter()
+            .position(|arg| arg == "--socks-proxy")
+            .expect("socks");
+        // OpenVPN takes the first entry of its connection list, so a pinned
+        // address only wins when it precedes the profile.
+        assert!(remote < config, "--remote must precede --config");
+        assert!(socks < config);
+        assert_eq!(args[remote + 1], "152.233.20.207");
+        assert_eq!(args[remote + 2], "587");
+        assert_eq!(args[socks + 1], "127.0.0.1");
+        assert_eq!(args[socks + 2], "12334");
+    }
+
+    #[test]
+    fn audit_reports_the_remote_port_for_pinning() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("ok.ovpn");
+        let mut file = std::fs::File::create(&path).expect("create");
+        writeln!(file, "client").expect("write");
+        writeln!(file, "remote vpn.example.com 587").expect("write");
+        let facts = audit_openvpn_profile(&path).expect("audit");
+        assert_eq!(facts.remote_hosts, ["vpn.example.com"]);
+        assert_eq!(facts.remote_port, Some(587));
+        // A hostname yields no scoped route; only literals do.
+        assert!(facts.server_networks.is_empty());
     }
 }

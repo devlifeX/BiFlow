@@ -267,32 +267,54 @@ impl LinuxBackend {
             .map_err(|error| CoreError::Platform(error.to_string()))
     }
 
+    /// Loopback SOCKS endpoint of a client that is already serving traffic.
+    ///
+    /// `ready` are the handles collected so far in this connect, because
+    /// `egress_handles` is only published after every client has started.
+    async fn ready_proxy_endpoint(&self, ready: &[EgressHandle]) -> Option<(String, u16)> {
+        let config = self.config.read().await.clone();
+        let published = self.egress_handles.lock().await.clone();
+        config
+            .enabled_clients()
+            .into_iter()
+            .filter(|candidate| {
+                ready
+                    .iter()
+                    .chain(published.iter())
+                    .any(|handle| handle.client_id == candidate.id && handle.ready)
+            })
+            .find_map(local_proxy_endpoint)
+    }
+
     /// Resolves the profile's server name over `DoH` through a client that is
-    /// already serving traffic, so a poisoned resolver cannot send `OpenVPN` to
-    /// an unroutable address. Returns `None` when nothing is serving yet or
-    /// the name already is an address; `OpenVPN` then uses the profile as-is.
-    async fn pin_side_tunnel_remote(&self, profile: &Path) -> Option<(std::net::IpAddr, u16)> {
+    /// already serving traffic, so a poisoned resolver cannot send `OpenVPN`
+    /// to an unroutable address. Returns `None` when nothing is serving yet
+    /// or the name already is an address; the profile is then used as-is.
+    async fn pin_side_tunnel_remote(
+        &self,
+        profile: &Path,
+        proxy: Option<&(String, u16)>,
+    ) -> Option<(std::net::IpAddr, u16)> {
         let facts = iran_split_clients::audit_openvpn_profile(profile).ok()?;
         let host = facts.remote_hosts.first()?.clone();
         let port = facts.remote_port?;
         if host.parse::<std::net::IpAddr>().is_ok() {
             return None;
         }
-        let config = self.config.read().await.clone();
-        let handles = self.egress_handles.lock().await.clone();
-        // Prefer the default route; any ready local proxy will do.
-        let endpoint = config
-            .enabled_clients()
-            .into_iter()
-            .filter(|candidate| {
-                handles
-                    .iter()
-                    .any(|handle| handle.client_id == candidate.id && handle.ready)
-            })
-            .find_map(local_proxy_endpoint)?;
+        let Some((proxy_host, proxy_port)) = proxy else {
+            info!(
+                event = "side_tunnel.remote_resolve_skipped",
+                section = "clients",
+                initiator = "start_openvpn_client",
+                cause = "no_ready_client_to_resolve_through",
+                trace_route = "engine->platform_backend->doh_resolver",
+                "no client is serving yet; using the profile's own server name"
+            );
+            return None;
+        };
         match iran_split_clients::resolve_through_proxy(
             &host,
-            (&endpoint.0, endpoint.1),
+            (proxy_host.as_str(), *proxy_port),
             Duration::from_secs(5),
         )
         .await
@@ -327,6 +349,7 @@ impl LinuxBackend {
         &self,
         client: &ClientInstance,
         cancel: CancellationToken,
+        ready: &[EgressHandle],
     ) -> Result<EgressHandle, CoreError> {
         let mut handle = OpenVpnDriver
             .ensure(client, cancel)
@@ -352,7 +375,8 @@ impl LinuxBackend {
             ExecutableSetting::Path(path) => Some(path.clone()),
         };
         let auth_file = write_side_tunnel_auth(username.as_deref(), password.as_deref())?;
-        let pinned_remote = self.pin_side_tunnel_remote(&profile).await;
+        let proxy = self.ready_proxy_endpoint(ready).await;
+        let pinned_remote = self.pin_side_tunnel_remote(&profile, proxy.as_ref()).await;
         let result = self
             .helper_request(HelperCommand::StartSideTunnel {
                 driver: "openvpn".into(),
@@ -362,6 +386,7 @@ impl LinuxBackend {
                 auth_file: auth_file.as_ref().map(|file| file.path().to_path_buf()),
                 timeout_seconds: *start_timeout_seconds,
                 pinned_remote,
+                socks_proxy: proxy,
             })
             .await?;
         // OpenVPN re-reads the auth file on soft restarts, so it must outlive
@@ -401,7 +426,8 @@ impl LinuxBackend {
                             .await
                     }
                     EgressKind::OwnedSideTunnel => {
-                        self.start_openvpn_client(client, cancel.clone()).await
+                        self.start_openvpn_client(client, cancel.clone(), &handles)
+                            .await
                     }
                     EgressKind::Unsupported => Err(CoreError::ConfigInvalid(
                         "this catalog entry cannot be started".into(),

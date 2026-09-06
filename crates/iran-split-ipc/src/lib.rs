@@ -73,6 +73,11 @@ pub enum HelperCommand {
         /// helper still rejects anything that is not a routable public IP.
         #[serde(default)]
         pinned_remote: Option<(std::net::IpAddr, u16)>,
+        /// Loopback SOCKS5 endpoint of a client that already works. Used only
+        /// as a fallback when a direct attempt exits early, which is what a
+        /// network that blocks the server by address looks like.
+        #[serde(default)]
+        socks_proxy: Option<(String, u16)>,
     },
     StopSideTunnel {
         client_id: Uuid,

@@ -34,6 +34,7 @@ pub struct SideTunnelRequest<'a> {
     pub auth_file: Option<&'a Path>,
     pub timeout_seconds: u64,
     pub pinned_remote: Option<(IpAddr, u16)>,
+    pub socks_proxy: Option<(&'a str, u16)>,
 }
 
 #[derive(Debug)]
@@ -65,6 +66,7 @@ impl Supervisor {
             auth_file,
             timeout_seconds,
             pinned_remote,
+            socks_proxy,
         } = request;
         if driver != "openvpn" {
             return Err(HelperServiceError::SideTunnel(
@@ -85,26 +87,38 @@ impl Supervisor {
                 ));
             }
         }
-        let args = openvpn_arguments(
-            profile,
-            &device,
-            auth_file.map(PathBuf::from).as_ref(),
-            pinned_remote,
-        );
-        let mut command = Command::new(&binary);
-        command
-            .args(&args)
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        apply_openvpn_spawn(&mut command);
-        let mut child = command
-            .spawn()
-            .map_err(|error| HelperServiceError::SideTunnel(redact(&error.to_string())))?;
-
-        wait_for_device(&mut child, &device, timeout_seconds).await?;
+        let auth = auth_file.map(PathBuf::from);
+        // Try the direct path first. A network that blocks the server by
+        // address makes OpenVPN exit immediately; only then fall back to the
+        // working client's SOCKS port, which costs a nested hop.
+        let mut child = spawn_openvpn(
+            &binary,
+            &openvpn_arguments(profile, &device, auth.as_ref(), pinned_remote, None),
+        )?;
+        let mut outcome = wait_for_device(&mut child, &device, timeout_seconds).await;
+        if outcome.is_err() {
+            if let Some((proxy_host, proxy_port)) = socks_proxy {
+                self.push_log(
+                    "info",
+                    "side_tunnel_retry_via_proxy",
+                    BTreeMap::from([("driver".into(), "openvpn".into())]),
+                )
+                .await;
+                let _ = child.start_kill();
+                child = spawn_openvpn(
+                    &binary,
+                    &openvpn_arguments(
+                        profile,
+                        &device,
+                        auth.as_ref(),
+                        pinned_remote,
+                        Some((proxy_host, proxy_port)),
+                    ),
+                )?;
+                outcome = wait_for_device(&mut child, &device, timeout_seconds).await;
+            }
+        }
+        outcome?;
 
         let mut routes = facts.server_networks;
         routes.retain(|network| network.prefix_len() > 0);
@@ -192,6 +206,21 @@ impl Supervisor {
             }
         }
     }
+}
+
+fn spawn_openvpn(binary: &Path, args: &[String]) -> Result<Child, HelperServiceError> {
+    let mut command = Command::new(binary);
+    command
+        .args(args)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    apply_openvpn_spawn(&mut command);
+    command
+        .spawn()
+        .map_err(|error| HelperServiceError::SideTunnel(redact(&error.to_string())))
 }
 
 /// Waits for `OpenVPN` to bring `device` up, failing fast when it exits.
@@ -574,6 +603,7 @@ mod tests {
                 auth_file: None,
                 timeout_seconds: 1,
                 pinned_remote: None,
+                socks_proxy: None,
             })
             .await
             .expect_err("symlinked executable rejected");

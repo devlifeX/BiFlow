@@ -123,6 +123,7 @@ async fn execute(supervisor: &Supervisor, command: HelperCommand) -> HelperReply
                 auth_file,
                 timeout_seconds,
                 pinned_remote,
+                socks_proxy,
             } => HelperReply::SideTunnel(
                 supervisor
                     .start_side_tunnel(crate::openvpn::SideTunnelRequest {
@@ -133,6 +134,9 @@ async fn execute(supervisor: &Supervisor, command: HelperCommand) -> HelperReply
                         auth_file: auth_file.as_deref(),
                         timeout_seconds,
                         pinned_remote,
+                        socks_proxy: socks_proxy
+                            .as_ref()
+                            .map(|(host, port)| (host.as_str(), *port)),
                     })
                     .await?,
             ),
