@@ -266,6 +266,9 @@ pub struct WindowsBackend {
     side_tunnel_auth_files: Mutex<Vec<NamedTempFile>>,
     launched_clients: Mutex<Vec<Child>>,
     client_exit_ips: Mutex<std::collections::HashMap<iran_split_config::ClientId, String>>,
+    /// Why each client failed at its last start attempt; mirrors Linux so a
+    /// stopped card explains itself instead of showing no detail.
+    client_failures: Mutex<std::collections::HashMap<iran_split_config::ClientId, String>>,
 }
 
 impl WindowsBackend {
@@ -282,6 +285,7 @@ impl WindowsBackend {
             side_tunnel_auth_files: Mutex::new(Vec::new()),
             launched_clients: Mutex::new(Vec::new()),
             client_exit_ips: Mutex::new(std::collections::HashMap::new()),
+            client_failures: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -402,9 +406,16 @@ impl WindowsBackend {
                 }
             };
             match started {
-                Ok(handle) => handles.push(handle),
+                Ok(handle) => {
+                    self.client_failures.lock().await.remove(&client.id);
+                    handles.push(handle);
+                }
                 Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
                 Err(error) if !required => {
+                    self.client_failures
+                        .lock()
+                        .await
+                        .insert(client.id, error.to_string());
                     warn!(
                         event = "client.ensure_failed",
                         section = "clients",
@@ -414,7 +425,13 @@ impl WindowsBackend {
                         "optional client failed; connect continues"
                     );
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    self.client_failures
+                        .lock()
+                        .await
+                        .insert(client.id, error.to_string());
+                    return Err(error);
+                }
             }
         }
         *self.egress_handles.lock().await = handles;
@@ -760,6 +777,7 @@ impl WindowsBackend {
     async fn client_component(
         client: &ClientInstance,
         handles: &[EgressHandle],
+        last_failure: Option<&String>,
     ) -> ComponentStatus {
         if !client.enabled {
             return ComponentStatus::new(ComponentPhase::Unavailable, None);
@@ -774,9 +792,11 @@ impl WindowsBackend {
                 }
                 Some((host, port)) => ComponentStatus::new(
                     ComponentPhase::Stopped,
-                    Some(format!(
-                        "nothing is listening on {host}:{port}; check the port on the client card"
-                    )),
+                    Some(last_failure.cloned().unwrap_or_else(|| {
+                        format!(
+                            "nothing is listening on {host}:{port}; check the port on the client card"
+                        )
+                    })),
                 ),
                 None => ComponentStatus::new(
                     ComponentPhase::Stopped,
@@ -792,7 +812,9 @@ impl WindowsBackend {
                 } else {
                     ComponentStatus::new(
                         ComponentPhase::Stopped,
-                        iran_split_clients::side_tunnel_stopped_reason(client),
+                        last_failure
+                            .cloned()
+                            .or_else(|| iran_split_clients::side_tunnel_stopped_reason(client)),
                     )
                 }
             }
@@ -1037,12 +1059,13 @@ impl PlatformBackend for WindowsBackend {
 
         let handles = self.egress_handles.lock().await.clone();
         let exit_ips = self.client_exit_ips.lock().await.clone();
+        let failures = self.client_failures.lock().await.clone();
         let mut clients = Vec::new();
         for client in &config.clients {
             let status = if client.preset == PresetId::Hiddify {
                 hiddify.clone()
             } else {
-                Self::client_component(client, &handles).await
+                Self::client_component(client, &handles, failures.get(&client.id)).await
             };
             clients.push(ClientComponentStatus {
                 id: client.id,
