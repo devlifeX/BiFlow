@@ -600,6 +600,14 @@ collect_linux() {
     package_version="$(dpkg-deb -f "${source}" Version)"
     [[ "${package_version}" == "${BUILD_VERSION}" ]] || \
       die "Linux package version mismatch: expected ${BUILD_VERSION}, got ${package_version}"
+    # A bundling race once produced a 2 MB deb holding only the helper.
+    # Refuse to collect a package that lacks its core payload.
+    local listing
+    listing="$(dpkg-deb -c "${source}")"
+    for payload in usr/bin/iran-split-desktop usr/lib/biflow/mihomo usr/lib/biflow/iran-split-helper; do
+      command grep -q "${payload}" <<<"${listing}" || \
+        die "Linux package is incomplete (missing ${payload}); rerun ./build.sh linux deb --from deb"
+    done
     dest="${PROJECT_DIR}/$(plan linux.dir)/$(linux_deb_name)"
     copy_one "${source}" "${dest}"
   fi
