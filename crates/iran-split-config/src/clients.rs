@@ -228,14 +228,7 @@ const HAPP_SPEC: PresetSpec = PresetSpec {
     // into the TUN and the tunnel dies (tunnel-in-tunnel).
     default_port: Some(10_808),
     linux_bypass: &[
-        "Happ",
-        "*Happ*",
-        "happ",
-        "happd",
-        "*happ*",
-        "sing-box",
-        "xray",
-        "v2ray",
+        "Happ", "*Happ*", "happ", "happd", "*happ*", "sing-box", "xray", "v2ray",
     ],
     windows_bypass: &[
         "Happ.exe",

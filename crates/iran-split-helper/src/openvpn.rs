@@ -485,8 +485,7 @@ mod tests {
     #[test]
     fn resolve_binary_rejects_directory_executable() {
         let directory = tempfile::tempdir().expect("tempdir");
-        let error =
-            resolve_binary(Some(directory.path())).expect_err("directory rejected");
+        let error = resolve_binary(Some(directory.path())).expect_err("directory rejected");
         assert!(matches!(error, HelperServiceError::SideTunnel(_)));
     }
 
@@ -524,14 +523,7 @@ mod tests {
             tun_name: "biflow-tun".into(),
         });
         let error = supervisor
-            .start_side_tunnel(
-                "openvpn",
-                Uuid::new_v4(),
-                &profile,
-                Some(&link),
-                None,
-                1,
-            )
+            .start_side_tunnel("openvpn", Uuid::new_v4(), &profile, Some(&link), None, 1)
             .await
             .expect_err("symlinked executable rejected");
         assert!(matches!(error, HelperServiceError::SideTunnel(_)));

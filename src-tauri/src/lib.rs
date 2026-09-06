@@ -923,8 +923,7 @@ async fn prepare_stack_start<R: Runtime>(app: &AppHandle<R>) -> Result<(), Strin
         .iter()
         .any(|item| item.id == "mihomo" && item.installed);
     let hiddify_satisfied = hiddify || !hiddify_required;
-    for requirement in connect_prep::missing_requirements(helper_ready, hiddify_satisfied, mihomo)
-    {
+    for requirement in connect_prep::missing_requirements(helper_ready, hiddify_satisfied, mihomo) {
         info!(
             event = "connect.install_required",
             section = "stack",
