@@ -90,6 +90,24 @@ describe("mock transport", () => {
     });
   });
 
+  it("a client pin on google.com covers every google.com subdomain", async () => {
+    await mockApi.pinRoute("google.com", MOCK_HIDDIFY_ID, 1);
+    await expect(mockApi.testRoute("google.com")).resolves.toMatchObject({
+      outbound: { kind: "client", client_id: MOCK_HIDDIFY_ID },
+      matched_rule: "google.com",
+    });
+    await expect(mockApi.testRoute("www.google.com")).resolves.toMatchObject({
+      outbound: { kind: "client", client_id: MOCK_HIDDIFY_ID },
+      matched_rule: "google.com",
+    });
+    await expect(mockApi.testRoute("gemini.google.com")).resolves.toMatchObject(
+      {
+        outbound: { kind: "client", client_id: MOCK_HIDDIFY_ID },
+        matched_rule: "google.com",
+      },
+    );
+  });
+
   it("keeps github.io tenants separate and routes curated businesses direct", async () => {
     const pinned = await mockApi.addRule("user.github.io", 1);
     expect(
@@ -112,6 +130,18 @@ describe("mock transport", () => {
     ).resolves.toMatchObject({
       outbound: { kind: "direct" },
       matched_rule: "kavenegar.com",
+    });
+    await expect(mockApi.testRoute("www.arzinja.info")).resolves.toMatchObject({
+      outbound: { kind: "direct" },
+      matched_rule: "arzinja.info",
+    });
+    await expect(mockApi.testRoute("www.ketabrah.com")).resolves.toMatchObject({
+      outbound: { kind: "direct" },
+      matched_rule: "ketabrah.com",
+    });
+    await expect(mockApi.testRoute("185.172.72.10")).resolves.toMatchObject({
+      outbound: { kind: "direct" },
+      reason: "iran_cidr",
     });
   });
 

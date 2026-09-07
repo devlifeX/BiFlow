@@ -19,9 +19,11 @@ exclusions.
   per-client exclusion: that client's traffic may fall back to DIRECT.
 - Generation emits rule-sets for **every enabled client** (provider files are
   always staged for enabled clients): a ready client keeps its proxy group;
-  a down client's rule-sets target `REJECT` (or `DIRECT` when excluded or the
-  global switch is off). `MATCH` follows the same rule for a down default
-  client. `REJECT` is not a proxy group, so DoH is left unpinned in that case.
+  a down client's **user pins** still name that group (ADR 0082, stub proxy)
+  instead of rewriting to `REJECT`. `MATCH` still fail-closes to `REJECT`
+  (or `DIRECT` when excluded or the global switch is off) when the default
+  client is down. `REJECT` is not a proxy group, so DoH is left unpinned in
+  that case.
 - While running, a select group whose only proxy is a dead loopback port or a
   removed side-tunnel interface already fails closed at the connection level;
   no extra rules are needed for mid-session death.

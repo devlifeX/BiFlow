@@ -29,7 +29,6 @@ import { ConnectionActionButton } from "./ConnectionActionButton";
 import { ClientRegistry } from "./ClientRegistry";
 import { LifecycleCancelButton } from "./LifecycleCancelButton";
 import { StatusPill } from "./StatusPill";
-import { isHiddenProductionHost } from "../lib/hiddenHosts";
 import { clientColor } from "../lib/outbound";
 import { presetById, type PresetId } from "../lib/presets";
 
@@ -460,7 +459,7 @@ function TrafficFlow() {
             const branchKey = branchForOutbound(row.outbound);
             if (!branchKey) continue;
             const label = row.host || row.destination_ip;
-            if (!label || isHiddenProductionHost(label)) continue;
+            if (!label) continue;
             const dedupe = `${label}|${branchKey}`;
             const lastSeen = recentPackets.current.get(dedupe) ?? 0;
             if (Date.now() - lastSeen < FLOW_PACKET_LIFE_MS * 2) continue;

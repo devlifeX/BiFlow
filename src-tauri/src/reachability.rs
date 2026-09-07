@@ -85,21 +85,21 @@ pub struct VpnProxies {
 }
 
 /// True for `google.com` and every subdomain. Production builds omit these
-/// hosts from reachability rows and live-connection lists.
+/// hosts from the Diagnostics reachability probe only.
 #[must_use]
 pub fn is_google_host(host: &str) -> bool {
     let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
     host == "google.com" || host.ends_with(".google.com")
 }
 
-/// Release packages hide Google probes and live hosts; debug/`./dev.sh` keeps them.
+/// Release packages hide the Google reachability probe; debug/`./dev.sh` keeps it.
 #[must_use]
 pub const fn hide_google_in_this_build() -> bool {
     !cfg!(debug_assertions)
 }
 
 fn target_is_visible(target: &Target, hide_google: bool) -> bool {
-    !(hide_google && target.id == "google")
+    !(hide_google && is_google_host(target.domain))
 }
 
 fn proxy_for(target: &Target, proxies: &VpnProxies) -> Option<(String, u16)> {

@@ -20,6 +20,8 @@ validate_with_mihomo() {
   cp "${ROOT}/resources/rules/private.txt" "${tmp}/private.txt"
   cp "${ROOT}/resources/rules/iran-domains.txt" "${tmp}/iran-domains.txt"
   cp "${ROOT}/resources/rules/iran-networks.txt" "${tmp}/iran-networks.txt"
+  cp "${ROOT}/resources/rules/iran-business-domains.txt" "${tmp}/iran-business-domains.txt"
+  cp "${ROOT}/resources/rules/iran-cdn-networks.txt" "${tmp}/iran-cdn-networks.txt"
   : > "${tmp}/custom-direct-domains.txt"
   : > "${tmp}/custom-direct-ips.txt"
   cat > "${tmp}/config.yaml" <<'YAML'
@@ -43,14 +45,24 @@ rule-providers:
     type: file
     behavior: domain
     path: iran-domains.txt
+  iran-business-domains:
+    type: file
+    behavior: domain
+    path: iran-business-domains.txt
   iran-networks:
     type: file
     behavior: ipcidr
     path: iran-networks.txt
+  iran-cdn-networks:
+    type: file
+    behavior: ipcidr
+    path: iran-cdn-networks.txt
 rules:
   - RULE-SET,private-networks,DIRECT
   - RULE-SET,iran-domains,DIRECT
+  - RULE-SET,iran-business-domains,DIRECT
   - RULE-SET,iran-networks,DIRECT
+  - RULE-SET,iran-cdn-networks,DIRECT
   - MATCH,DIRECT
 YAML
   if ! output="$("${MIHOMO}" -t -d "${tmp}" -f "${tmp}/config.yaml" 2>&1)"; then

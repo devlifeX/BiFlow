@@ -354,6 +354,12 @@ describe("release artifact names", () => {
     assert.match(source, /BIFLOW_DEV_HELPER_SOCKET/);
     assert.match(source, /BIFLOW_DEV_SYSTEM_RUNTIME/);
     assert.match(source, /BIFLOW_DEV_MIHOMO_BINARY/);
+    assert.match(source, /tun_name="biflow-dev"/);
+    assert.match(source, /read_dev_tun_name "\$\{DEV_PROFILE_DIR\}"/);
+    assert.doesNotMatch(
+      source,
+      /read_dev_tun_name\(\) \{[\s\S]*?\.config\/biflow\/config\.toml/,
+    );
     assert.match(source, /authorized_uid/);
     assert.match(source, /authorized_gid/);
     assert.match(source, /KillMode=control-group/);

@@ -54,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let cidrs = include_str!("../../../resources/rules/private.txt")
                 .lines()
                 .chain(include_str!("../../../resources/rules/iran-networks.txt").lines())
+                .chain(include_str!("../../../resources/rules/iran-cdn-networks.txt").lines())
                 .filter(|line| !line.is_empty() && !line.starts_with('#'))
                 .map(str::parse)
                 .collect::<Result<Vec<_>, _>>()?;
@@ -166,6 +167,13 @@ impl PlatformBackend for DemoBackend {
     async fn start_core(&self, _generation: &RuntimeGeneration) -> Result<(), CoreError> {
         *self.running.lock().await = true;
         Ok(())
+    }
+    async fn reload_core(
+        &self,
+        generation: &RuntimeGeneration,
+        _rebind_host: Option<String>,
+    ) -> Result<(), CoreError> {
+        self.start_core(generation).await
     }
     async fn stop_core(&self) -> Result<(), CoreError> {
         *self.running.lock().await = false;

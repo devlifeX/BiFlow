@@ -756,10 +756,19 @@ function LiveConnectionsCard() {
       void desktop
         .listActiveConnections()
         .then((next) => {
-          if (!cancelled) setRows(next);
+          if (cancelled) return;
+          setRows((previous) => {
+            // A pin hot-reloads Mihomo. Keep the last rows while that apply is
+            // in flight so the table does not flash empty.
+            if (next.length === 0 && previous.length > 0 && actionPending) {
+              return previous;
+            }
+            return next;
+          });
         })
         .catch(() => {
-          if (!cancelled) setRows([]);
+          // The controller can blip during a live reload. Clearing here made
+          // every route change look like "the list vanished".
         });
     };
     load();
@@ -768,11 +777,9 @@ function LiveConnectionsCard() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [live]);
+  }, [live, actionPending]);
 
-  const groups = groupConnections(
-    rows.filter((row) => !isHiddenProductionHost(row.host)),
-  );
+  const groups = groupConnections(rows);
   const ruleOptions = [
     ...new Set(groups.map((group) => group.rule).filter(Boolean)),
   ].sort();

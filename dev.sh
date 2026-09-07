@@ -100,10 +100,9 @@ toml_escape() {
 }
 
 read_dev_tun_name() {
-  local account_home="$1"
-  local config_base config_path setting_line tun_name="clash-iran"
-  config_base="${XDG_CONFIG_HOME:-${account_home}/.config}"
-  config_path="${config_base}/biflow/config.toml"
+  local profile_dir="$1"
+  local config_path setting_line tun_name="biflow-dev"
+  config_path="${profile_dir}/config/config.toml"
   if [[ -f "${config_path}" ]]; then
     setting_line="$(command awk '
       /^\[mihomo\][[:space:]]*$/ { in_mihomo = 1; next }
@@ -239,7 +238,7 @@ prepare_dev_helper() {
   # The dev app stages generations inside its isolated profile, so the dev
   # helper must read from the same place — never the installed app's data.
   staging_dir="${DEV_PROFILE_DIR}/data/runtime/generations"
-  tun_name="$(read_dev_tun_name "${account_home}")"
+  tun_name="$(read_dev_tun_name "${DEV_PROFILE_DIR}")"
 
   DEV_HELPER_UNIT="biflow-dev-helper-${developer_uid}.service"
   DEV_HELPER_ROOT="/run/biflow-dev-${developer_uid}"
@@ -417,13 +416,14 @@ run_dev() {
   trap 'exit 130' INT
   trap 'exit 143' TERM
   trap 'exit 129' HUP
-  prepare_dev_helper
   # Keep the development profile away from the installed app's profile:
   # config schema migration is one-way, and a dev run must never break the
-  # release build the developer relies on.
+  # release build the developer relies on. Export it before the helper so
+  # TUN/port isolation and helper staging agree.
   export BIFLOW_DEV_PROFILE="${DEV_PROFILE_DIR}"
-  command mkdir -p -- "${BIFLOW_DEV_PROFILE}"
+  command mkdir -p -- "${BIFLOW_DEV_PROFILE}/config" "${BIFLOW_DEV_PROFILE}/data" "${BIFLOW_DEV_PROFILE}/cache"
   command printf 'Development profile: %s\n' "${BIFLOW_DEV_PROFILE}"
+  prepare_dev_helper
   command pnpm tauri dev
 }
 

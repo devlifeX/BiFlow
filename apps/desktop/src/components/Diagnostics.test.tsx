@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { desktop } from "../api/desktop";
@@ -399,6 +399,76 @@ describe("Diagnostics", () => {
     await userEvent.clear(search);
     await userEvent.type(search, "no-such-host");
     expect(screen.getByText("No connections match this filter.")).toBeVisible();
+  });
+
+  it("shows a google.com live connection so a Windscribe pin can be verified", async () => {
+    vi.mocked(desktop.listActiveConnections).mockResolvedValue([
+      {
+        host: "www.google.com",
+        destination_ip: "8.8.8.8",
+        outbound: MOCK_HIDDIFY_ID,
+        rule: "DOMAIN-SUFFIX",
+      },
+    ]);
+    useAppStore.setState({
+      settings: baseSettings(),
+      snapshot: baseSnapshot({ phase: "running" }),
+    });
+    render(<Diagnostics report={null} />);
+    expect(await screen.findByText("www.google.com")).toBeVisible();
+  });
+
+  it("keeps live connections while a route apply is in flight", async () => {
+    vi.mocked(desktop.listActiveConnections)
+      .mockResolvedValueOnce([
+        {
+          host: "openai.com",
+          destination_ip: "104.18.1.1",
+          outbound: MOCK_HIDDIFY_ID,
+          rule: "MATCH",
+        },
+      ])
+      .mockResolvedValue([]);
+    useAppStore.setState({
+      settings: baseSettings(),
+      actionPending: false,
+      snapshot: baseSnapshot({ phase: "running" }),
+    });
+    render(<Diagnostics report={null} />);
+    expect(await screen.findByText("openai.com")).toBeVisible();
+    useAppStore.setState({ actionPending: true });
+    await waitFor(() => {
+      expect(
+        vi.mocked(desktop.listActiveConnections).mock.calls.length,
+      ).toBeGreaterThan(1);
+    });
+    expect(screen.getByText("openai.com")).toBeVisible();
+  });
+
+  it("keeps live connections when a poll fails", async () => {
+    vi.mocked(desktop.listActiveConnections)
+      .mockResolvedValueOnce([
+        {
+          host: "openai.com",
+          destination_ip: "104.18.1.1",
+          outbound: MOCK_HIDDIFY_ID,
+          rule: "MATCH",
+        },
+      ])
+      .mockRejectedValue(new Error("controller unavailable"));
+    useAppStore.setState({
+      settings: baseSettings(),
+      snapshot: baseSnapshot({ phase: "running" }),
+    });
+    render(<Diagnostics report={null} />);
+    expect(await screen.findByText("openai.com")).toBeVisible();
+    useAppStore.setState({ actionPending: true });
+    await waitFor(() => {
+      expect(
+        vi.mocked(desktop.listActiveConnections).mock.calls.length,
+      ).toBeGreaterThan(1);
+    });
+    expect(screen.getByText("openai.com")).toBeVisible();
   });
 
   it("shows a reachability row per fixed probe domain", async () => {

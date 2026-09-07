@@ -55,6 +55,14 @@ const curatedCatalog = [
     source: "curated",
     sourcesFile: "iran-business-domains.sources.json",
   },
+  {
+    id: "iran-cdn-networks",
+    localName: "iran-cdn-networks.txt",
+    kind: "ip_cidr",
+    minimumEntries: 1,
+    source: "curated",
+    sourcesFile: "iran-cdn-networks.sources.json",
+  },
 ];
 
 export function sha256(bytes) {
@@ -192,6 +200,12 @@ minimum entry counts without accessing the network.
 Bundled rule files use LF bytes only. Root \`.gitattributes\` marks
 \`resources/rules/*\` as \`-text\` so Windows Git checkout does not rewrite CRLF and
 break SHA-256 verification during \`bundle:check\`.
+
+Curated files (\`source: "curated"\`) are BiFlow-owned DIRECT catalogs, not
+Chocolate4U. Cloud refresh must not overwrite them. Provenance lives in the
+matching \`*.sources.json\`. Extra CIDRs need containment-diff against
+\`iran-networks.txt\` plus a first-party or Iranian-ASN source; do not union the
+IR RIR table.
 `;
 }
 
@@ -258,19 +272,37 @@ export function checkCuratedCatalog(manifest, snapshotMd) {
       readFileSync(join(rulesDir, entry.sourcesFile), "utf8"),
     );
     assert.equal(sources.source, "curated");
-    const domains = bytes
+    if (entry.kind === "domain") {
+      const domains = bytes
+        .toString("utf8")
+        .split(/\n/u)
+        .map((line) => line.trim())
+        .filter((line) => line.startsWith("+."))
+        .map((line) => line.slice(2));
+      assert.equal(sources.entries.length, domains.length);
+      for (const item of sources.entries) {
+        assert.ok(domains.includes(item.domain), `missing ${item.domain}`);
+        assert.ok(
+          !item.domain.endsWith(".ir"),
+          `${item.domain} is already +.ir`,
+        );
+        assert.ok(item.official_url, `${item.domain} needs official_url`);
+        assert.ok(item.verified_at, `${item.domain} needs verified_at`);
+        assert.ok(item.status, `${item.domain} needs status`);
+      }
+      continue;
+    }
+    const prefixes = bytes
       .toString("utf8")
       .split(/\n/u)
       .map((line) => line.trim())
-      .filter((line) => line.startsWith("+."))
-      .map((line) => line.slice(2));
-    assert.equal(sources.entries.length, domains.length);
+      .filter((line) => line.length > 0 && !line.startsWith("#"));
+    assert.equal(sources.entries.length, prefixes.length);
     for (const item of sources.entries) {
-      assert.ok(domains.includes(item.domain), `missing ${item.domain}`);
-      assert.ok(!item.domain.endsWith(".ir"), `${item.domain} is already +.ir`);
-      assert.ok(item.official_url, `${item.domain} needs official_url`);
-      assert.ok(item.verified_at, `${item.domain} needs verified_at`);
-      assert.ok(item.status, `${item.domain} needs status`);
+      assert.ok(prefixes.includes(item.prefix), `missing ${item.prefix}`);
+      assert.ok(item.publisher, `${item.prefix} needs publisher`);
+      assert.ok(item.official_url, `${item.prefix} needs official_url`);
+      assert.ok(item.verified_at, `${item.prefix} needs verified_at`);
     }
   }
 }

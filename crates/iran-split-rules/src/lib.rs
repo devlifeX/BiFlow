@@ -1546,6 +1546,78 @@ mod tests {
         assert_eq!(decision.outbound, Outbound::Direct);
         assert_eq!(decision.reason, DecisionReason::IranDomain);
         assert_eq!(decision.matched_rule.as_deref(), Some("kavenegar.com"));
+        let arzinja = set.decide("www.arzinja.info").expect("decide");
+        assert_eq!(arzinja.outbound, Outbound::Direct);
+        assert_eq!(arzinja.reason, DecisionReason::IranDomain);
+        assert_eq!(arzinja.matched_rule.as_deref(), Some("arzinja.info"));
+        let ketabrah = set.decide("www.ketabrah.com").expect("decide");
+        assert_eq!(ketabrah.outbound, Outbound::Direct);
+        assert_eq!(ketabrah.reason, DecisionReason::IranDomain);
+        assert_eq!(ketabrah.matched_rule.as_deref(), Some("ketabrah.com"));
+    }
+
+    #[test]
+    fn curated_cdn_cidrs_are_direct_and_client_ip_pins_win() {
+        let cidrs = include_str!("../../../resources/rules/iran-cdn-networks.txt")
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::parse)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("cidrs");
+        let custom = RoutePinsDocument {
+            revision: 1,
+            pins: vec![PinnedRoute {
+                target: DirectTarget::Ip("185.163.216.9".parse().expect("ip")),
+                outbound: test_outbound(),
+                list_id: None,
+                resolved_ips: vec![],
+                created_at: Utc::now(),
+                refreshed_at: None,
+            }],
+            lists: vec![],
+        };
+        let set =
+            RuleSet::from_sources(&custom, [], cidrs, [], test_outbound(), &enabled_clients());
+        let covered = set.decide("185.172.72.10").expect("decide");
+        assert_eq!(covered.outbound, Outbound::Direct);
+        assert_eq!(covered.reason, DecisionReason::IranCidr);
+        let pinned = set.decide("185.163.216.9").expect("pin");
+        assert_eq!(pinned.outbound, test_outbound());
+        assert_eq!(pinned.reason, DecisionReason::VpnRule);
+    }
+
+    #[test]
+    fn a_client_google_com_pin_covers_every_subdomain() {
+        let custom = RoutePinsDocument {
+            revision: 1,
+            pins: vec![PinnedRoute {
+                target: DirectTarget::Domain("google.com".into()),
+                outbound: test_outbound(),
+                list_id: None,
+                resolved_ips: vec![],
+                created_at: chrono::Utc::now(),
+                refreshed_at: None,
+            }],
+            lists: vec![],
+        };
+        let set = iran_rule_set(&custom);
+        for host in [
+            "google.com",
+            "www.google.com",
+            "gemini.google.com",
+            "accounts.google.com",
+        ] {
+            let decision = set.decide(host).expect("decide");
+            assert_eq!(decision.outbound, test_outbound(), "{host}");
+            assert_eq!(decision.matched_rule.as_deref(), Some("google.com"));
+        }
+        assert_eq!(
+            set.decide("notgoogle.com")
+                .expect("sibling")
+                .matched_rule
+                .as_deref(),
+            Some("MATCH")
+        );
     }
 
     #[tokio::test]

@@ -23,13 +23,15 @@ pin. Shipping that hostname in the production UI is undesirable; debug and
   (`/usr/bin/happ`, `/opt/happ/bin/Happ`, `%LOCALAPPDATA%\Happ\Happ.exe`).
 - Probe `google.com` through Happ's SOCKS port when Happ is running,
   otherwise Hiddify. Other VPN probes keep the Hiddify-first order.
-- Omit `google.com` and `*.google.com` from reachability rows, live
-  connections, and Dashboard packets in release / `import.meta.env.PROD`
-  builds. Debug builds keep them. User pins in Direct Rules stay visible
-  so the operator can still edit them.
+- Omit `google.com` and `*.google.com` from the Diagnostics **reachability**
+  card in release / `import.meta.env.PROD` builds. Debug builds keep the
+  probe. Live connections and Dashboard packets show whatever Mihomo is
+  handling, including a user pin on `google.com`. Direct Rules always
+  shows the pin.
 
 ## Consequences
 
 A packaged Connect finds the distro Happ binary without a manual path on
-the client card. Production screens never render Google hostnames; routing
-and debug.log probes (debug builds only) still work.
+the client card. Production reachability never renders the Google probe;
+live connections still show Google hosts when they have traffic so a pin
+can be verified.

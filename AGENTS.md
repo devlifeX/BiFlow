@@ -70,6 +70,28 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- Never merge extras into Chocolate4U snapshots. Extra CIDRs need
+  containment-diff against `iran-networks.txt` plus a first-party CDN page
+  or an Iranian ASN; RIPEstat IR leftovers are often announced from
+  LeaseWeb/OVH and must not be unioned into DIRECT (ADR 0084).
+- Tehran Index sector HTML under-counts the registry. Harvest
+  `https://tehranindex.com/companies` (and remaining live sector slugs)
+  before concluding a non-`.ir` Iranian site is already covered; ship
+  only first-party pages that verify, and leave TLS-dead leftovers in
+  the considering dump (ADR 0085).
+- Pin/list changes must overlay the new generation into the running Mihomo
+  workdir and `PUT /configs` (ADR 0083). `StartMihomo` on a new generation
+  id kills TUN, so Google (and every other tab) resolves over system DNS
+  during the gap and comes back on MATCH/Hiddify instead of Windscribe.
+  Close only connections for the moved pin so the live table updates
+  without dropping unrelated sites. Relative `config.yaml` is required:
+  Meta 1.19+ will not load a sibling generation directory.
+- Enabled-client pins must keep the Mihomo group name even when that
+  egress is missing from live handles. Rewriting them to `REJECT`/`DIRECT`
+  made a Windscribe pin on `google.com` look like it never applied, and
+  `*.google.com` followed the same broken outbound. Keep a stub group for
+  the named client (closed loopback SOCKS for side tunnels) and fail-close
+  only `MATCH` when the default client is down.
 - `cfg(windows)` code and tests never compile on the Linux host, and a
   full `--target x86_64-pc-windows-msvc` clippy from Linux dies in `ring`'s
   build script. When changing anything the Windows crates assert on
@@ -123,6 +145,13 @@ If a required command fails or emits a warning from project code, fix it in the 
 - Connect uses progressive side-tunnel budgets (15s, then 30s, then 60s) with
   a client-registry retry button; pass the chosen seconds through
   `start_stack` / `retry_side_tunnels` so the helper and IPC stay aligned.
+- A `BIFLOW_DEV_PROFILE` Connect that gets HTTP 401 from `127.0.0.1:19090`
+  is talking to the installed app's Mihomo (different secret), not a down
+  controller. Fail immediately as `ControllerUnauthorized`; remap the
+  production defaults to 19091/17891/2053 and TUN `biflow-dev`; never fall
+  back to `/run/iran-split/helper.sock` when the dev profile is set.
+  `./dev.sh` must read TUN name from the dev-profile config, not
+  `~/.config/biflow/config.toml`.
 - `sr-only` labels are absolutely positioned; without a positioned
   ancestor they anchor to the page and extend
   `documentElement.scrollHeight` once their form scrolls below the fold,
@@ -135,8 +164,16 @@ If a required command fails or emits a warning from project code, fix it in the 
   Debian installs `/usr/bin/happ` → `/opt/happ/bin/Happ`; a case-sensitive
   PATH lookup for `Happ` reports "executable was not found". Search
   well-known paths and ignore filename case. `google.com` is a debug-only
-  reachability/live-host label — release builds still route it, they just
-  omit the hostname from the UI.
+  reachability probe — release builds still route it and still show it in
+  live connections / Dashboard packets when Mihomo has that traffic. Hide
+  it only on the Reachability card.
+- Changing a live-connection route hot-reloads Mihomo (`apply_user_rules` →
+  `reload_core`). Do not `setRows([])` when that poll fails or returns empty
+  during `actionPending`; the table flashing empty made pins look like
+  they never applied. After the reload, close only the moved host so it
+  reconnects on the new outbound. Enabled-client pins keep the Mihomo group
+  even when that egress is still coming up (ADR 0082); Windscribe traffic
+  only leaves through the tunnel once the side tunnel is actually running.
 - Windscribe rides the OpenVPN driver. The missing-binary banner and
   catalog row must offer the OpenVPN installer page, not only the
   Windscribe config generator. Do not tell operators to run the Windscribe GUI.
@@ -259,7 +296,7 @@ already in progress"`. Cache the last `UpdateInfo` (never log asset URLs).
 - `schtasks /TR "\"exe\" --config \"file\""` stores one broken action: `/Create` and `/Run` return 0, the GUI-subsystem helper never starts, and the desktop times out with “installed but is not reachable yet” while every pipe open is `os error 2`. Register the task from UTF-16 XML with separate `Command` and `Arguments`, wait for `\\.\pipe\iran-split-helper-v1` before returning success, and persist `run_named_pipe` failures to `install.log`.
 - Never probe a named pipe with `Path::exists()`. It calls `fs::metadata`, an NPFS object has no file attributes to return, and the check reports a healthy helper as missing — turning a working install into a 15s timeout. Open the pipe the way the desktop does and treat only `ERROR_FILE_NOT_FOUND` (2) as absent; a busy instance or a denied ACL still proves it exists. Related Task Scheduler footguns: `<AllowHardTerminate>false</AllowHardTerminate>` makes `schtasks /End` a no-op, so a reinstall then dies on `ERROR_SHARING_VIOLATION` copying over the running helper's own image; `schtasks` writes UTF-16 to a pipe (sometimes with no BOM), so `from_utf8_lossy` alone silently yields text nothing can be found in; and `install.log` is read back one line at a time, so every message written to it must be collapsed to one line first.
 - Windows `register_runtime_generation` failing with `INVALID_GENERATION` / `cannot find the file specified (os error 2)` at `C:\ProgramData\biflow\runtime\generations` is the 4.2 NSIS `$LOCALAPPDATA` all-users expansion (ADR 0064), not a missing generation UUID. Do not point helper.toml at a user profile: an elevated Install records the administrator's `%LOCALAPPDATA%` and every later run as the normal user misses it — the Windows twin of the Linux `sudo` uid-0 bug. Reinstalling the 4.3 helper rewrites staging to `C:\ProgramData\iran-split\staging` and the ACL. Never let `canonicalize` errors reach the client bare; name the staging root and the generation directory so one log line identifies the mismatch.
-- `RuleManager::pin` must not wait on DoH. Resolve remains metadata-only on `refresh()`. A live apply rebuilds the generation and starts Mihomo on it; success is persist plus apply when the stack is running or degraded.
+- `RuleManager::pin` must not wait on DoH. Resolve remains metadata-only on `refresh()`. A live apply rebuilds the generation, overlays it into the running Mihomo workdir, and `PUT /configs`; success is persist plus apply when the stack is running or degraded.
 - The connection glow rings the shell from `.connection-glow::after` (a fixed, `pointer-events: none` overlay), never the shell's own border — a real border shifts the fixed 1120x760 layout. `running` is green, `paused` amber, every other phase unringed; `data-connection-glow` carries the state so e2e can assert it without reading colours. The pulse is disabled under `prefers-reduced-motion`.
 - `install.log` is the only channel out of the elevated Windows helper (`Start-Process -Verb RunAs` cannot redirect stdio and the helper is a `windows` subsystem binary), so the desktop must delete it **before** elevating. The helper overwrites it only when it reaches its own error path; a process that dies earlier leaves the previous attempt's line behind, and reporting a stale reason is worse than reporting none.
 - Assigning `field.value` in a custom paste menu does not update a controlled React input. Use the native value setter from `Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")` and dispatch a bubbling `InputEvent`. Capture the target before the clipboard read; unmount or disable afterwards is a no-op. `addRule`/`pinRoute` must rethrow so the form clears only on success. Native WebView2/WebKitGTK `navigator.clipboard.readText()` is often `NotAllowedError`; read and write through `tauri-plugin-clipboard-manager` in Tauri and keep `navigator.clipboard` for Vite/Playwright. Surface a short paste/copy/cut error instead of swallowing it. Direct Rules must `extractHost` before `addRule` so a pasted URL is accepted.

@@ -17,8 +17,9 @@ also must not be forced to stop Hiddify or OpenVPN just to reload routing.
 - After a save that affects live Mihomo (clients, default route, Mihomo
   ports/DNS/TUN, fail-closed, rule refresh) while the stack is running or
   degraded, show a banner: restart Mihomo, revert, or dismiss.
-- **Restart Mihomo** calls `apply_user_rules` (same path as pin live-apply).
-  Clients stay up. The banner clears on success.
+- **Restart Mihomo** calls `apply_user_rules` (same path as pin live-apply:
+  overlay + `PUT /configs`, process stays up). Clients stay up. The banner
+  clears on success.
 - **Revert** writes the pre-edit document back and clears the banner. The
   first pending snapshot is kept across further edits so revert undoes the
   whole batch.

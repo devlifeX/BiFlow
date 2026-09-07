@@ -1,0 +1,8 @@
+# Curated Iranian CDN/ISP prefixes (not from Chocolate4U).
+# Official first-party lists plus RIPEstat IR gaps that are missing, not
+# contained in iran-networks.txt, and announced by an Iranian ASN.
+# Arvancloud https://www.arvancloud.ir/en/ips.txt is already contained.
+# Do not union the rest of the IR RIR table: many leftovers are LeaseWeb/OVH.
+185.163.216.0/22
+185.172.72.0/22
+185.254.108.0/22

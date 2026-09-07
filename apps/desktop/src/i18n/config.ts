@@ -212,9 +212,9 @@ const resources = {
       testFlowButton: "Test flow",
       liveConnections: "Live connections",
       liveConnectionsHelp:
-        "Hosts and IPs Mihomo is handling right now, and whether each one is DIRECT or VPN.",
+        "Hosts Mihomo is handling right now. Changing a route reloads Mihomo, so this table clears until apps reconnect.",
       liveConnectionsEmpty:
-        "No active connections yet. Browse a site, then watch this list.",
+        "No active connections yet. Browse a site, then watch this list. After a route change, open the site again.",
       liveConnectionsHost: "Host",
       liveConnectionsCount: "Conns",
       liveConnectionsSearch: "Search host or IP",
@@ -292,6 +292,8 @@ const resources = {
         mihomoNotFound: "Mihomo is not installed.",
         mihomoStartFailed: "Mihomo could not start.",
         controllerTimeout: "Mihomo's controller did not become ready in time.",
+        controllerUnauthorized:
+          "Mihomo rejected BiFlow's controller secret. Quit the other BiFlow window (installed app vs ./dev.sh) and try again.",
         providerNotReady: "One or more rule providers are not ready.",
         tunCleanupFailed:
           "The owned TUN or routes could not be completely removed.",
@@ -511,9 +513,9 @@ const resources = {
       testFlowButton: "آزمایش مسیر",
       liveConnections: "اتصال‌های زنده",
       liveConnectionsHelp:
-        "دامنه و آی‌پی‌هایی که همین حالا Mihomo می‌بیند و اینکه مستقیم می‌روند یا وی‌پی‌ان.",
+        "دامنه و آی‌پی‌هایی که همین حالا Mihomo می‌بیند. عوض کردن مسیر Mihomo را از نو بار می‌کند، پس فهرست تا اتصال دوبارهٔ برنامه‌ها خالی می‌ماند.",
       liveConnectionsEmpty:
-        "هنوز اتصالی نیست. یک سایت باز کنید و این فهرست را ببینید.",
+        "هنوز اتصالی نیست. یک سایت باز کنید. بعد از عوض کردن مسیر، همان سایت را دوباره باز کنید.",
       liveConnectionsHost: "میزبان",
       liveConnectionsCount: "تعداد",
       liveConnectionsSearch: "جستجوی میزبان یا آی‌پی",
@@ -589,6 +591,8 @@ const resources = {
         mihomoNotFound: "میهومو نصب نشده است.",
         mihomoStartFailed: "میهومو نتوانست شروع شود.",
         controllerTimeout: "کنترل‌کننده میهومو به‌موقع آماده نشد.",
+        controllerUnauthorized:
+          "میهومو رمز کنترل‌کننده را نپذیرفت. پنجرهٔ دیگر BiFlow (نسخه نصب‌شده یا ./dev.sh) را ببندید و دوباره وصل شوید.",
         providerNotReady: "یک یا چند فراهم‌کننده قانون آماده نیست.",
         tunCleanupFailed: "تونل یا مسیرها به‌طور کامل حذف نشدند.",
         operationCancelled: "عملیات لغو شد.",

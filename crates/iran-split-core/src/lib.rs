@@ -101,6 +101,7 @@ pub enum ErrorCode {
     MihomoNotFound,
     MihomoStartFailed,
     ControllerTimeout,
+    ControllerUnauthorized,
     ProviderNotReady,
     TunCleanupFailed,
     RouteTestFailed,
@@ -348,6 +349,8 @@ pub enum CoreError {
     MihomoStartFailed(String),
     #[error("Mihomo controller readiness timed out")]
     ControllerTimeout,
+    #[error("Mihomo controller rejected the secret")]
+    ControllerUnauthorized,
     #[error("rule providers are not ready")]
     ProviderNotReady,
     #[error("owned TUN or route state could not be cleaned: {0}")]
@@ -416,6 +419,12 @@ impl CoreError {
                 true,
                 Some(Remediation::Retry),
             ),
+            Self::ControllerUnauthorized => (
+                ErrorCode::ControllerUnauthorized,
+                "errors.controllerUnauthorized",
+                true,
+                Some(Remediation::Retry),
+            ),
             Self::ProviderNotReady => (
                 ErrorCode::ProviderNotReady,
                 "errors.providerNotReady",
@@ -476,7 +485,7 @@ pub trait PlatformBackend: Send + Sync + 'static {
     /// started (e.g. the operator connected Happ minutes after Connect failed
     /// its one-shot probe). Returns `true` when at least one egress was
     /// verified and its handle added, so the engine can regenerate the live
-    /// Mihomo config and move pinned traffic off the REJECT/DIRECT fallback.
+    /// Mihomo config so recovered clients replace the stub group.
     async fn recover_clients(&self) -> Result<bool, CoreError> {
         Ok(false)
     }
@@ -502,6 +511,14 @@ pub trait PlatformBackend: Send + Sync + 'static {
     async fn prepare_runtime(&self) -> Result<RuntimeGeneration, CoreError>;
     async fn validate_runtime(&self, generation: &RuntimeGeneration) -> Result<(), CoreError>;
     async fn start_core(&self, generation: &RuntimeGeneration) -> Result<(), CoreError>;
+    /// Publishes a new generation into the running Mihomo workdir and reloads
+    /// it without killing the process. `rebind_host` is a pin that should
+    /// reconnect immediately; it must not be logged.
+    async fn reload_core(
+        &self,
+        generation: &RuntimeGeneration,
+        rebind_host: Option<String>,
+    ) -> Result<(), CoreError>;
     async fn stop_core(&self) -> Result<(), CoreError>;
     async fn stop_user_proxy(&self) -> Result<(), CoreError> {
         Ok(())
@@ -727,8 +744,8 @@ impl<B: PlatformBackend> Engine<B> {
     /// hot-applies routing when one of them recovered (ADR 0076).
     ///
     /// Connect probes a local proxy such as Happ exactly once; when the
-    /// operator connects that client minutes later its pinned domains stay on
-    /// the REJECT/DIRECT fallback until the next full reconnect. This runs on
+    /// operator connects that client minutes later its pinned domains keep
+    /// the client group (ADR 0082) but still need a live SOCKS bind. This runs on
     /// the periodic health tick, so a recovered client rejoins routing without
     /// restarting the stack. A failed apply is retried on the next tick.
     pub async fn recover_clients(&self) {
@@ -1004,12 +1021,27 @@ impl<B: PlatformBackend> Engine<B> {
     ///
     /// Stopped or paused stacks only need the persisted document; the next
     /// start consumes that revision. A conflicting lifecycle lock is retryable.
+    /// The running Mihomo process stays up; only the moved pin is rebound.
     ///
     /// # Errors
     ///
     /// Returns [`CoreError::OperationInProgress`] when Connect/Disconnect/Pause
     /// is reserved, or a platform/readiness error when the live reload fails.
     pub async fn apply_user_rules(&self) -> Result<(), CoreError> {
+        self.apply_user_rules_with_rebind(None).await
+    }
+
+    /// Same as [`Self::apply_user_rules`], then closes live connections for
+    /// `rebind_host` so that name reconnects on the new outbound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::OperationInProgress`] when Connect/Disconnect/Pause
+    /// is reserved, or a platform/readiness error when the live reload fails.
+    pub async fn apply_user_rules_with_rebind(
+        &self,
+        rebind_host: Option<String>,
+    ) -> Result<(), CoreError> {
         if !matches!(
             self.snapshot().phase,
             StackPhase::Running | StackPhase::Degraded
@@ -1021,14 +1053,21 @@ impl<B: PlatformBackend> Engine<B> {
         // The live apply re-stages the generation and re-validates with the
         // Mihomo binary (itself up to 10s); a shorter budget made every pin
         // move time out and silently revert the document.
-        let result = tokio::time::timeout(Duration::from_secs(30), self.run_apply_rules(&cancel))
-            .await
-            .unwrap_or(Err(CoreError::OperationTimeout));
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            self.run_apply_rules(&cancel, rebind_host),
+        )
+        .await
+        .unwrap_or(Err(CoreError::OperationTimeout));
         self.release_lifecycle(LifecycleBusy::ApplyingRules).await;
         result
     }
 
-    async fn run_apply_rules(&self, cancel: &CancellationToken) -> Result<(), CoreError> {
+    async fn run_apply_rules(
+        &self,
+        cancel: &CancellationToken,
+        rebind_host: Option<String>,
+    ) -> Result<(), CoreError> {
         info!(
             event = "rules.apply_started",
             section = "rules",
@@ -1041,7 +1080,7 @@ impl<B: PlatformBackend> Engine<B> {
         check_cancelled(cancel)?;
         self.backend.validate_runtime(&generation).await?;
         check_cancelled(cancel)?;
-        self.backend.start_core(&generation).await?;
+        self.backend.reload_core(&generation, rebind_host).await?;
         check_cancelled(cancel)?;
         let readiness = self.backend.check_readiness(cancel.clone()).await?;
         if !readiness.controller_ready {
@@ -1175,7 +1214,7 @@ impl<B: PlatformBackend> Engine<B> {
                 OperationKind::Stop => self.run_stop(item.id).await,
                 OperationKind::Pause => self.run_pause(item.id).await,
                 OperationKind::Resume => self.run_resume(item.id, &item.cancel).await,
-                OperationKind::ApplyRules => self.run_apply_rules(&item.cancel).await,
+                OperationKind::ApplyRules => self.run_apply_rules(&item.cancel, None).await,
             }
         };
         if let Ok(result) = tokio::time::timeout(self.timeout_for(item.kind), work).await {
@@ -1978,6 +2017,7 @@ mod tests {
         /// 0 = no primary to probe, 1 = egress OK, 2 = egress dead.
         primary_probe: AtomicUsize,
         starts: AtomicUsize,
+        reloads: AtomicUsize,
         cleanups: AtomicUsize,
         proxy_stops: AtomicUsize,
         proxy_clears: AtomicUsize,
@@ -2114,6 +2154,15 @@ mod tests {
             Ok(())
         }
 
+        async fn reload_core(
+            &self,
+            _generation: &RuntimeGeneration,
+            _rebind_host: Option<String>,
+        ) -> Result<(), CoreError> {
+            self.reloads.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
         async fn stop_core(&self) -> Result<(), CoreError> {
             self.process.store(false, Ordering::SeqCst);
             Ok(())
@@ -2245,11 +2294,13 @@ mod tests {
         // A recovered client re-stages and hot-applies the runtime config.
         backend.recover_ready.store(true, Ordering::SeqCst);
         engine.recover_clients().await;
-        assert_eq!(backend.starts.load(Ordering::SeqCst), 2);
+        assert_eq!(backend.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.reloads.load(Ordering::SeqCst), 1);
 
         // The pending flag is consumed: the next tick stays quiet.
         engine.recover_clients().await;
-        assert_eq!(backend.starts.load(Ordering::SeqCst), 2);
+        assert_eq!(backend.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.reloads.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -2667,7 +2718,14 @@ mod tests {
             .expect("running");
         let starts = backend.starts.load(Ordering::SeqCst);
         engine.apply_user_rules().await.expect("live apply");
-        assert_eq!(backend.starts.load(Ordering::SeqCst), starts + 1);
+        assert_eq!(backend.starts.load(Ordering::SeqCst), starts);
+        assert_eq!(backend.reloads.load(Ordering::SeqCst), 1);
+        engine
+            .apply_user_rules_with_rebind(Some("google.com".into()))
+            .await
+            .expect("rebind apply");
+        assert_eq!(backend.starts.load(Ordering::SeqCst), starts);
+        assert_eq!(backend.reloads.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -2715,6 +2773,9 @@ mod tests {
         let timeout = CoreError::ControllerTimeout.to_app_error(Uuid::nil());
         assert_eq!(timeout.code, ErrorCode::ControllerTimeout);
         assert_eq!(timeout.message_key, "errors.controllerTimeout");
+        let unauthorized = CoreError::ControllerUnauthorized.to_app_error(Uuid::nil());
+        assert_eq!(unauthorized.code, ErrorCode::ControllerUnauthorized);
+        assert_eq!(unauthorized.message_key, "errors.controllerUnauthorized");
         let wrapped =
             CoreError::Platform("Mihomo readiness check timed out: controller unavailable".into())
                 .to_app_error(Uuid::nil());

@@ -1,6 +1,6 @@
 use futures_util::StreamExt;
 use iran_split_clients::{
-    process_bypass_union, synthesized_local_handle, DriverPlatform, EgressHandle,
+    process_bypass_union, synthesized_egress_handle, DriverPlatform, EgressHandle,
 };
 use iran_split_config::{AppConfig, DefaultRoute, EgressKind};
 use iran_split_rules::{DirectTarget, RoutePinsDocument};
@@ -37,6 +37,8 @@ pub enum MihomoError {
     ValidationRejected(String),
     #[error("Mihomo readiness check timed out: {0}")]
     ReadinessTimeout(String),
+    #[error("Mihomo controller rejected the secret; another instance may already own this port")]
+    Unauthorized,
     #[error("operation was cancelled")]
     Cancelled,
     #[error("log WebSocket failed: {0}")]
@@ -55,6 +57,7 @@ pub struct RuntimePaths {
     pub iran_domains: PathBuf,
     pub iran_business_domains: PathBuf,
     pub iran_networks: PathBuf,
+    pub iran_cdn_networks: PathBuf,
     pub custom_direct_domains: PathBuf,
     pub custom_direct_ips: PathBuf,
 }
@@ -223,15 +226,16 @@ pub fn generate_config_with_handles(
         ));
     }
 
-    let ready = ready_handles(app, handles);
-    let match_target = match_group(app, &ready);
+    let live = live_handles(app, handles);
+    let routing = routing_handles(app, &live);
+    let match_target = match_group(app, &live);
     let mut rules = process_bypass_rules(app, platform);
     rules.extend([
         "DOMAIN-SUFFIX,localhost,DIRECT".into(),
         "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve".into(),
         "IP-CIDR6,::1/128,DIRECT,no-resolve".into(),
     ]);
-    for exclude in ready.iter().flat_map(|handle| &handle.transport_excludes) {
+    for exclude in live.iter().flat_map(|handle| &handle.transport_excludes) {
         let flag = if exclude.addr().is_ipv6() {
             "IP-CIDR6"
         } else {
@@ -242,14 +246,14 @@ pub fn generate_config_with_handles(
     // Domain pins are emitted inline, most specific first, so the longest
     // matching pin wins across lists and outbounds: a developer.google.com
     // pin overrides a google.com pin even when they route differently.
-    rules.extend(ordered_domain_pin_rules(app, custom_rules, &ready));
+    rules.extend(ordered_domain_pin_rules(app, custom_rules, &live, &routing));
     for client in app
         .enabled_clients()
         .into_iter()
         .filter(|client| client.spec().kind == EgressKind::OwnedSideTunnel)
     {
         let id = client.id.as_hyphenated();
-        let target = client_rule_target(app, client, &ready);
+        let target = client_rule_target(app, client, &live, &routing);
         rules.push(format!("RULE-SET,custom-{id}-ips,{target},no-resolve"));
     }
     rules.push("RULE-SET,private-networks,DIRECT,no-resolve".into());
@@ -259,7 +263,7 @@ pub fn generate_config_with_handles(
         .filter(|client| client.spec().kind == EgressKind::LocalProxy)
     {
         let id = client.id.as_hyphenated();
-        let target = client_rule_target(app, client, &ready);
+        let target = client_rule_target(app, client, &live, &routing);
         rules.push(format!("RULE-SET,custom-{id}-ips,{target},no-resolve"));
     }
     rules.extend([
@@ -267,6 +271,7 @@ pub fn generate_config_with_handles(
         "RULE-SET,iran-domains,DIRECT".into(),
         "RULE-SET,iran-business-domains,DIRECT".into(),
         "RULE-SET,iran-networks,DIRECT,no-resolve".into(),
+        "RULE-SET,iran-cdn-networks,DIRECT,no-resolve".into(),
         "AND,((NETWORK,udp),(DST-PORT,443)),REJECT".into(),
         format!("MATCH,{match_target}"),
     ]);
@@ -358,7 +363,7 @@ pub fn generate_config_with_handles(
                 ),
             ]),
         },
-        proxies: ready
+        proxies: routing
             .iter()
             .filter_map(|handle| handle.outbound.as_ref())
             .map(|outbound| ProxyConfig {
@@ -371,7 +376,7 @@ pub fn generate_config_with_handles(
                 routing_mark: outbound.routing_mark,
             })
             .collect(),
-        proxy_groups: ready
+        proxy_groups: routing
             .iter()
             .filter_map(|handle| handle.outbound.as_ref())
             .map(|outbound| ProxyGroup {
@@ -408,11 +413,13 @@ fn nameservers(match_target: &str) -> Vec<String> {
 /// Inline `DOMAIN-SUFFIX` rules for every user domain pin, ordered by
 /// specificity (label count, descending) so the longest matching pin wins.
 /// Pins of disabled clients are skipped, matching the "disable keeps pins
-/// but does not emit them" contract.
+/// but does not emit them" contract. Clash `DOMAIN-SUFFIX,google.com`
+/// matches the apex and every subdomain.
 fn ordered_domain_pin_rules(
     app: &AppConfig,
     custom_rules: &RoutePinsDocument,
-    ready: &[EgressHandle],
+    live: &[EgressHandle],
+    routing: &[EgressHandle],
 ) -> Vec<String> {
     let mut pins: Vec<(&str, String)> = Vec::new();
     for pin in &custom_rules.pins {
@@ -429,7 +436,7 @@ fn ordered_domain_pin_rules(
                 else {
                     continue;
                 };
-                client_rule_target(app, client, ready)
+                client_rule_target(app, client, live, routing)
             }
         };
         pins.push((domain.as_str(), target));
@@ -444,39 +451,59 @@ fn ordered_domain_pin_rules(
         .collect()
 }
 
-/// Rule target for one enabled client: its proxy group when the egress is
-/// ready, otherwise the fail-closed fallback (REJECT blocks the pinned hosts
-/// locally so the real IP never leaks; the per-client exclusion or a disabled
-/// global fail-closed downgrade that to DIRECT).
+/// Rule target for one enabled client. User pins keep the client group even
+/// when that egress is not live yet, so a Windscribe pin is not silently
+/// rewritten to DIRECT/REJECT (ADR 0082). MATCH still fail-closes separately.
 fn client_rule_target(
     app: &AppConfig,
     client: &iran_split_config::ClientInstance,
-    ready: &[EgressHandle],
+    live: &[EgressHandle],
+    routing: &[EgressHandle],
 ) -> String {
-    let group = ready
+    let group = routing
         .iter()
         .find(|handle| handle.client_id == client.id)
         .and_then(|handle| handle.outbound.as_ref())
-        .map(|outbound| outbound.group_name.clone());
-    match group {
-        Some(group) => group,
-        None if app.behavior.fail_closed && !client.allow_direct_when_down => "REJECT".into(),
-        None => "DIRECT".into(),
+        .map_or_else(
+            || client.group_name(),
+            |outbound| outbound.group_name.clone(),
+        );
+    if live.iter().any(|handle| handle.client_id == client.id) {
+        return group;
+    }
+    if app.behavior.fail_closed && !client.allow_direct_when_down {
+        group
+    } else {
+        "DIRECT".into()
     }
 }
 
-fn ready_handles(app: &AppConfig, handles: &[EgressHandle]) -> Vec<EgressHandle> {
-    if !handles.is_empty() {
-        return handles
-            .iter()
-            .filter(|handle| handle.ready && !handle.degraded)
-            .cloned()
+fn live_handles(app: &AppConfig, handles: &[EgressHandle]) -> Vec<EgressHandle> {
+    if handles.is_empty() {
+        return app
+            .enabled_clients()
+            .into_iter()
+            .filter_map(synthesized_egress_handle)
             .collect();
     }
-    app.enabled_clients()
-        .into_iter()
-        .filter_map(synthesized_local_handle)
+    handles
+        .iter()
+        .filter(|handle| handle.ready && !handle.degraded)
+        .cloned()
         .collect()
+}
+
+fn routing_handles(app: &AppConfig, live: &[EgressHandle]) -> Vec<EgressHandle> {
+    let mut routing = live.to_vec();
+    for client in app.enabled_clients() {
+        if routing.iter().any(|handle| handle.client_id == client.id) {
+            continue;
+        }
+        if let Some(stub) = synthesized_egress_handle(client) {
+            routing.push(stub);
+        }
+    }
+    routing
 }
 
 fn match_group(app: &AppConfig, ready: &[EgressHandle]) -> String {
@@ -562,6 +589,7 @@ fn providers(app: &AppConfig) -> BTreeMap<String, RuleProvider> {
             "iran-business-domains.txt",
         ),
         ("iran-networks", "ipcidr", "iran-networks.txt"),
+        ("iran-cdn-networks", "ipcidr", "iran-cdn-networks.txt"),
         (
             "custom-direct-domains",
             "domain",
@@ -840,6 +868,10 @@ impl ControllerClient {
 
     /// Replaces the active Mihomo configuration without restarting the process.
     ///
+    /// The path must live inside the running `-d` workdir. Pin applies overlay
+    /// new files there first, then reload `config.yaml` so rule-provider paths
+    /// stay valid on Mihomo Meta 1.19+.
+    ///
     /// # Errors
     ///
     /// Returns an error when the controller request fails or does not return
@@ -848,8 +880,11 @@ impl ControllerClient {
         let response = self
             .client
             .put(format!("{}/configs?force=true", self.base_url))
+            .timeout(Duration::from_secs(20))
             .bearer_auth(&self.secret)
-            .json(&serde_json::json!({ "path": config_path }))
+            .json(&serde_json::json!({
+                "path": config_path.to_string_lossy(),
+            }))
             .send()
             .await?;
         if response.status() != StatusCode::NO_CONTENT {
@@ -858,11 +893,49 @@ impl ControllerClient {
         Ok(())
     }
 
+    /// Closes live connections whose host or destination matches `pin`.
+    ///
+    /// Used after a pin apply so the moved name reconnects on the new
+    /// outbound without dropping unrelated sites. Does not log the pin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when listing connections fails. Individual close
+    /// failures are skipped so a vanished id cannot fail the apply.
+    pub async fn close_connections_matching(&self, pin: &str) -> Result<usize, MihomoError> {
+        let snapshot = self.connections_snapshot().await?;
+        let mut closed = 0_usize;
+        for entry in snapshot.connections {
+            if entry.id.is_empty() {
+                continue;
+            }
+            let host = if entry.metadata.host.is_empty() {
+                entry.metadata.destination_ip.as_str()
+            } else {
+                entry.metadata.host.as_str()
+            };
+            if !pin_matches_connection(pin, host, &entry.metadata.destination_ip) {
+                continue;
+            }
+            let response = self
+                .client
+                .delete(format!("{}/connections/{}", self.base_url, entry.id))
+                .bearer_auth(&self.secret)
+                .send()
+                .await?;
+            if response.status().is_success() || response.status() == StatusCode::NO_CONTENT {
+                closed += 1;
+            }
+        }
+        Ok(closed)
+    }
+
     /// Waits until Mihomo and every rule provider are ready.
     ///
     /// # Errors
     ///
-    /// Returns [`MihomoError::Cancelled`] when cancelled or
+    /// Returns [`MihomoError::Cancelled`] when cancelled,
+    /// [`MihomoError::Unauthorized`] when the controller rejects the secret, or
     /// [`MihomoError::ReadinessTimeout`] after the supplied timeout.
     pub async fn wait_until_ready(
         &self,
@@ -884,6 +957,12 @@ impl ControllerClient {
                     if providers.total > 0 && providers.ready == providers.total {
                         return Ok(providers);
                     }
+                }
+                (Err(error), _) if controller_rejected_secret(&error) => {
+                    return Err(MihomoError::Unauthorized);
+                }
+                (Ok(_), Err(error)) if controller_rejected_secret(&error) => {
+                    return Err(MihomoError::Unauthorized);
                 }
                 (Err(error), _) => {
                     last_status = format!("controller unavailable: {error}");
@@ -958,6 +1037,15 @@ impl ControllerClient {
     }
 }
 
+fn controller_rejected_secret(error: &MihomoError) -> bool {
+    match error {
+        MihomoError::Unauthorized => true,
+        MihomoError::UnexpectedStatus(status) => *status == StatusCode::UNAUTHORIZED,
+        MihomoError::Http(inner) => inner.status() == Some(StatusCode::UNAUTHORIZED),
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct VersionResponse {
     pub version: String,
@@ -997,6 +1085,8 @@ struct ConnectionsSnapshot {
 #[derive(Debug, Clone, Deserialize)]
 struct ConnectionEntry {
     #[serde(default)]
+    id: String,
+    #[serde(default)]
     metadata: ConnectionMetadata,
     #[serde(default)]
     chains: Vec<String>,
@@ -1034,6 +1124,23 @@ impl From<ConnectionEntry> for ActiveConnection {
             host,
         }
     }
+}
+
+/// True when a live connection belongs to the pin the operator just moved.
+///
+/// Domain pins cover the exact name and every subdomain. IP pins match the
+/// destination address. `notgoogle.com` does not match `google.com`.
+#[must_use]
+pub fn pin_matches_connection(pin: &str, host: &str, destination_ip: &str) -> bool {
+    let pin = pin.trim().trim_end_matches('.').to_ascii_lowercase();
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if pin.is_empty() {
+        return false;
+    }
+    if pin.parse::<IpAddr>().is_ok() {
+        return destination_ip.eq_ignore_ascii_case(&pin) || host == pin;
+    }
+    host == pin || host.ends_with(&format!(".{pin}"))
 }
 
 fn classify_outbound(chains: &[String], rule: &str) -> String {
@@ -1127,6 +1234,8 @@ async fn optional_exit_ip(client: &reqwest::Client) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iran_split_clients::{synthesized_local_handle, MihomoOutbound};
+    use iran_split_config::{ClientInstance, EgressKind, PresetId};
     use iran_split_rules::{Outbound, PinnedRoute, RoutePinsDocument};
     use std::net::Ipv4Addr;
 
@@ -1136,6 +1245,7 @@ mod tests {
             iran_domains: "/runtime/iran-domains.txt".into(),
             iran_business_domains: "/runtime/iran-business-domains.txt".into(),
             iran_networks: "/runtime/iran-networks.txt".into(),
+            iran_cdn_networks: "/runtime/iran-cdn-networks.txt".into(),
             custom_direct_domains: "/runtime/custom-direct-domains.txt".into(),
             custom_direct_ips: "/runtime/custom-direct-ips.txt".into(),
         }
@@ -1182,8 +1292,16 @@ mod tests {
             .yaml
             .find("RULE-SET,iran-networks,DIRECT")
             .expect("iran-networks rule");
+        let iran_cdn_networks = generated
+            .yaml
+            .find("RULE-SET,iran-cdn-networks,DIRECT")
+            .expect("iran-cdn-networks rule");
         let match_vpn = generated.yaml.find(&match_line).expect("match rule");
-        assert!(iran_networks < quic_reject && quic_reject < match_vpn);
+        assert!(
+            iran_networks < iran_cdn_networks
+                && iran_cdn_networks < quic_reject
+                && quic_reject < match_vpn
+        );
         assert!(generated.yaml.contains("find-process-mode: always"));
         assert!(generated.yaml.contains("ipv6: true"));
         assert!(generated
@@ -1191,9 +1309,11 @@ mod tests {
             .contains(&format!("dns-query#{}", app.clients[0].group_name())));
         assert!(generated.yaml.contains("path: private.txt"));
         assert!(generated.yaml.contains("path: iran-business-domains.txt"));
+        assert!(generated.yaml.contains("path: iran-cdn-networks.txt"));
         assert!(generated
             .yaml
             .contains("RULE-SET,iran-business-domains,DIRECT"));
+        assert!(generated.yaml.contains("RULE-SET,iran-cdn-networks,DIRECT"));
         let parsed: serde_yaml::Value =
             serde_yaml::from_str(&generated.yaml).expect("generated yaml");
         let dns = parsed.get("dns").expect("dns");
@@ -1216,6 +1336,12 @@ mod tests {
                 "fake-ip-filter missing {key}"
             );
         }
+        assert!(
+            !filter
+                .iter()
+                .any(|item| item.as_str() == Some("rule-set:iran-cdn-networks")),
+            "CIDR providers must not enter fake-ip-filter"
+        );
         assert!(!generated.yaml.contains("178.22.122.100"));
         assert!(!generated.yaml.contains("/runtime/"));
         assert_eq!(generated.sha256.len(), 64);
@@ -1387,17 +1513,38 @@ mod tests {
         assert!(!generated.yaml.contains("MATCH,DIRECT"));
     }
 
+    fn ready_side_tunnel_handle(client: &ClientInstance) -> EgressHandle {
+        EgressHandle {
+            client_id: client.id,
+            preset: client.preset,
+            kind: EgressKind::OwnedSideTunnel,
+            ready: true,
+            degraded: false,
+            outbound: Some(MihomoOutbound {
+                name: client.proxy_name(),
+                group_name: client.group_name(),
+                kind: "direct".into(),
+                server: None,
+                port: None,
+                udp: true,
+                interface_name: Some("tun-windscribe".into()),
+                routing_mark: Some(200),
+            }),
+            transport_excludes: Vec::new(),
+        }
+    }
+
     #[test]
     fn dead_secondary_keeps_match_on_the_healthy_primary() {
         // Hiddify stays primary; a second client (Happ) is enabled but its
-        // egress never came up. Only the dead client's pins fail closed —
-        // unmatched traffic must keep flowing through the primary.
+        // egress never came up. MATCH stays on the primary. The Happ pin
+        // still names the Happ group (stub proxy) instead of REJECT.
         let mut app = AppConfig::default();
-        let happ =
-            iran_split_config::ClientInstance::from_preset(iran_split_config::PresetId::Happ);
+        let happ = ClientInstance::from_preset(PresetId::Happ);
         let happ_id = happ.id;
         app.clients.push(happ);
         let hiddify_group = app.clients[0].group_name();
+        let happ_group = app.clients[1].group_name();
         let hiddify_handle = synthesized_local_handle(&app.clients[0]).expect("hiddify handle");
         let pinned = RoutePinsDocument {
             revision: 1,
@@ -1419,12 +1566,16 @@ mod tests {
         )
         .expect("config");
         assert!(generated.yaml.contains(&format!("MATCH,{hiddify_group}")));
-        assert!(generated
+        assert!(generated.yaml.contains(&format!(
+            "DOMAIN-SUFFIX,pinned-to-happ.example,{happ_group}"
+        )));
+        assert!(!generated
             .yaml
             .contains("DOMAIN-SUFFIX,pinned-to-happ.example,REJECT"));
         assert!(generated.yaml.contains(&format!(
             "DOMAIN-SUFFIX,pinned-to-hiddify.example,{hiddify_group}"
         )));
+        assert!(generated.yaml.contains(&happ_group));
     }
 
     #[test]
@@ -1524,11 +1675,12 @@ mod tests {
     }
 
     #[test]
-    fn fail_closed_rejects_dead_client_pins_and_match() {
+    fn fail_closed_rejects_match_when_the_default_client_is_down() {
         let app = AppConfig::default();
         assert!(app.behavior.fail_closed);
         let id = app.clients[0].id;
-        // A degraded handle filters out of the ready set, so the default
+        let group = app.clients[0].group_name();
+        // A degraded handle filters out of the live set, so the default
         // client is "down" while still enabled.
         let dead = EgressHandle {
             client_id: id,
@@ -1557,15 +1709,18 @@ mod tests {
         assert!(generated.yaml.contains("MATCH,REJECT"));
         assert!(generated
             .yaml
+            .contains(&format!("DOMAIN-SUFFIX,office.example,{group}")));
+        assert!(!generated
+            .yaml
             .contains("DOMAIN-SUFFIX,office.example,REJECT"));
         assert!(generated.yaml.contains(&format!(
-            "RULE-SET,custom-{}-ips,REJECT",
+            "RULE-SET,custom-{}-ips,{group}",
             id.as_hyphenated()
         )));
         // REJECT is not a proxy group, so DoH must not be pinned to it.
         assert!(!generated.yaml.contains("dns-query#REJECT"));
 
-        // Per-client exclusion downgrades the block to DIRECT.
+        // Per-client exclusion downgrades MATCH to DIRECT.
         let mut excluded = app.clone();
         excluded.clients[0].allow_direct_when_down = true;
         let generated = generate_config_with_handles(
@@ -1594,9 +1749,124 @@ mod tests {
     }
 
     #[test]
+    fn windscribe_google_pin_covers_the_apex_and_keeps_the_client_group() {
+        let mut app = AppConfig::default();
+        let windscribe = ClientInstance::from_preset(PresetId::Windscribe);
+        let windscribe_id = windscribe.id;
+        app.clients.push(windscribe);
+        let windscribe_group = app.clients[1].group_name();
+        let hiddify_handle = synthesized_local_handle(&app.clients[0]).expect("hiddify");
+        let windscribe_handle = ready_side_tunnel_handle(&app.clients[1]);
+        let pinned = RoutePinsDocument {
+            revision: 1,
+            pins: vec![pin("google.com", Outbound::client(windscribe_id))],
+            lists: vec![],
+        };
+        let generated = generate_config_with_handles(
+            &app,
+            Platform::Linux,
+            &paths(),
+            &pinned,
+            &[hiddify_handle, windscribe_handle],
+        )
+        .expect("config");
+        assert!(generated
+            .yaml
+            .contains(&format!("DOMAIN-SUFFIX,google.com,{windscribe_group}")));
+        assert!(!generated.yaml.contains("DOMAIN-SUFFIX,google.com,DIRECT"));
+        assert!(!generated.yaml.contains("DOMAIN-SUFFIX,google.com,REJECT"));
+        assert!(generated.yaml.contains("interface-name: tun-windscribe"));
+        assert!(generated
+            .yaml
+            .contains(&format!("MATCH,{}", app.clients[0].group_name())));
+    }
+
+    #[test]
+    fn windscribe_google_pin_keeps_the_group_when_the_tunnel_is_down() {
+        let mut app = AppConfig::default();
+        let windscribe = ClientInstance::from_preset(PresetId::Windscribe);
+        let windscribe_id = windscribe.id;
+        app.clients.push(windscribe);
+        let windscribe_group = app.clients[1].group_name();
+        let hiddify_handle = synthesized_local_handle(&app.clients[0]).expect("hiddify");
+        let pinned = RoutePinsDocument {
+            revision: 1,
+            pins: vec![
+                pin("google.com", Outbound::client(windscribe_id)),
+                PinnedRoute {
+                    target: DirectTarget::Ip("203.0.113.8".parse().expect("ip")),
+                    outbound: Outbound::client(windscribe_id),
+                    list_id: None,
+                    resolved_ips: vec![],
+                    created_at: chrono::Utc::now(),
+                    refreshed_at: None,
+                },
+            ],
+            lists: vec![],
+        };
+        let generated = generate_config_with_handles(
+            &app,
+            Platform::Linux,
+            &paths(),
+            &pinned,
+            &[hiddify_handle],
+        )
+        .expect("config");
+        assert!(generated
+            .yaml
+            .contains(&format!("DOMAIN-SUFFIX,google.com,{windscribe_group}")));
+        assert!(generated.yaml.contains(&format!(
+            "RULE-SET,custom-{}-ips,{windscribe_group}",
+            windscribe_id.as_hyphenated()
+        )));
+        assert!(!generated.yaml.contains("DOMAIN-SUFFIX,google.com,REJECT"));
+        assert!(!generated.yaml.contains("DOMAIN-SUFFIX,google.com,DIRECT"));
+        assert!(generated.yaml.contains(&windscribe_group));
+        assert!(generated
+            .yaml
+            .contains(&format!("MATCH,{}", app.clients[0].group_name())));
+    }
+
+    #[test]
     fn controller_rejects_remote_binding_and_empty_secret() {
         assert!(ControllerClient::new("0.0.0.0", 9090, "secret").is_err());
         assert!(ControllerClient::new("127.0.0.1", 9090, "").is_err());
+    }
+
+    #[tokio::test]
+    async fn wait_until_ready_fails_immediately_on_unauthorized() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+            let response =
+                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response).await;
+        });
+        let client = ControllerClient::new(
+            "127.0.0.1",
+            port,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect("client");
+        let started = tokio::time::Instant::now();
+        let error = client
+            .wait_until_ready(Duration::from_secs(20), CancellationToken::new())
+            .await
+            .expect_err("401");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "HTTP 401 must not wait out the readiness budget"
+        );
+        assert!(
+            matches!(error, MihomoError::Unauthorized),
+            "expected Unauthorized, got {error}"
+        );
+        server.await.expect("server");
     }
 
     #[test]
@@ -1685,6 +1955,119 @@ mod tests {
     }
 
     #[test]
+    fn pin_matches_connection_covers_subdomains_and_ips() {
+        assert!(pin_matches_connection(
+            "google.com",
+            "google.com",
+            "142.250.1.1"
+        ));
+        assert!(pin_matches_connection(
+            "google.com",
+            "www.google.com",
+            "142.250.1.1"
+        ));
+        assert!(pin_matches_connection(
+            "google.com",
+            "gemini.google.com.",
+            "142.250.1.1"
+        ));
+        assert!(!pin_matches_connection(
+            "google.com",
+            "notgoogle.com",
+            "1.1.1.1"
+        ));
+        assert!(pin_matches_connection("8.8.8.8", "", "8.8.8.8"));
+        assert!(!pin_matches_connection("8.8.8.8", "dns.google", "1.1.1.1"));
+    }
+
+    #[tokio::test]
+    async fn close_connections_matching_deletes_only_the_pinned_host() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let server = tokio::spawn(async move {
+            let mut deleted = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut buf = [0_u8; 2048];
+                let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+                let request = String::from_utf8_lossy(&buf);
+                let (status, body) = if request.starts_with("GET /connections") {
+                    (
+                        "HTTP/1.1 200 OK",
+                        concat!(
+                            r#"{"uploadTotal":0,"downloadTotal":0,"connections":["#,
+                            r#"{"id":"aaa","metadata":{"host":"www.google.com","destinationIP":"1.1.1.1"},"chains":["PROXY"],"rule":"MATCH"},"#,
+                            r#"{"id":"bbb","metadata":{"host":"openai.com","destinationIP":"2.2.2.2"},"chains":["PROXY"],"rule":"MATCH"}"#,
+                            r#"]}"#
+                        ),
+                    )
+                } else if request.starts_with("DELETE /connections/aaa") {
+                    deleted.push("aaa");
+                    ("HTTP/1.1 204 No Content", "")
+                } else {
+                    deleted.push("other");
+                    ("HTTP/1.1 204 No Content", "")
+                };
+                let response = if body.is_empty() {
+                    format!("{status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                } else {
+                    format!(
+                        "{status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await;
+            }
+            deleted
+        });
+        let client = ControllerClient::new(
+            "127.0.0.1",
+            port,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect("client");
+        let closed = client
+            .close_connections_matching("google.com")
+            .await
+            .expect("close");
+        assert_eq!(closed, 1);
+        let deleted = server.await.expect("server");
+        assert_eq!(deleted, vec!["aaa"]);
+    }
+
+    #[tokio::test]
+    async fn hot_reload_sends_relative_config_path() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 2048];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+            let request = String::from_utf8_lossy(&buf);
+            let response =
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response).await;
+            request.contains("PUT /configs?force=true")
+                && request.contains(r#""path":"config.yaml""#)
+        });
+        let client = ControllerClient::new(
+            "127.0.0.1",
+            port,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect("client");
+        client
+            .hot_reload(Path::new("config.yaml"))
+            .await
+            .expect("reload");
+        assert!(server.await.expect("server"));
+    }
+
+    #[test]
     fn empty_custom_providers_count_as_ready() {
         let summary = summarize_rule_providers(&serde_json::json!({
             "providers": {
@@ -1708,12 +2091,13 @@ mod tests {
                 "custom-direct-domains": { "ruleCount": 0 },
                 "iran-domains": { "ruleCount": 0 },
                 "iran-networks": { "ruleCount": 4 },
+                "iran-cdn-networks": { "ruleCount": 0 },
                 "private-networks": { "ruleCount": 8 }
             }
         }))
         .expect("summary");
         assert_eq!(summary.ready, 3);
-        assert_eq!(summary.total, 4);
+        assert_eq!(summary.total, 5);
     }
 
     #[test]
@@ -1758,6 +2142,7 @@ mod tests {
             "iran-domains.txt",
             "iran-networks.txt",
             "iran-business-domains.txt",
+            "iran-cdn-networks.txt",
         ] {
             std::fs::copy(rules.join(name), generation.path().join(name)).expect("rule file");
         }

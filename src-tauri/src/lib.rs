@@ -218,6 +218,7 @@ fn linux_helper_paths() -> (PathBuf, PathBuf) {
     #[cfg(debug_assertions)]
     {
         linux_helper_paths_with_overrides(
+            std::env::var_os("BIFLOW_DEV_PROFILE"),
             std::env::var_os("BIFLOW_DEV_HELPER_SOCKET"),
             std::env::var_os("BIFLOW_DEV_SYSTEM_RUNTIME"),
         )
@@ -233,9 +234,22 @@ fn linux_helper_paths() -> (PathBuf, PathBuf) {
 
 #[cfg(all(target_os = "linux", debug_assertions))]
 fn linux_helper_paths_with_overrides(
+    profile: Option<std::ffi::OsString>,
     socket: Option<std::ffi::OsString>,
     runtime: Option<std::ffi::OsString>,
 ) -> (PathBuf, PathBuf) {
+    if profile.is_some_and(|value| !value.is_empty()) {
+        return (
+            socket.map_or_else(
+                || PathBuf::from("/run/biflow-dev/missing-helper.sock"),
+                PathBuf::from,
+            ),
+            runtime.map_or_else(
+                || PathBuf::from("/run/biflow-dev/missing-runtime"),
+                PathBuf::from,
+            ),
+        );
+    }
     (
         socket.map_or_else(|| PathBuf::from(PRODUCTION_HELPER_SOCKET), PathBuf::from),
         runtime.map_or_else(|| PathBuf::from(PRODUCTION_SYSTEM_RUNTIME), PathBuf::from),
@@ -829,13 +843,7 @@ async fn list_active_connections(app: AppHandle) -> Result<Vec<ActiveConnection>
                 count = rows.len(),
                 "listed live Mihomo connections without host values"
             );
-            Ok(if reachability::hide_google_in_this_build() {
-                rows.into_iter()
-                    .filter(|row| !reachability::is_google_host(&row.host))
-                    .collect()
-            } else {
-                rows
-            })
+            Ok(rows)
         },
     )
     .await
@@ -1255,7 +1263,7 @@ async fn pin_route(
             .rules
             .pin_with_policy(&input, outbound, policy, expected_revision)
             .await;
-        persist_and_apply_rules(&app, previous, next).await
+        persist_and_apply_rules(&app, previous, next, Some(input)).await
     })
     .await
 }
@@ -1279,7 +1287,7 @@ async fn add_direct_rule(
         let services = services(&app)?;
         let previous = services.rules.list().await;
         let next = services.rules.add(&input, expected_revision).await;
-        persist_and_apply_rules(&app, previous, next).await
+        persist_and_apply_rules(&app, previous, next, Some(input)).await
     })
     .await
 }
@@ -1298,7 +1306,7 @@ async fn remove_direct_rule(
         let services = services(&app)?;
         let previous = services.rules.list().await;
         let next = services.rules.remove(&input, expected_revision).await;
-        persist_and_apply_rules(&app, previous, next).await
+        persist_and_apply_rules(&app, previous, next, Some(input)).await
     })
     .await
 }
@@ -1307,10 +1315,15 @@ async fn persist_and_apply_rules(
     app: &AppHandle,
     previous: DirectRulesDocument,
     next: Result<DirectRulesDocument, iran_split_rules::RuleError>,
+    rebind_host: Option<String>,
 ) -> Result<DirectRulesDocument, String> {
     let next = next.map_err(|error| error.to_string())?;
     let services = services(app)?;
-    if let Err(cause) = services.engine.apply_user_rules().await {
+    if let Err(cause) = services
+        .engine
+        .apply_user_rules_with_rebind(rebind_host)
+        .await
+    {
         warn!(
             event = "rules.apply_failed",
             section = "rules",
@@ -1376,7 +1389,7 @@ async fn delete_rule_list(
         let services = services(&app)?;
         let previous = services.rules.list().await;
         let next = services.rules.delete_list(list_id, expected_revision).await;
-        persist_and_apply_rules(&app, previous, next).await
+        persist_and_apply_rules(&app, previous, next, None).await
     })
     .await
 }
@@ -1402,7 +1415,7 @@ async fn set_rule_list_outbound(
                 .rules
                 .set_list_outbound(list_id, outbound, policy, expected_revision)
                 .await;
-            persist_and_apply_rules(&app, previous, next).await
+            persist_and_apply_rules(&app, previous, next, None).await
         },
     )
     .await
@@ -1438,7 +1451,7 @@ async fn pin_to_rule_list(
             .rules
             .pin_to_list(&input, list_id, policy, expected_revision)
             .await;
-        persist_and_apply_rules(&app, previous, next).await
+        persist_and_apply_rules(&app, previous, next, Some(input)).await
     })
     .await
 }
@@ -1813,6 +1826,10 @@ async fn test_route(target: String, app: AppHandle) -> Result<RouteTestResult, S
             .chain(read_snapshot_lines(
                 &services.cloud_rules.resolve("iran-networks.txt"),
             )?)
+            .chain(
+                read_snapshot_lines(&services.cloud_rules.resolve("iran-cdn-networks.txt"))
+                    .unwrap_or_default(),
+            )
             .map(|line| {
                 line.parse()
                     .map_err(|error| format!("invalid bundled CIDR: {error}"))
@@ -2814,6 +2831,8 @@ fn create_services(app: &AppHandle) -> Result<AppServices, String> {
             trace_route = "application_process->create_services->linux_backend",
             socket_path = %socket_path.display(),
             runtime_path = %system_runtime_dir.display(),
+            controller_port = config.mihomo.controller_port,
+            mixed_port = config.mihomo.mixed_port,
             "Linux helper paths selected"
         );
         Arc::new(NativeBackend::new(
@@ -3670,6 +3689,7 @@ mod tests {
             "iran-networks.txt",
             "private.txt",
             "iran-business-domains.txt",
+            "iran-cdn-networks.txt",
         ] {
             fs::write(nested.join(name), b"ok").expect("rule file");
         }
@@ -3922,9 +3942,20 @@ mod tests {
     fn debug_linux_helper_paths_accept_development_overrides() {
         const SOCKET: &str = "/run/biflow-dev-test/helper.sock";
         const RUNTIME: &str = "/run/biflow-dev-test/runtime";
-        let paths = linux_helper_paths_with_overrides(Some(SOCKET.into()), Some(RUNTIME.into()));
+        let paths =
+            linux_helper_paths_with_overrides(None, Some(SOCKET.into()), Some(RUNTIME.into()));
 
         assert_eq!(paths, (PathBuf::from(SOCKET), PathBuf::from(RUNTIME)));
+    }
+
+    #[cfg(all(target_os = "linux", debug_assertions))]
+    #[test]
+    fn debug_linux_helper_paths_do_not_fall_back_to_production_under_dev_profile() {
+        let paths =
+            linux_helper_paths_with_overrides(Some("/tmp/biflow-dev-profile".into()), None, None);
+        assert_ne!(paths.0, PathBuf::from(PRODUCTION_HELPER_SOCKET));
+        assert_ne!(paths.1, PathBuf::from(PRODUCTION_SYSTEM_RUNTIME));
+        assert!(paths.0.ends_with("missing-helper.sock"));
     }
 
     #[cfg(all(target_os = "linux", debug_assertions))]

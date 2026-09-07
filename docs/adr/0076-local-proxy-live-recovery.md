@@ -9,13 +9,13 @@ Accepted
 Connect probes each optional local-proxy client (Happ, v2rayN, …) exactly
 once with a 3-second egress check. Happ's SOCKS port only answers after Happ
 itself connects to a server, so the probe almost always fails on a fresh
-launch. The failed client then loses its egress handle: `ready_handles`
-drops its Mihomo group and pinned domains fall back to REJECT (or DIRECT),
-staying dark even after the operator connects Happ. Nothing re-ran the
-ensure step, so the only cure was a full disconnect/reconnect or an app
-restart — the "unstable, must reopen repeatedly" report from production
-`debug.log` (three `happ egress probe failed on 127.0.0.1:10808` entries in
-one morning).
+launch. The failed client then loses its egress handle. Generation used to
+drop that Mihomo group and rewrite pins to REJECT (or DIRECT). ADR 0082 keeps
+the named group via a stub; recovery still matters so the stub is replaced by
+a live SOCKS bind. Nothing re-ran the ensure step, so the only cure was a
+full disconnect/reconnect or an app restart — the "unstable, must reopen
+repeatedly" report from production `debug.log` (three
+`happ egress probe failed on 127.0.0.1:10808` entries in one morning).
 
 ## Decision
 

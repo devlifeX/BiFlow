@@ -63,90 +63,7 @@ pub(crate) async fn execute_audited(
 }
 
 async fn execute(supervisor: &Supervisor, command: HelperCommand) -> HelperReply {
-    let result: Result<HelperReply, HelperServiceError> = async {
-        Ok(match command {
-            HelperCommand::Hello { .. } => HelperReply::Error(HelperError {
-                code: "HELLO_ALREADY_COMPLETED".into(),
-                message: "protocol negotiation is already complete".into(),
-                retryable: false,
-            }),
-            HelperCommand::GetServiceStatus => HelperReply::ServiceStatus(ServiceStatus {
-                helper_version: env!("CARGO_PKG_VERSION").into(),
-                protocol_version: PROTOCOL_VERSION,
-                authorized: true,
-                active_generation: supervisor.status().await?.generation_id,
-            }),
-            HelperCommand::RegisterRuntimeGeneration {
-                generation_id,
-                config_sha256,
-            } => {
-                supervisor
-                    .register_generation(generation_id, &config_sha256)
-                    .await?;
-                HelperReply::GenerationRegistered { generation_id }
-            }
-            HelperCommand::StartMihomo {
-                generation_id,
-                config_sha256,
-            } => HelperReply::ProcessStatus(supervisor.start(generation_id, &config_sha256).await?),
-            HelperCommand::StopMihomo => HelperReply::ProcessStatus(supervisor.stop().await?),
-            HelperCommand::RestartMihomo {
-                generation_id,
-                config_sha256,
-            } => {
-                supervisor.stop().await?;
-                HelperReply::ProcessStatus(supervisor.start(generation_id, &config_sha256).await?)
-            }
-            HelperCommand::GetMihomoProcessStatus => {
-                HelperReply::ProcessStatus(supervisor.status().await?)
-            }
-            HelperCommand::CleanupOwnedNetworkState => {
-                HelperReply::CleanupReport(supervisor.cleanup().await?)
-            }
-            HelperCommand::CollectServiceLogs { max_entries } => {
-                HelperReply::Logs(supervisor.logs(usize::from(max_entries)).await)
-            }
-            HelperCommand::PrepareForUpdate => {
-                let report = supervisor.cleanup().await?;
-                if !report.clean() {
-                    return Err(HelperServiceError::Process(
-                        "owned network state remains before update".into(),
-                    ));
-                }
-                HelperReply::ReadyForUpdate
-            }
-            HelperCommand::StartSideTunnel {
-                driver,
-                client_id,
-                profile,
-                executable,
-                auth_file,
-                timeout_seconds,
-                pinned_remote,
-                socks_proxy,
-            } => HelperReply::SideTunnel(
-                supervisor
-                    .start_side_tunnel(crate::openvpn::SideTunnelRequest {
-                        driver: &driver,
-                        client_id,
-                        profile: &profile,
-                        executable: executable.as_deref(),
-                        auth_file: auth_file.as_deref(),
-                        timeout_seconds,
-                        pinned_remote,
-                        socks_proxy: socks_proxy
-                            .as_ref()
-                            .map(|(host, port)| (host.as_str(), *port)),
-                    })
-                    .await?,
-            ),
-            HelperCommand::StopSideTunnel { client_id } => {
-                HelperReply::SideTunnel(supervisor.stop_side_tunnel(client_id).await?)
-            }
-        })
-    }
-    .await;
-    result.unwrap_or_else(|error| {
+    dispatch(supervisor, command).await.unwrap_or_else(|error| {
         HelperReply::Error(HelperError {
             code: helper_error_code(&error).into(),
             message: error.to_string(),
@@ -155,6 +72,100 @@ async fn execute(supervisor: &Supervisor, command: HelperCommand) -> HelperReply
                 HelperServiceError::Io(_) | HelperServiceError::Process(_)
             ),
         })
+    })
+}
+
+async fn dispatch(
+    supervisor: &Supervisor,
+    command: HelperCommand,
+) -> Result<HelperReply, HelperServiceError> {
+    Ok(match command {
+        HelperCommand::Hello { .. } => HelperReply::Error(HelperError {
+            code: "HELLO_ALREADY_COMPLETED".into(),
+            message: "protocol negotiation is already complete".into(),
+            retryable: false,
+        }),
+        HelperCommand::GetServiceStatus => HelperReply::ServiceStatus(ServiceStatus {
+            helper_version: env!("CARGO_PKG_VERSION").into(),
+            protocol_version: PROTOCOL_VERSION,
+            authorized: true,
+            active_generation: supervisor.status().await?.generation_id,
+        }),
+        HelperCommand::RegisterRuntimeGeneration {
+            generation_id,
+            config_sha256,
+        } => {
+            supervisor
+                .register_generation(generation_id, &config_sha256)
+                .await?;
+            HelperReply::GenerationRegistered { generation_id }
+        }
+        HelperCommand::OverlayRuntimeGeneration {
+            generation_id,
+            config_sha256,
+        } => HelperReply::ProcessStatus(
+            supervisor
+                .overlay_running(generation_id, &config_sha256)
+                .await?,
+        ),
+        HelperCommand::StartMihomo {
+            generation_id,
+            config_sha256,
+        } => HelperReply::ProcessStatus(supervisor.start(generation_id, &config_sha256).await?),
+        HelperCommand::StopMihomo => HelperReply::ProcessStatus(supervisor.stop().await?),
+        HelperCommand::RestartMihomo {
+            generation_id,
+            config_sha256,
+        } => {
+            supervisor.stop().await?;
+            HelperReply::ProcessStatus(supervisor.start(generation_id, &config_sha256).await?)
+        }
+        HelperCommand::GetMihomoProcessStatus => {
+            HelperReply::ProcessStatus(supervisor.status().await?)
+        }
+        HelperCommand::CleanupOwnedNetworkState => {
+            HelperReply::CleanupReport(supervisor.cleanup().await?)
+        }
+        HelperCommand::CollectServiceLogs { max_entries } => {
+            HelperReply::Logs(supervisor.logs(usize::from(max_entries)).await)
+        }
+        HelperCommand::PrepareForUpdate => {
+            let report = supervisor.cleanup().await?;
+            if !report.clean() {
+                return Err(HelperServiceError::Process(
+                    "owned network state remains before update".into(),
+                ));
+            }
+            HelperReply::ReadyForUpdate
+        }
+        HelperCommand::StartSideTunnel {
+            driver,
+            client_id,
+            profile,
+            executable,
+            auth_file,
+            timeout_seconds,
+            pinned_remote,
+            socks_proxy,
+        } => HelperReply::SideTunnel(
+            supervisor
+                .start_side_tunnel(crate::openvpn::SideTunnelRequest {
+                    driver: &driver,
+                    client_id,
+                    profile: &profile,
+                    executable: executable.as_deref(),
+                    auth_file: auth_file.as_deref(),
+                    timeout_seconds,
+                    pinned_remote,
+                    socks_proxy: socks_proxy
+                        .as_ref()
+                        .map(|(host, port)| (host.as_str(), *port)),
+                })
+                .await?,
+        ),
+        HelperCommand::StopSideTunnel { client_id } => {
+            HelperReply::SideTunnel(supervisor.stop_side_tunnel(client_id).await?)
+        }
     })
 }
 

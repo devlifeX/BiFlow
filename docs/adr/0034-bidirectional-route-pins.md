@@ -32,7 +32,7 @@ revision)` moves it. `add` stays as the DIRECT shorthand.
   2. enabled client pins
   3. user DIRECT pins
   4. bundled Iran domains and CIDRs → DIRECT
-  5. curated `iran-business-domains` → DIRECT
+  5. curated `iran-business-domains` and `iran-cdn-networks` → DIRECT
   6. `MATCH` → `default_route` (a client group or DIRECT)
 - Private, loopback, and CGNAT addresses are rejected from the VPN list with a
   clear error rather than silently ignored: routing them through the tunnel

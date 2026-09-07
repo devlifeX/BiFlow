@@ -39,8 +39,17 @@
       "file": "iran-business-domains.txt",
       "upstream_file": "curated",
       "kind": "domain",
-      "entry_count": 14,
-      "sha256": "5ecee1dfec5e5468556319420a73c066bade4f73fc015619873b29116147db48",
+      "entry_count": 40,
+      "sha256": "a7c17dc46102a692b4133d1e9b993c28be538d2fc578bde0427aea107027ab7d",
+      "source": "curated"
+    },
+    {
+      "id": "iran-cdn-networks",
+      "file": "iran-cdn-networks.txt",
+      "upstream_file": "curated",
+      "kind": "ip_cidr",
+      "entry_count": 3,
+      "sha256": "ef103916c3188c242031060a35d55a8a14553ddfd359123218c6c785d475da4e",
       "source": "curated"
     }
   ]

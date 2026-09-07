@@ -27,12 +27,15 @@ erase provenance on the next `pnpm rules:update`.
   `iran-domains` and before `MATCH`).
 - Do not add `.ir` names (already covered by `+.ir`), shared CDNs, public
   analytics, or domains whose first-party ownership is unclear.
+- Companion curated IP prefixes live in `iran-cdn-networks.txt` (ADR 0084)
+  so Chocolate4U refreshes cannot wipe them either.
 - Removing or changing more than 25% of curated entries in one snapshot
   requires the same review gate as upstream count deltas.
 
 ## Consequences
 
 - Wave-1 domains (technolife, azkivam, and the rest of the considering list)
-  plus later first-party roots such as `kavenegar.com` are DIRECT in mock and
-  runtime `test_route` without user pins.
+  plus later first-party roots such as `kavenegar.com` and the Tehran Index
+  `/companies` harvest (ADR 0085) are DIRECT in mock and runtime
+  `test_route` without user pins.
 - A later cloud refresh cannot silently drop the catalog.

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "license": "CC0-1.0",
+  "source": "curated",
+  "verified_on": "2026-09-07",
+  "entries": [
+    {
+      "prefix": "185.163.216.0/22",
+      "publisher": "Mobinnet",
+      "asn": "AS50810",
+      "official_url": "https://stat.ripe.net/data/prefix-overview/data.json?resource=185.163.216.0/22",
+      "discovered_from": "https://stat.ripe.net/data/country-resource-list/data.json?resource=IR&v4_format=prefix",
+      "verified_at": "2026-09-07"
+    },
+    {
+      "prefix": "185.172.72.0/22",
+      "publisher": "Mobinnet",
+      "asn": "AS50810",
+      "official_url": "https://stat.ripe.net/data/prefix-overview/data.json?resource=185.172.72.0/22",
+      "discovered_from": "https://stat.ripe.net/data/country-resource-list/data.json?resource=IR&v4_format=prefix",
+      "verified_at": "2026-09-07"
+    },
+    {
+      "prefix": "185.254.108.0/22",
+      "publisher": "Mobinnet",
+      "asn": "AS50810",
+      "official_url": "https://stat.ripe.net/data/prefix-overview/data.json?resource=185.254.108.0/22",
+      "discovered_from": "https://stat.ripe.net/data/country-resource-list/data.json?resource=IR&v4_format=prefix",
+      "verified_at": "2026-09-07"
+    }
+  ]
+}

@@ -203,6 +203,44 @@ pub fn synthesized_local_handle(instance: &ClientInstance) -> Option<EgressHandl
     })
 }
 
+/// Placeholder group so enabled side-tunnel pins keep their client target
+/// when `OpenVPN` is not up yet. The `socks5` port is closed on purpose:
+/// connection-level fail-closed, no WAN leak (ADR 0082).
+#[must_use]
+pub fn synthesized_side_tunnel_handle(instance: &ClientInstance) -> Option<EgressHandle> {
+    if instance.spec().kind != EgressKind::OwnedSideTunnel {
+        return None;
+    }
+    Some(EgressHandle {
+        client_id: instance.id,
+        preset: instance.preset,
+        kind: EgressKind::OwnedSideTunnel,
+        ready: true,
+        degraded: false,
+        outbound: Some(MihomoOutbound {
+            name: instance.proxy_name(),
+            group_name: instance.group_name(),
+            kind: "socks5".into(),
+            server: Some("127.0.0.1".into()),
+            port: Some(1),
+            udp: true,
+            interface_name: None,
+            routing_mark: None,
+        }),
+        transport_excludes: Vec::new(),
+    })
+}
+
+/// Local-proxy or side-tunnel placeholder used by Mihomo generation.
+#[must_use]
+pub fn synthesized_egress_handle(instance: &ClientInstance) -> Option<EgressHandle> {
+    match instance.spec().kind {
+        EgressKind::LocalProxy => synthesized_local_handle(instance),
+        EgressKind::OwnedSideTunnel => synthesized_side_tunnel_handle(instance),
+        EgressKind::Unsupported => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +289,21 @@ mod tests {
         // Local proxies keep their own detail text.
         let hiddify = ClientInstance::from_preset(PresetId::Hiddify);
         assert!(side_tunnel_stopped_reason(&hiddify).is_none());
+    }
+
+    #[test]
+    fn synthesized_side_tunnel_handle_keeps_the_client_group() {
+        let client = ClientInstance::from_preset(PresetId::Windscribe);
+        let handle = synthesized_side_tunnel_handle(&client).expect("stub");
+        let outbound = handle.outbound.expect("outbound");
+        assert_eq!(outbound.group_name, client.group_name());
+        assert_eq!(outbound.kind, "socks5");
+        assert_eq!(outbound.server.as_deref(), Some("127.0.0.1"));
+        assert_eq!(outbound.port, Some(1));
+        assert!(synthesized_egress_handle(&client).is_some());
+        assert!(
+            synthesized_side_tunnel_handle(&ClientInstance::from_preset(PresetId::Hiddify))
+                .is_none()
+        );
     }
 }

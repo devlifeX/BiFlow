@@ -614,9 +614,13 @@ const EMBEDDED_BUNDLED_RULES: &[(&str, &str)] = &[
         "iran-business-domains.txt",
         include_str!("../../../resources/rules/iran-business-domains.txt"),
     ),
+    (
+        "iran-cdn-networks.txt",
+        include_str!("../../../resources/rules/iran-cdn-networks.txt"),
+    ),
 ];
 
-const CURATED_FILES: [&str; 1] = ["iran-business-domains.txt"];
+const CURATED_FILES: [&str; 2] = ["iran-business-domains.txt", "iran-cdn-networks.txt"];
 
 /// Returns whether `dir` contains every bundled Iran/private/curated rule file.
 #[must_use]
@@ -724,6 +728,7 @@ mod tests {
             "+.technolife.com\n",
         )
         .expect("business");
+        fs::write(bundled.join("iran-cdn-networks.txt"), "185.163.216.0/22\n").expect("cdn");
     }
 
     #[test]
@@ -884,6 +889,8 @@ mod tests {
         let pins = directory.path().join("direct-rules.json");
         fs::write(&pins, br#"{"revision":3,"rules":[],"vpn_rules":[]}"#).expect("pins");
         let curated_before = fs::read(bundled.join("iran-business-domains.txt")).expect("curated");
+        let curated_cidrs_before =
+            fs::read(bundled.join("iran-cdn-networks.txt")).expect("curated cidrs");
         let pins_before = fs::read(&pins).expect("pins bytes");
 
         let commit = "c".repeat(40);
@@ -939,7 +946,12 @@ mod tests {
             fs::read(bundled.join("iran-business-domains.txt")).expect("curated after"),
             curated_before
         );
+        assert_eq!(
+            fs::read(bundled.join("iran-cdn-networks.txt")).expect("curated cidrs after"),
+            curated_cidrs_before
+        );
         assert!(!cache.join("iran-business-domains.txt").is_file());
+        assert!(!cache.join("iran-cdn-networks.txt").is_file());
         assert!(!cache.join("direct-rules.json").is_file());
     }
 

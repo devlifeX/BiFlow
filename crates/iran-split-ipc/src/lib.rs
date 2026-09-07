@@ -71,6 +71,12 @@ pub enum HelperCommand {
         generation_id: Uuid,
         config_sha256: String,
     },
+    /// Copies a registered generation into the running Mihomo workdir
+    /// without restarting the process. Pin applies use this so TUN stays up.
+    OverlayRuntimeGeneration {
+        generation_id: Uuid,
+        config_sha256: String,
+    },
     StartMihomo {
         generation_id: Uuid,
         config_sha256: String,
@@ -127,6 +133,7 @@ impl HelperCommand {
                 ))
             }
             Self::RegisterRuntimeGeneration { config_sha256, .. }
+            | Self::OverlayRuntimeGeneration { config_sha256, .. }
             | Self::StartMihomo { config_sha256, .. }
             | Self::RestartMihomo { config_sha256, .. }
                 if !valid_sha256(config_sha256) =>
@@ -166,6 +173,7 @@ impl HelperCommand {
             Self::Hello { .. } => "hello",
             Self::GetServiceStatus => "get_service_status",
             Self::RegisterRuntimeGeneration { .. } => "register_runtime_generation",
+            Self::OverlayRuntimeGeneration { .. } => "overlay_runtime_generation",
             Self::StartMihomo { .. } => "start_mihomo",
             Self::StopMihomo => "stop_mihomo",
             Self::RestartMihomo { .. } => "restart_mihomo",
@@ -391,6 +399,11 @@ mod tests {
             config_sha256: "../config".into(),
         };
         assert!(invalid.validate().is_err());
+        let overlay = HelperCommand::OverlayRuntimeGeneration {
+            generation_id: Uuid::new_v4(),
+            config_sha256: "../config".into(),
+        };
+        assert!(overlay.validate().is_err());
         assert!(HelperCommand::CollectServiceLogs { max_entries: 2_001 }
             .validate()
             .is_err());

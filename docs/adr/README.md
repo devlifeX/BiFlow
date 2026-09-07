@@ -83,3 +83,9 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0077](./0077-multi-client-primary-and-hiddify-requirement.md) | Multi-client primaries and Hiddify requirement | Accepted   |
 | [0078](./0078-fast-connect-and-egress-watchdog.md)             | Fast Connect and primary-egress watchdog       | Accepted   |
 | [0079](./0079-side-tunnel-helper-ipc-timeout.md)               | Side-tunnel helper IPC timeout                 | Accepted   |
+| [0080](./0080-dev-profile-mihomo-isolation.md)                 | Dev-profile Mihomo isolation                   | Accepted   |
+| [0081](./0081-live-connections-survive-route-apply.md)         | Live connections survive a route apply         | Accepted   |
+| [0082](./0082-enabled-client-pins-keep-group.md)               | Enabled-client pins keep the client group      | Accepted   |
+| [0083](./0083-pin-apply-hot-reloads-mihomo.md)                 | Pin apply hot-reloads Mihomo                   | Accepted   |
+| [0084](./0084-curated-iranian-cdn-isp-cidrs.md)                | Curated Iranian CDN/ISP CIDRs                  | Accepted   |
+| [0085](./0085-tehran-index-company-directory.md)               | Tehran Index company directory harvest         | Accepted   |

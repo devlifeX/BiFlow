@@ -2,7 +2,7 @@
   "schema_version": 1,
   "license": "CC0-1.0",
   "source": "curated",
-  "verified_on": "2026-08-18",
+  "verified_on": "2026-09-07",
   "entries": [
     {
       "domain": "technolife.com",
@@ -114,6 +114,214 @@
       "official_url": "https://ewano.app/",
       "discovered_from": "https://tehranindex.com/sectors/fintech",
       "verified_at": "2026-08-17",
+      "status": "active"
+    },
+    {
+      "domain": "arzinja.info",
+      "category": "digital_assets",
+      "official_url": "https://arzinja.info/",
+      "discovered_from": "https://tehranindex.com/sectors/crypto",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "irandargah.com",
+      "category": "payments",
+      "official_url": "https://irandargah.com/",
+      "discovered_from": "https://tehranindex.com/sectors/fintech",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "iranpaymex.com",
+      "category": "payments",
+      "official_url": "https://iranpaymex.com/",
+      "discovered_from": "https://tehranindex.com/sectors/fintech",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "pasajbime.com",
+      "category": "insurance",
+      "official_url": "https://pasajbime.com/",
+      "discovered_from": "https://tehranindex.com/sectors/fintech",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "milli.gold",
+      "category": "gold",
+      "official_url": "https://milli.gold/",
+      "discovered_from": "https://tehranindex.com/sectors/fintech",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "podin.app",
+      "category": "digital_assets",
+      "official_url": "https://podin.app/",
+      "discovered_from": "https://tehranindex.com/sectors/fintech",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "shepa.com",
+      "category": "payments",
+      "official_url": "https://shepa.com/",
+      "discovered_from": "https://tehranindex.com/sectors/fintech",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "sitaad.net",
+      "category": "government",
+      "official_url": "https://sitaad.net/",
+      "discovered_from": "https://tehranindex.com/sectors/fintech",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "asanazmayesh.com",
+      "category": "health",
+      "official_url": "https://www.asanazmayesh.com/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "baroline.net",
+      "category": "logistics",
+      "official_url": "https://www.baroline.net/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "fanafzar.com",
+      "category": "gaming",
+      "official_url": "https://fanafzar.com/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "golrangsystem.com",
+      "category": "enterprise",
+      "official_url": "https://www.golrangsystem.com/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "hoosheno.com",
+      "category": "ai",
+      "official_url": "https://hoosheno.com/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "ifacrowd.fund",
+      "category": "crowdfunding",
+      "official_url": "https://ifacrowd.fund/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "irannovin.net",
+      "category": "advertising",
+      "official_url": "https://www.irannovin.net/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "jahesh.co",
+      "category": "accelerator",
+      "official_url": "https://www.jahesh.co/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "karencrowd.com",
+      "category": "crowdfunding",
+      "official_url": "https://www.karencrowd.com/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "ketabrah.com",
+      "category": "media",
+      "official_url": "https://www.ketabrah.com/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "lifewebco.com",
+      "category": "saas",
+      "official_url": "https://www.lifewebco.com/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "netpardaz.com",
+      "category": "enterprise",
+      "official_url": "https://netpardaz.com/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "nibmarket.com",
+      "category": "investment",
+      "official_url": "https://www.nibmarket.com/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "rskgd.com",
+      "category": "gaming",
+      "official_url": "https://rskgd.com/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "setakup.com",
+      "category": "accelerator",
+      "official_url": "https://www.setakup.com/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "sibche.com",
+      "category": "app_distribution",
+      "official_url": "https://www.sibche.com/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "trigup.com",
+      "category": "accelerator",
+      "official_url": "https://www.trigup.com/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
+      "status": "active"
+    },
+    {
+      "domain": "virachemists.com",
+      "category": "healthtech",
+      "official_url": "https://www.virachemists.com/",
+      "discovered_from": "https://tehranindex.com/companies",
+      "verified_at": "2026-09-07",
       "status": "active"
     }
   ]

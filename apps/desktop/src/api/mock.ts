@@ -332,7 +332,66 @@ const IRAN_BUSINESS_DOMAINS = [
   "karboom.io",
   "kavenegar.com",
   "ewano.app",
+  "arzinja.info",
+  "irandargah.com",
+  "iranpaymex.com",
+  "pasajbime.com",
+  "milli.gold",
+  "podin.app",
+  "shepa.com",
+  "sitaad.net",
+  "asanazmayesh.com",
+  "baroline.net",
+  "fanafzar.com",
+  "golrangsystem.com",
+  "hoosheno.com",
+  "ifacrowd.fund",
+  "irannovin.net",
+  "jahesh.co",
+  "karencrowd.com",
+  "ketabrah.com",
+  "lifewebco.com",
+  "netpardaz.com",
+  "nibmarket.com",
+  "rskgd.com",
+  "setakup.com",
+  "sibche.com",
+  "trigup.com",
+  "virachemists.com",
 ];
+
+function ipToInt(value: string): number | null {
+  const parts = value.split(".");
+  if (parts.length !== 4) return null;
+  let total = 0;
+  for (const part of parts) {
+    const octet = Number(part);
+    if (!Number.isInteger(octet) || octet < 0 || octet > 255) return null;
+    total = (total << 8) + octet;
+  }
+  return total >>> 0;
+}
+
+const IRAN_CDN_NETWORKS = [
+  { start: ipToInt("185.163.216.0") ?? 0, bits: 22 },
+  { start: ipToInt("185.172.72.0") ?? 0, bits: 22 },
+  { start: ipToInt("185.254.108.0") ?? 0, bits: 22 },
+];
+
+function iranCidrMatch(value: string): string | undefined {
+  const address = ipToInt(value);
+  if (address === null) return undefined;
+  for (const network of IRAN_CDN_NETWORKS) {
+    const mask = network.bits === 0 ? 0 : (~0 << (32 - network.bits)) >>> 0;
+    if ((address & mask) === (network.start & mask)) {
+      const third = (network.start >>> 8) & 0xff;
+      const second = (network.start >>> 16) & 0xff;
+      const first = (network.start >>> 24) & 0xff;
+      return `${first}.${second}.${third}.0/${network.bits}`;
+    }
+  }
+  return undefined;
+}
 
 function canonicalTarget(input: string): {
   kind: "ip" | "domain";
@@ -1268,6 +1327,10 @@ export const mockApi = {
         pin.outbound.kind === "direct" ? "custom_rule" : "vpn_rule",
         pin.target.value,
       );
+    }
+    const cidr = iranCidrMatch(target);
+    if (cidr) {
+      return route(target, { kind: "direct" }, "iran_cidr", cidr);
     }
     if (target.endsWith(".ir") || target === "ir") {
       return route(target, { kind: "direct" }, "iran_domain", "ir");

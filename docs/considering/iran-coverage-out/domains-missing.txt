@@ -1,0 +1,14 @@
+aiif.ai	tehranindex-companies,tehranindex-ai
+brainladdergames.com	tehranindex-companies,tehranindex-gaming
+devopsyar.com	tehranindex-companies,tehranindex-saas
+ernyka.com	tehranindex-companies,tehranindex-crypto
+fanavagroup.co	tehranindex-companies,tehranindex-enterprise-software
+finnova.vc	tehranindex-companies,tehranindex-fintech
+gapgpt.ai	tehranindex-companies,tehranindex-ai
+homsa.net	tehranindex-companies
+hoorangames.com	tehranindex-companies,tehranindex-gaming
+hoshno.com	tehranindex-companies,tehranindex-ai
+ivaapp.com	tehranindex-companies,tehranindex-fintech
+maxclinics.com	tehranindex-companies,tehranindex-health
+optimeai.com	tehranindex-companies,tehranindex-ai
+youtopin.com	tehranindex-companies,tehranindex-travel

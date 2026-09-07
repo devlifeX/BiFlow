@@ -291,6 +291,7 @@ describe("Tauri frontend contract", () => {
       "iran-domains.txt",
       "iran-networks.txt",
       "iran-business-domains.txt",
+      "iran-cdn-networks.txt",
       "custom-direct-domains.txt",
       "custom-direct-ips.txt",
       "config.yaml",
@@ -326,6 +327,8 @@ describe("Tauri frontend contract", () => {
     assert.match(windows, /fn readiness_error/);
     assert.match(linux, /CoreError::ControllerTimeout/);
     assert.match(windows, /CoreError::ControllerTimeout/);
+    assert.match(linux, /CoreError::ControllerUnauthorized/);
+    assert.match(windows, /CoreError::ControllerUnauthorized/);
     // Both compile only for their own OS, so host Clippy never sees the other.
     assert.match(linux, /^#!\[cfg\(target_os = "linux"\)\]/m);
     assert.match(windows, /^#!\[cfg\(windows\)\]/m);

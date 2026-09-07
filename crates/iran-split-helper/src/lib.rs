@@ -23,12 +23,13 @@ use uuid::Uuid;
 const PROCESS_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const MIHOMO_STAY_ALIVE: Duration = Duration::from_millis(400);
 const MAX_LOG_ENTRIES: usize = 2_000;
-const FIXED_GENERATION_FILES: [&str; 7] = [
+const FIXED_GENERATION_FILES: [&str; 8] = [
     "config.yaml",
     "private.txt",
     "iran-domains.txt",
     "iran-business-domains.txt",
     "iran-networks.txt",
+    "iran-cdn-networks.txt",
     "custom-direct-domains.txt",
     "custom-direct-ips.txt",
 ];
@@ -332,6 +333,65 @@ impl Supervisor {
         *current = Some(managed);
         drop(current);
         self.push_log("info", "mihomo_started", BTreeMap::new())
+            .await;
+        Ok(status)
+    }
+
+    /// Copies a registered generation into the running Mihomo workdir.
+    ///
+    /// Mihomo Meta resolves rule-provider paths against `-d`, so a pin apply
+    /// cannot point the controller at a sibling generation directory. Overlay
+    /// keeps that workdir and the process; the desktop then `PUT /configs`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generation is not registered, the process is
+    /// missing, or the copy fails.
+    pub async fn overlay_running(
+        &self,
+        generation_id: Uuid,
+        expected_sha256: &str,
+    ) -> Result<ProcessStatus, HelperServiceError> {
+        let registered = self.registered.lock().await;
+        if registered.get(&generation_id).map(String::as_str) != Some(expected_sha256) {
+            return Err(HelperServiceError::InvalidGeneration(
+                "generation must be registered with the same hash before overlay".into(),
+            ));
+        }
+        drop(registered);
+
+        let mut current = self.child.lock().await;
+        let Some(managed) = current.as_mut() else {
+            return Ok(ProcessStatus {
+                running: false,
+                pid: None,
+                generation_id: None,
+                started_at: None,
+            });
+        };
+        if managed.child.try_wait()?.is_some() {
+            *current = None;
+            return Ok(ProcessStatus {
+                running: false,
+                pid: None,
+                generation_id: None,
+                started_at: None,
+            });
+        }
+
+        let generations_root = self.settings.runtime_dir.join("generations");
+        let source_root = generations_root.join(generation_id.to_string());
+        let destination_root = generations_root.join(managed.generation_id.to_string());
+        overlay_generation_files(&source_root, &destination_root)?;
+        let config_path = checked_generation_file(&destination_root, "config.yaml")?;
+        if sha256_file(&config_path)? != expected_sha256 {
+            return Err(HelperServiceError::InvalidGeneration(
+                "overlaid config hash does not match request".into(),
+            ));
+        }
+        let status = process_status(Some(managed));
+        drop(current);
+        self.push_log("info", "runtime_generation_overlaid", BTreeMap::new())
             .await;
         Ok(status)
     }
@@ -718,9 +778,55 @@ pub(crate) fn single_line(message: &str) -> String {
     message.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn overlay_generation_files(
+    source_root: &Path,
+    destination_root: &Path,
+) -> Result<(), HelperServiceError> {
+    if !destination_root.is_dir() {
+        return Err(HelperServiceError::InvalidGeneration(
+            "running generation directory is missing".into(),
+        ));
+    }
+    let names = collect_generation_files(source_root)?;
+    let mut config = Vec::new();
+    let mut others = Vec::new();
+    for name in names {
+        if name == "config.yaml" {
+            config.push(name);
+        } else {
+            others.push(name);
+        }
+    }
+    for name in others.into_iter().chain(config) {
+        if !source_root.join(&name).is_file() {
+            continue;
+        }
+        let source = checked_generation_file(source_root, &name)?;
+        copy_over_file(&source, &destination_root.join(&name))?;
+    }
+    Ok(())
+}
+
 fn copy_new_file(source: &Path, destination: &Path) -> Result<(), HelperServiceError> {
+    copy_file_with_options(source, destination, true)
+}
+
+fn copy_over_file(source: &Path, destination: &Path) -> Result<(), HelperServiceError> {
+    copy_file_with_options(source, destination, false)
+}
+
+fn copy_file_with_options(
+    source: &Path,
+    destination: &Path,
+    create_new: bool,
+) -> Result<(), HelperServiceError> {
     let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
+    options.write(true);
+    if create_new {
+        options.create_new(true);
+    } else {
+        options.create(true).truncate(true);
+    }
     let mut output = options.open(destination)?;
     let mut input = fs::File::open(source)?;
     io::copy(&mut input, &mut output)?;
@@ -1111,6 +1217,7 @@ tun_name = "clash-iran"
     fn generation_allowlist_accepts_client_uuid_files_and_rejects_paths() {
         let id = "11111111-1111-1111-1111-111111111111";
         assert!(is_allowed_generation_file("config.yaml"));
+        assert!(is_allowed_generation_file("iran-cdn-networks.txt"));
         assert!(is_allowed_generation_file(&format!(
             "custom-{id}-domains.txt"
         )));
@@ -1118,6 +1225,28 @@ tun_name = "clash-iran"
         assert!(!is_allowed_generation_file("custom-not-a-uuid-domains.txt"));
         assert!(!is_allowed_generation_file("../config.yaml"));
         assert!(!is_allowed_generation_file("custom/evil-domains.txt"));
+    }
+
+    #[test]
+    fn overlay_replaces_workdir_files_without_renaming_the_directory() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let running = directory.path().join("running");
+        let next = directory.path().join("next");
+        fs::create_dir(&running).expect("running");
+        fs::create_dir(&next).expect("next");
+        fs::write(running.join("config.yaml"), b"old").expect("old config");
+        fs::write(running.join("private.txt"), b"old-private").expect("old private");
+        fs::write(next.join("config.yaml"), b"new").expect("new config");
+        fs::write(next.join("private.txt"), b"new-private").expect("new private");
+        overlay_generation_files(&next, &running).expect("overlay");
+        assert_eq!(
+            fs::read_to_string(running.join("config.yaml")).expect("cfg"),
+            "new"
+        );
+        assert_eq!(
+            fs::read_to_string(running.join("private.txt")).expect("private"),
+            "new-private"
+        );
     }
 
     // A Windows counterpart belongs here, but every assertion about Windows

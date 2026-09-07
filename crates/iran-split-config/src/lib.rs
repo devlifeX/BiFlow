@@ -153,16 +153,64 @@ impl Default for MihomoConfig {
     fn default() -> Self {
         Self {
             controller_host: "127.0.0.1".into(),
-            controller_port: 19_090,
+            controller_port: PRODUCTION_CONTROLLER_PORT,
             controller_secret: generate_secret(),
-            mixed_port: 17_890,
-            dns_port: 1_053,
-            tun_name: "clash-iran".into(),
+            mixed_port: PRODUCTION_MIXED_PORT,
+            dns_port: PRODUCTION_DNS_PORT,
+            tun_name: PRODUCTION_TUN_NAME.into(),
             log_level: LogLevel::Info,
             direct_dns_preset: DirectDnsPreset::default(),
             direct_dns_servers: Vec::new(),
         }
     }
+}
+
+/// Installed-app defaults. A `BIFLOW_DEV_PROFILE` run must not share them.
+pub const PRODUCTION_CONTROLLER_PORT: u16 = 19_090;
+pub const DEV_PROFILE_CONTROLLER_PORT: u16 = 19_091;
+pub const PRODUCTION_MIXED_PORT: u16 = 17_890;
+pub const DEV_PROFILE_MIXED_PORT: u16 = 17_891;
+pub const PRODUCTION_DNS_PORT: u16 = 1_053;
+pub const DEV_PROFILE_DNS_PORT: u16 = 2_053;
+pub const PRODUCTION_TUN_NAME: &str = "clash-iran";
+pub const DEV_PROFILE_TUN_NAME: &str = "biflow-dev";
+
+impl MihomoConfig {
+    /// Move off the installed app's loopback ports and TUN when this process
+    /// uses `BIFLOW_DEV_PROFILE`. Returns whether any field changed.
+    pub fn isolate_from_installed_app(&mut self) -> bool {
+        self.isolate_from_installed_app_if(dev_profile_active())
+    }
+
+    /// Same remap as [`Self::isolate_from_installed_app`], with the env check
+    /// supplied by the caller so tests do not mutate process environment.
+    pub fn isolate_from_installed_app_if(&mut self, isolate: bool) -> bool {
+        if !isolate {
+            return false;
+        }
+        let mut changed = false;
+        if self.controller_port == PRODUCTION_CONTROLLER_PORT {
+            self.controller_port = DEV_PROFILE_CONTROLLER_PORT;
+            changed = true;
+        }
+        if self.mixed_port == PRODUCTION_MIXED_PORT {
+            self.mixed_port = DEV_PROFILE_MIXED_PORT;
+            changed = true;
+        }
+        if self.dns_port == PRODUCTION_DNS_PORT {
+            self.dns_port = DEV_PROFILE_DNS_PORT;
+            changed = true;
+        }
+        if self.tun_name == PRODUCTION_TUN_NAME {
+            self.tun_name = DEV_PROFILE_TUN_NAME.into();
+            changed = true;
+        }
+        changed
+    }
+}
+
+fn dev_profile_active() -> bool {
+    std::env::var_os("BIFLOW_DEV_PROFILE").is_some_and(|value| !value.is_empty())
 }
 
 /// Resolvers for Iranian and user-pinned DIRECT domains (not VPN `DoH`).
@@ -488,7 +536,8 @@ impl ConfigStore {
     /// validated, or atomically persisted.
     pub fn load_or_create(&self) -> Result<AppConfig, ConfigError> {
         if !self.path.exists() {
-            let config = AppConfig::default();
+            let mut config = AppConfig::default();
+            config.mihomo.isolate_from_installed_app();
             self.write_atomic(&config)?;
             return Ok(config);
         }
@@ -516,12 +565,13 @@ impl ConfigStore {
             self.backup()?;
             migrate(&mut value, schema)?;
         }
-        let config: AppConfig = value.try_into()?;
+        let mut config: AppConfig = value.try_into()?;
+        let isolated = config.mihomo.isolate_from_installed_app();
         let issues = config.validate();
         if !issues.is_empty() {
             return Err(ConfigError::Validation(issues));
         }
-        if schema < CURRENT_SCHEMA_VERSION {
+        if schema < CURRENT_SCHEMA_VERSION || isolated {
             self.write_atomic(&config)?;
         }
         Ok(config)
@@ -796,6 +846,27 @@ mod tests {
         assert_eq!(first.mihomo.direct_dns_preset, DirectDnsPreset::FakeIp);
         assert_eq!(first.mihomo.direct_dns_preset.to_string(), "fake_ip");
         assert!(first.mihomo.direct_dns_resolvers().is_empty());
+    }
+
+    #[test]
+    fn isolate_from_installed_app_moves_default_ports_and_tun() {
+        let mut mihomo = MihomoConfig::default();
+        assert!(!mihomo.isolate_from_installed_app_if(false));
+        assert_eq!(mihomo.controller_port, PRODUCTION_CONTROLLER_PORT);
+        assert!(mihomo.isolate_from_installed_app_if(true));
+        assert_eq!(mihomo.controller_port, DEV_PROFILE_CONTROLLER_PORT);
+        assert_eq!(mihomo.mixed_port, DEV_PROFILE_MIXED_PORT);
+        assert_eq!(mihomo.dns_port, DEV_PROFILE_DNS_PORT);
+        assert_eq!(mihomo.tun_name, DEV_PROFILE_TUN_NAME);
+        assert!(!mihomo.isolate_from_installed_app_if(true));
+
+        let mut custom = MihomoConfig {
+            controller_port: 19_095,
+            ..MihomoConfig::default()
+        };
+        assert!(custom.isolate_from_installed_app_if(true));
+        assert_eq!(custom.controller_port, 19_095);
+        assert_eq!(custom.mixed_port, DEV_PROFILE_MIXED_PORT);
     }
 
     #[test]

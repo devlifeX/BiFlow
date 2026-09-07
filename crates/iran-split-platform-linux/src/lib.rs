@@ -279,6 +279,91 @@ impl LinuxBackend {
             .map_err(|error| CoreError::Platform(error.to_string()))
     }
 
+    async fn register_runtime(&self, generation: &RuntimeGeneration) -> Result<(), CoreError> {
+        match self
+            .helper_request(HelperCommand::RegisterRuntimeGeneration {
+                generation_id: generation.generation_id,
+                config_sha256: generation.config_sha256.clone(),
+            })
+            .await?
+        {
+            HelperReply::GenerationRegistered { generation_id }
+                if generation_id == generation.generation_id =>
+            {
+                Ok(())
+            }
+            _ => Err(CoreError::Platform("generation registration failed".into())),
+        }
+    }
+
+    async fn spawn_core(&self, generation: &RuntimeGeneration) -> Result<(), CoreError> {
+        match self
+            .helper_request(HelperCommand::StartMihomo {
+                generation_id: generation.generation_id,
+                config_sha256: generation.config_sha256.clone(),
+            })
+            .await?
+        {
+            HelperReply::ProcessStatus(status) if status.running => Ok(()),
+            _ => Err(CoreError::MihomoStartFailed(
+                "helper did not report a running process".into(),
+            )),
+        }
+    }
+
+    async fn hot_reload_running(&self, rebind_host: Option<&str>) -> Result<(), CoreError> {
+        let config = self.config.read().await.clone();
+        let controller = ControllerClient::new(
+            &config.mihomo.controller_host,
+            config.mihomo.controller_port,
+            config.mihomo.controller_secret.clone(),
+        )
+        .map_err(|error| CoreError::ConfigInvalid(error.to_string()))?;
+        info!(
+            event = "mihomo.hot_reload_started",
+            section = "rules",
+            initiator = "linux_platform_backend",
+            cause = "live_pin_apply",
+            trace_route = "engine->linux_platform_backend->mihomo_controller",
+            "reloading Mihomo config without restarting the process"
+        );
+        controller
+            .hot_reload(Path::new("config.yaml"))
+            .await
+            .map_err(|error| CoreError::MihomoStartFailed(error.to_string()))?;
+        info!(
+            event = "mihomo.hot_reload_succeeded",
+            section = "rules",
+            initiator = "linux_platform_backend",
+            cause = "controller_204",
+            trace_route = "engine->linux_platform_backend->mihomo_controller",
+            "live Mihomo config reloaded"
+        );
+        let Some(host) = rebind_host else {
+            return Ok(());
+        };
+        match controller.close_connections_matching(host).await {
+            Ok(closed) => info!(
+                event = "mihomo.connections_rebound",
+                section = "rules",
+                initiator = "linux_platform_backend",
+                cause = "pin_apply",
+                trace_route = "engine->linux_platform_backend->mihomo_controller",
+                closed,
+                "closed live connections for the moved pin so they reconnect on the new outbound"
+            ),
+            Err(cause) => warn!(
+                event = "mihomo.connections_rebind_failed",
+                section = "rules",
+                initiator = "linux_platform_backend",
+                cause = %cause,
+                trace_route = "engine->linux_platform_backend->mihomo_controller",
+                "could not close matching connections after the live reload"
+            ),
+        }
+        Ok(())
+    }
+
     /// Loopback SOCKS endpoint of a client that is already serving traffic.
     ///
     /// `ready` are the handles collected so far in this connect, because
@@ -490,8 +575,8 @@ impl LinuxBackend {
     /// Live recovery for local proxies that were dead at connect time
     /// (ADR 0076). Connect probes each optional client exactly once; when the
     /// operator starts and connects Happ minutes later, its pinned domains
-    /// stay on the REJECT/DIRECT fallback until this re-check attaches the
-    /// missing egress handle. The engine then hot-applies the routing.
+    /// keep the client group (ADR 0082) but still need this re-check to attach
+    /// the live SOCKS bind. The engine then hot-applies the routing.
     async fn recover_local_proxy_clients(&self) -> Result<bool, CoreError> {
         let config = self.config.read().await.clone();
         let handles = self.egress_handles.lock().await.clone();
@@ -1210,6 +1295,7 @@ impl PlatformBackend for LinuxBackend {
             iran_domains: PathBuf::from("iran-domains.txt"),
             iran_business_domains: PathBuf::from("iran-business-domains.txt"),
             iran_networks: PathBuf::from("iran-networks.txt"),
+            iran_cdn_networks: PathBuf::from("iran-cdn-networks.txt"),
             custom_direct_domains: PathBuf::from("custom-direct-domains.txt"),
             custom_direct_ips: PathBuf::from("custom-direct-ips.txt"),
         };
@@ -1253,6 +1339,12 @@ impl PlatformBackend for LinuxBackend {
             &staging_root,
             "iran-business-domains.txt",
         )?;
+        copy_rule_file(
+            &self.paths.resources_dir,
+            &self.paths.rules_cache_dir,
+            &staging_root,
+            "iran-cdn-networks.txt",
+        )?;
         write_custom_provider_files(&staging_root, &custom, &config)?;
         write_atomic(&staging_root.join("config.yaml"), generated.yaml.as_bytes())?;
         let generation = RuntimeGeneration {
@@ -1286,27 +1378,29 @@ impl PlatformBackend for LinuxBackend {
     }
 
     async fn start_core(&self, generation: &RuntimeGeneration) -> Result<(), CoreError> {
+        self.register_runtime(generation).await?;
+        self.spawn_core(generation).await
+    }
+
+    async fn reload_core(
+        &self,
+        generation: &RuntimeGeneration,
+        rebind_host: Option<String>,
+    ) -> Result<(), CoreError> {
+        self.register_runtime(generation).await?;
         match self
-            .helper_request(HelperCommand::RegisterRuntimeGeneration {
+            .helper_request(HelperCommand::OverlayRuntimeGeneration {
                 generation_id: generation.generation_id,
                 config_sha256: generation.config_sha256.clone(),
             })
             .await?
         {
-            HelperReply::GenerationRegistered { generation_id }
-                if generation_id == generation.generation_id => {}
-            _ => return Err(CoreError::Platform("generation registration failed".into())),
-        }
-        match self
-            .helper_request(HelperCommand::StartMihomo {
-                generation_id: generation.generation_id,
-                config_sha256: generation.config_sha256.clone(),
-            })
-            .await?
-        {
-            HelperReply::ProcessStatus(status) if status.running => Ok(()),
-            _ => Err(CoreError::MihomoStartFailed(
-                "helper did not report a running process".into(),
+            HelperReply::ProcessStatus(status) if status.running => {
+                self.hot_reload_running(rebind_host.as_deref()).await
+            }
+            HelperReply::ProcessStatus(_) => self.spawn_core(generation).await,
+            _ => Err(CoreError::Platform(
+                "generation overlay did not return process status".into(),
             )),
         }
     }
@@ -1664,6 +1758,7 @@ fn readiness_error(error: MihomoError) -> CoreError {
     match error {
         MihomoError::Cancelled => CoreError::Cancelled,
         MihomoError::ReadinessTimeout(_) => CoreError::ControllerTimeout,
+        MihomoError::Unauthorized => CoreError::ControllerUnauthorized,
         other => CoreError::MihomoStartFailed(other.to_string()),
     }
 }
@@ -1805,6 +1900,7 @@ mod tests {
             "iran-domains.txt",
             "iran-networks.txt",
             "iran-business-domains.txt",
+            "iran-cdn-networks.txt",
         ] {
             fs::write(resources.join(name), "example\n").expect("fixture");
         }
@@ -1827,9 +1923,10 @@ mod tests {
             .expect("generation")
             .map(|entry| entry.expect("entry").file_name())
             .collect::<std::collections::HashSet<_>>();
-        // config.yaml, four bundled providers, two custom-direct, two per-client.
-        assert_eq!(names.len(), 9);
+        // config.yaml, five bundled providers, two custom-direct, two per-client.
+        assert_eq!(names.len(), 10);
         assert!(names.contains(std::ffi::OsStr::new("iran-business-domains.txt")));
+        assert!(names.contains(std::ffi::OsStr::new("iran-cdn-networks.txt")));
         assert!(names.iter().any(|name| {
             let name = name.to_string_lossy();
             name.starts_with("custom-")
