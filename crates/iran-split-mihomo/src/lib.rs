@@ -787,19 +787,26 @@ impl ControllerClient {
             .bearer_auth(&self.secret)
     }
 
+    fn require_controller_ok(
+        response: reqwest::Response,
+    ) -> Result<reqwest::Response, MihomoError> {
+        if response.status() == StatusCode::UNAUTHORIZED {
+            return Err(MihomoError::Unauthorized);
+        }
+        Ok(response.error_for_status()?)
+    }
+
     /// Reads the running Mihomo version.
     ///
     /// # Errors
     ///
     /// Returns an error when the controller request or response decoding fails.
     pub async fn version(&self) -> Result<VersionResponse, MihomoError> {
-        Ok(self
-            .get("/version")
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+        Ok(
+            Self::require_controller_ok(self.get("/version").send().await?)?
+                .json()
+                .await?,
+        )
     }
 
     /// Reads session upload and download totals from the controller.
@@ -827,13 +834,11 @@ impl ControllerClient {
     }
 
     async fn connections_snapshot(&self) -> Result<ConnectionsSnapshot, MihomoError> {
-        Ok(self
-            .get("/connections")
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+        Ok(
+            Self::require_controller_ok(self.get("/connections").send().await?)?
+                .json()
+                .await?,
+        )
     }
 
     /// Reads the active Mihomo configuration from the controller.
@@ -842,13 +847,11 @@ impl ControllerClient {
     ///
     /// Returns an error when the controller request or response decoding fails.
     pub async fn configs(&self) -> Result<Value, MihomoError> {
-        Ok(self
-            .get("/configs")
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+        Ok(
+            Self::require_controller_ok(self.get("/configs").send().await?)?
+                .json()
+                .await?,
+        )
     }
 
     /// Summarizes the readiness and rule count of configured rule providers.
@@ -858,11 +861,7 @@ impl ControllerClient {
     /// Returns an error when the controller request fails, its response cannot
     /// be decoded, or it omits the provider map.
     pub async fn provider_summary(&self) -> Result<ProviderStatus, MihomoError> {
-        let value = self
-            .get("/providers/rules")
-            .send()
-            .await?
-            .error_for_status()?
+        let value = Self::require_controller_ok(self.get("/providers/rules").send().await?)?
             .json::<Value>()
             .await?;
         summarize_rule_providers(&value)
@@ -1897,8 +1896,9 @@ mod tests {
             .await
             .expect_err("401");
         assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "HTTP 401 must not wait out the readiness budget"
+            started.elapsed() < Duration::from_secs(8),
+            "HTTP 401 must not wait out the readiness budget, took {:?}",
+            started.elapsed()
         );
         assert!(
             matches!(error, MihomoError::Unauthorized),

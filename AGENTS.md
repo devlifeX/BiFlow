@@ -101,6 +101,12 @@ If a required command fails or emits a warning from project code, fix it in the 
   `*.google.com` followed the same broken outbound. Keep a stub group for
   the named client (closed loopback SOCKS for side tunnels) and fail-close
   only `MATCH` when the default client is down.
+- A readiness test that requires `elapsed < 2s` on HTTP 401 shares the
+  controller `connect_timeout` (2s). Windows/Wine first-request latency
+  can cross that line after the 401 already mapped to Unauthorized.
+  Assert against a budget well below the 20s readiness wait (8s), and
+  map controller 401 to `MihomoError::Unauthorized` before
+  `error_for_status` so `wait_until_ready` does not sit on the timeout.
 - `cfg(windows)` code and tests never compile on the Linux host, and a
   full `--target x86_64-pc-windows-msvc` clippy from Linux dies in `ring`'s
   build script. When changing anything the Windows crates assert on
