@@ -31,6 +31,8 @@ pub enum MihomoError {
     EgressProbe(String),
     #[error("Mihomo controller returned HTTP {0}")]
     UnexpectedStatus(StatusCode),
+    #[error("Mihomo controller rejected the configuration ({status}): {detail}")]
+    ReloadRejected { status: StatusCode, detail: String },
     #[error("Mihomo validation process failed: {0}")]
     ValidationProcess(std::io::Error),
     #[error("Mihomo rejected the generated configuration: {0}")]
@@ -868,27 +870,29 @@ impl ControllerClient {
 
     /// Replaces the active Mihomo configuration without restarting the process.
     ///
-    /// The path must live inside the running `-d` workdir. Pin applies overlay
-    /// new files there first, then reload `config.yaml` so rule-provider paths
-    /// stay valid on Mihomo Meta 1.19+.
+    /// Overlay must already have copied the new generation into the running
+    /// `-d` workdir. Meta 1.19+ rejects a relative `path` on this endpoint
+    /// (`path is not a absolute path`) and also rejects a sibling directory,
+    /// so the body leaves `path` empty and reloads the process default file.
     ///
     /// # Errors
     ///
     /// Returns an error when the controller request fails or does not return
     /// HTTP 204 No Content.
-    pub async fn hot_reload(&self, config_path: &Path) -> Result<(), MihomoError> {
+    pub async fn hot_reload(&self) -> Result<(), MihomoError> {
         let response = self
             .client
             .put(format!("{}/configs?force=true", self.base_url))
             .timeout(Duration::from_secs(20))
             .bearer_auth(&self.secret)
             .json(&serde_json::json!({
-                "path": config_path.to_string_lossy(),
+                "path": "",
+                "payload": "",
             }))
             .send()
             .await?;
         if response.status() != StatusCode::NO_CONTENT {
-            return Err(MihomoError::UnexpectedStatus(response.status()));
+            return Err(controller_reload_error(response).await);
         }
         Ok(())
     }
@@ -1040,9 +1044,28 @@ impl ControllerClient {
 fn controller_rejected_secret(error: &MihomoError) -> bool {
     match error {
         MihomoError::Unauthorized => true,
-        MihomoError::UnexpectedStatus(status) => *status == StatusCode::UNAUTHORIZED,
+        MihomoError::UnexpectedStatus(status) | MihomoError::ReloadRejected { status, .. } => {
+            *status == StatusCode::UNAUTHORIZED
+        }
         MihomoError::Http(inner) => inner.status() == Some(StatusCode::UNAUTHORIZED),
         _ => false,
+    }
+}
+
+async fn controller_reload_error(response: reqwest::Response) -> MihomoError {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let detail = serde_json::from_str::<Value>(&body).ok().and_then(|value| {
+        value
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .map(|message| message.chars().take(200).collect::<String>())
+    });
+    match detail {
+        Some(detail) => MihomoError::ReloadRejected { status, detail },
+        None => MihomoError::UnexpectedStatus(status),
     }
 }
 
@@ -2038,7 +2061,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hot_reload_sends_relative_config_path() {
+    async fn hot_reload_reloads_the_running_workdir_default() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
@@ -2052,7 +2075,9 @@ mod tests {
                 b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response).await;
             request.contains("PUT /configs?force=true")
-                && request.contains(r#""path":"config.yaml""#)
+                && request.contains(r#""path":"""#)
+                && request.contains(r#""payload":"""#)
+                && !request.contains("config.yaml")
         });
         let client = ControllerClient::new(
             "127.0.0.1",
@@ -2060,11 +2085,38 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
         .expect("client");
-        client
-            .hot_reload(Path::new("config.yaml"))
-            .await
-            .expect("reload");
+        client.hot_reload().await.expect("reload");
         assert!(server.await.expect("server"));
+    }
+
+    #[tokio::test]
+    async fn hot_reload_includes_controller_message_on_400() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 2048];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+            let body = r#"{"message":"path is not a absolute path"}"#;
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await;
+        });
+        let client = ControllerClient::new(
+            "127.0.0.1",
+            port,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect("client");
+        let error = client.hot_reload().await.expect_err("400");
+        let text = error.to_string();
+        assert!(text.contains("400"), "{text}");
+        assert!(text.contains("path is not a absolute path"), "{text}");
+        server.await.expect("server");
     }
 
     #[test]

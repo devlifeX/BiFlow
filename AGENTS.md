@@ -80,12 +80,14 @@ If a required command fails or emits a warning from project code, fix it in the 
   only first-party pages that verify, and leave TLS-dead leftovers in
   the considering dump (ADR 0085).
 - Pin/list changes must overlay the new generation into the running Mihomo
-  workdir and `PUT /configs` (ADR 0083). `StartMihomo` on a new generation
-  id kills TUN, so Google (and every other tab) resolves over system DNS
-  during the gap and comes back on MATCH/Hiddify instead of Windscribe.
-  Close only connections for the moved pin so the live table updates
-  without dropping unrelated sites. Relative `config.yaml` is required:
-  Meta 1.19+ will not load a sibling generation directory.
+  workdir and `PUT /configs` with empty `path`/`payload` (ADR 0083).
+  `StartMihomo` on a new generation id kills TUN, so Google (and every
+  other tab) resolves over system DNS during the gap and comes back on
+  MATCH/Hiddify instead of Windscribe. Close only connections for the
+  moved pin so the live table updates without dropping unrelated sites.
+  YAML rule-provider paths stay relative to `-d`. A PUT `path` of
+  `config.yaml` is not absolute, so Meta 1.19+ answers HTTP 400
+  (`path is not a absolute path`) and the pin never applies.
 - Enabled-client pins must keep the Mihomo group name even when that
   egress is missing from live handles. Rewriting them to `REJECT`/`DIRECT`
   made a Windscribe pin on `google.com` look like it never applied, and

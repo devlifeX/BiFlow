@@ -24,9 +24,12 @@ directory.
 ## Decision
 
 - Live pin/list applies **overlay** the new generation files into the
-  running workdir, then `PUT /configs?force=true` with relative
-  `config.yaml`. The Mihomo process, TUN, side tunnels, and fake-ip cache
-  stay up.
+  running workdir, then `PUT /configs?force=true` with empty `path` and
+  `payload` so Meta reloads the process default file. Rule-provider
+  paths inside YAML stay relative (ADR 0016). A relative PUT `path` of
+  `config.yaml` is rejected immediately (`path is not a absolute path`);
+  an absolute sibling generation directory is also rejected. The Mihomo
+  process, TUN, side tunnels, and fake-ip cache stay up.
 - After a successful reload, close only connections whose host or
   destination matches the moved pin so that name reconnects on the new
   outbound. Other sites keep their sockets.

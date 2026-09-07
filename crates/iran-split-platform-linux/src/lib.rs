@@ -328,7 +328,7 @@ impl LinuxBackend {
             "reloading Mihomo config without restarting the process"
         );
         controller
-            .hot_reload(Path::new("config.yaml"))
+            .hot_reload()
             .await
             .map_err(|error| CoreError::MihomoStartFailed(error.to_string()))?;
         info!(
