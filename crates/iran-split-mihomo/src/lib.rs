@@ -934,6 +934,21 @@ impl ControllerClient {
         Ok(closed)
     }
 
+    /// Closes live connections for a pin apply. `google.com` also closes
+    /// Search companion hosts so stale MATCH sockets cannot keep the page on
+    /// the previous outbound.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when listing connections fails.
+    pub async fn close_connections_for_pin_apply(&self, pin: &str) -> Result<usize, MihomoError> {
+        let mut closed = 0_usize;
+        for host in iran_split_rules::rebind_hosts_for_pin(pin) {
+            closed += self.close_connections_matching(&host).await?;
+        }
+        Ok(closed)
+    }
+
     /// Waits until Mihomo and every rule provider are ready.
     ///
     /// # Errors

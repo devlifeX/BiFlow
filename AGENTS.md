@@ -79,6 +79,13 @@ If a required command fails or emits a warning from project code, fix it in the 
   before concluding a non-`.ir` Iranian site is already covered; ship
   only first-party pages that verify, and leave TLS-dead leftovers in
   the considering dump (ADR 0085).
+- Pinning `google.com` to a client also pins Search/AI companion roots
+  (`gstatic.com`, `googleapis.com`, `googleusercontent.com`,
+  `googletagmanager.com`) unless they are already pinned (ADR 0086).
+  `DOMAIN-SUFFIX,google.com` does not cover those CDNs, so the search
+  page can sit on Windscribe while scripts stay on Hiddify and Google
+  stays “basic.” Close companion connections on apply. Chrome Secure DNS
+  still bypasses Mihomo fake-ip.
 - Pin/list changes must overlay the new generation into the running Mihomo
   workdir and `PUT /configs` with empty `path`/`payload` (ADR 0083).
   `StartMihomo` on a new generation id kills TUN, so Google (and every

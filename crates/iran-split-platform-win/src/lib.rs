@@ -397,7 +397,7 @@ impl WindowsBackend {
         let Some(host) = rebind_host else {
             return Ok(());
         };
-        match controller.close_connections_matching(host).await {
+        match controller.close_connections_for_pin_apply(host).await {
             Ok(closed) => info!(
                 event = "mihomo.connections_rebound",
                 section = "rules",

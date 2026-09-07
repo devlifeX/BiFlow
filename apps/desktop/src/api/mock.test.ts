@@ -106,6 +106,16 @@ describe("mock transport", () => {
         matched_rule: "google.com",
       },
     );
+    await expect(mockApi.testRoute("www.gstatic.com")).resolves.toMatchObject({
+      outbound: { kind: "client", client_id: MOCK_HIDDIFY_ID },
+      matched_rule: "gstatic.com",
+    });
+    await expect(
+      mockApi.testRoute("www.googleapis.com"),
+    ).resolves.toMatchObject({
+      outbound: { kind: "client", client_id: MOCK_HIDDIFY_ID },
+      matched_rule: "googleapis.com",
+    });
   });
 
   it("keeps github.io tenants separate and routes curated businesses direct", async () => {

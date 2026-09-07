@@ -89,3 +89,4 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0083](./0083-pin-apply-hot-reloads-mihomo.md)                 | Pin apply hot-reloads Mihomo                   | Accepted   |
 | [0084](./0084-curated-iranian-cdn-isp-cidrs.md)                | Curated Iranian CDN/ISP CIDRs                  | Accepted   |
 | [0085](./0085-tehran-index-company-directory.md)               | Tehran Index company directory harvest         | Accepted   |
+| [0086](./0086-google-search-companion-pins.md)                 | Google Search companion pins                   | Accepted   |

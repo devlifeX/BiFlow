@@ -35,6 +35,42 @@ import { validateDirectDns } from "../lib/directDns";
 import { sanitizeDefaultRoute } from "../lib/clients";
 import { MOCK_HIDDIFY_ID, outboundFromKey } from "../lib/outbound";
 
+const GOOGLE_SEARCH_COMPANIONS = [
+  "gstatic.com",
+  "googleapis.com",
+  "googleusercontent.com",
+  "googletagmanager.com",
+] as const;
+
+function withGoogleSearchCompanions(
+  pins: PinnedRoute[],
+  pin: PinnedRoute,
+): PinnedRoute[] {
+  const next = [...pins, pin];
+  if (
+    pin.outbound.kind !== "client" ||
+    pin.target.kind !== "domain" ||
+    pin.target.value !== "google.com"
+  ) {
+    return next;
+  }
+  for (const domain of GOOGLE_SEARCH_COMPANIONS) {
+    if (
+      next.some(
+        (item) => item.target.kind === "domain" && item.target.value === domain,
+      )
+    ) {
+      continue;
+    }
+    next.push({
+      ...pin,
+      target: { kind: "domain", value: domain },
+      resolved_ips: [],
+    });
+  }
+  return next;
+}
+
 const now = () => new Date().toISOString();
 const component = (
   phase: StackSnapshot["mihomo"]["phase"],
@@ -1029,13 +1065,16 @@ export const mockApi = {
       created_at: now(),
       refreshed_at: now(),
     };
-    const pins = directRules.pins.filter(
-      (item) =>
-        !(
-          item.target.kind === parsed.kind && item.target.value === parsed.value
-        ),
+    const pins = withGoogleSearchCompanions(
+      directRules.pins.filter(
+        (item) =>
+          !(
+            item.target.kind === parsed.kind &&
+            item.target.value === parsed.value
+          ),
+      ),
+      pin,
     );
-    pins.push(pin);
     directRules = {
       ...directRules,
       revision: directRules.revision + 1,

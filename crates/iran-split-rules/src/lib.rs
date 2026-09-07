@@ -1,5 +1,6 @@
 mod canonical;
 mod cloud;
+mod google_search;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -24,6 +25,9 @@ pub use cloud::{
     bundled_snapshot_is_complete, ensure_bundled_snapshot, provider_entry_count,
     resolve_provider_path, CloudRuleSetStatus, CloudRuleStore, CloudRulesStatus, CloudSyncError,
     RuleFetcher,
+};
+pub use google_search::{
+    expands_google_search_companions, rebind_hosts_for_pin, GOOGLE_SEARCH_COMPANION_DOMAINS,
 };
 
 #[derive(Debug, Error)]
@@ -570,22 +574,26 @@ impl RuleManager {
                 }
             }
             if other_count == 0 {
-                if moved {
+                let companions =
+                    attach_google_search_companions(&mut document, &target, outbound, list_id);
+                if moved || companions {
                     document.revision = document.revision.saturating_add(1);
                     publish(&self.path, &document)?;
                 }
                 return Ok(document.clone());
             }
+            attach_google_search_companions(&mut document, &target, outbound, list_id);
         } else {
             let now = Utc::now();
             document.pins.push(PinnedRoute {
-                target,
+                target: target.clone(),
                 outbound,
                 list_id: Some(list_id),
                 resolved_ips,
                 created_at: now,
                 refreshed_at: Some(now),
             });
+            attach_google_search_companions(&mut document, &target, outbound, list_id);
             document.pins.sort_by_key(|pin| pin.target.display_value());
         }
         document.revision = document.revision.saturating_add(1);
@@ -799,10 +807,80 @@ fn canonicalize_document(mut document: RoutePinsDocument) -> RoutePinsDocument {
     let before = document.clone();
     document.pins = merge_canonical_pins(document.pins);
     ensure_list_membership(&mut document);
+    fill_google_search_companions(&mut document);
     if document.pins != before.pins || document.lists != before.lists {
         document.revision = document.revision.saturating_add(1);
     }
     document
+}
+
+fn fill_google_search_companions(document: &mut RoutePinsDocument) {
+    let mut found = None;
+    for pin in &document.pins {
+        let DirectTarget::Domain(domain) = &pin.target else {
+            continue;
+        };
+        if !expands_google_search_companions(domain) {
+            continue;
+        }
+        if !matches!(pin.outbound, Outbound::Client { .. }) {
+            continue;
+        }
+        found = Some((pin.outbound, pin.list_id));
+        break;
+    }
+    let Some((outbound, existing_list)) = found else {
+        return;
+    };
+    let list_id = existing_list.unwrap_or_else(|| document.default_list_for(outbound));
+    attach_google_search_companions(
+        document,
+        &DirectTarget::Domain("google.com".into()),
+        outbound,
+        list_id,
+    );
+}
+
+fn attach_google_search_companions(
+    document: &mut RoutePinsDocument,
+    target: &DirectTarget,
+    outbound: Outbound,
+    list_id: Uuid,
+) -> bool {
+    if !matches!(outbound, Outbound::Client { .. }) {
+        return false;
+    }
+    let DirectTarget::Domain(domain) = target else {
+        return false;
+    };
+    if !expands_google_search_companions(domain) {
+        return false;
+    }
+    let now = Utc::now();
+    let mut added = false;
+    for companion in GOOGLE_SEARCH_COMPANION_DOMAINS {
+        let companion_target = DirectTarget::Domain((*companion).into());
+        if document
+            .pins
+            .iter()
+            .any(|pin| pin.target == companion_target)
+        {
+            continue;
+        }
+        document.pins.push(PinnedRoute {
+            target: companion_target,
+            outbound,
+            list_id: Some(list_id),
+            resolved_ips: Vec::new(),
+            created_at: now,
+            refreshed_at: Some(now),
+        });
+        added = true;
+    }
+    if added {
+        document.pins.sort_by_key(|pin| pin.target.display_value());
+    }
+    added
 }
 
 fn merge_canonical_pins(pins: Vec<PinnedRoute>) -> Vec<PinnedRoute> {
@@ -1584,6 +1662,116 @@ mod tests {
         let pinned = set.decide("185.163.216.9").expect("pin");
         assert_eq!(pinned.outbound, test_outbound());
         assert_eq!(pinned.reason, DecisionReason::VpnRule);
+    }
+
+    #[tokio::test]
+    async fn pinning_google_com_to_a_client_adds_search_companion_roots() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let manager = RuleManager::load(
+            directory.path().join("direct-rules.json"),
+            Arc::new(FixedResolver),
+        )
+        .expect("manager");
+        let pinned = manager
+            .pin("google.com", test_outbound(), 0)
+            .await
+            .expect("pin");
+        let names: Vec<_> = pinned
+            .pins
+            .iter()
+            .filter_map(|pin| match &pin.target {
+                DirectTarget::Domain(domain) => Some(domain.as_str()),
+                DirectTarget::Ip(_) => None,
+            })
+            .collect();
+        assert!(names.contains(&"google.com"));
+        for companion in GOOGLE_SEARCH_COMPANION_DOMAINS {
+            assert!(names.contains(companion), "{companion}");
+        }
+        let set = iran_rule_set(&pinned);
+        for host in [
+            "www.gstatic.com",
+            "ssl.gstatic.com",
+            "www.googleapis.com",
+            "lh3.googleusercontent.com",
+            "www.googletagmanager.com",
+        ] {
+            let decision = set.decide(host).expect("decide");
+            assert_eq!(decision.outbound, test_outbound(), "{host}");
+        }
+    }
+
+    #[tokio::test]
+    async fn pinning_google_com_direct_does_not_add_search_companions() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let manager = RuleManager::load(
+            directory.path().join("direct-rules.json"),
+            Arc::new(FixedResolver),
+        )
+        .expect("manager");
+        let pinned = manager.add("google.com", 0).await.expect("add");
+        assert_eq!(pinned.pins.len(), 1);
+        assert_eq!(
+            pinned.pins[0].target,
+            DirectTarget::Domain("google.com".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn google_search_companions_do_not_steal_an_existing_direct_pin() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let manager = RuleManager::load(
+            directory.path().join("direct-rules.json"),
+            Arc::new(FixedResolver),
+        )
+        .expect("manager");
+        let added = manager.add("gstatic.com", 0).await.expect("direct gstatic");
+        let pinned = manager
+            .pin("google.com", test_outbound(), added.revision)
+            .await
+            .expect("pin google");
+        let gstatic = pinned
+            .pins
+            .iter()
+            .find(|pin| pin.target == DirectTarget::Domain("gstatic.com".into()))
+            .expect("gstatic");
+        assert_eq!(gstatic.outbound, Outbound::Direct);
+        let set = iran_rule_set(&pinned);
+        assert_eq!(
+            set.decide("www.gstatic.com").expect("decide").outbound,
+            Outbound::Direct
+        );
+    }
+
+    #[tokio::test]
+    async fn load_fills_google_search_companions_for_a_client_google_pin() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("direct-rules.json");
+        let client = test_outbound();
+        let document = RoutePinsDocument {
+            revision: 1,
+            pins: vec![PinnedRoute {
+                target: DirectTarget::Domain("google.com".into()),
+                outbound: client,
+                list_id: None,
+                resolved_ips: vec![],
+                created_at: Utc::now(),
+                refreshed_at: None,
+            }],
+            lists: vec![],
+        };
+        fs::write(&path, serde_json::to_vec_pretty(&document).expect("json")).expect("write");
+        let manager = RuleManager::load(path, Arc::new(FixedResolver)).expect("load");
+        let loaded = manager.list().await;
+        for companion in GOOGLE_SEARCH_COMPANION_DOMAINS {
+            assert!(
+                loaded.pins.iter().any(|pin| {
+                    pin.target == DirectTarget::Domain((*companion).into())
+                        && pin.outbound == client
+                }),
+                "{companion}"
+            );
+        }
     }
 
     #[test]
