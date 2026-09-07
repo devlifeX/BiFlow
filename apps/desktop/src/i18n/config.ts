@@ -142,6 +142,16 @@ const resources = {
       uiModeLabel: "Interface mode",
       uiModeBasic: "Basic",
       uiModeAdvanced: "Advanced",
+      expressModeLabel: "Express",
+      expressModeHelp:
+        "One screen for connect, pause, and disconnect. Switch to Advanced for full control.",
+      expressConnectHint: "Use Connect in the action bar below.",
+      dashboardTabStatus: "Status",
+      dashboardTabComponents: "Components",
+      dashboardTabClients: "Clients",
+      dashboardTabRoutes: "Routes",
+      useWarmWorkspace: "Use warm workspace",
+      useNeutralWorkspace: "Use neutral workspace",
       basicModeHelp:
         "Use Connect to start split routing. Switch to Advanced for rules, diagnostics, and client settings.",
       aboutAuthorLabel: "Author",
@@ -440,6 +450,16 @@ const resources = {
       uiModeLabel: "حالت رابط",
       uiModeBasic: "ساده",
       uiModeAdvanced: "پیشرفته",
+      expressModeLabel: "اکسپرس",
+      expressModeHelp:
+        "یک صفحه برای وصل، مکث و قطع. برای کنترل کامل به حالت پیشرفته بروید.",
+      expressConnectHint: "دکمه وصل در نوار پایین است.",
+      dashboardTabStatus: "وضعیت",
+      dashboardTabComponents: "اجزا",
+      dashboardTabClients: "کلاینت‌ها",
+      dashboardTabRoutes: "مسیرها",
+      useWarmWorkspace: "پس‌زمینه گرم",
+      useNeutralWorkspace: "پس‌زمینه خنثی",
       basicModeHelp:
         "برای شروع مسیریابی دوگانه وصل بزنید. برای قوانین، عیب‌یابی و تنظیم کلاینت به حالت پیشرفته بروید.",
       aboutAuthorLabel: "نویسنده",

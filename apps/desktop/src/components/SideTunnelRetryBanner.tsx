@@ -49,7 +49,7 @@ export function SideTunnelRetryBanner({
       </p>
       <button
         type="button"
-        className="mt-2 inline-flex h-[30px] items-center rounded-[5px] bg-brand px-2 text-[11px] font-semibold text-white disabled:opacity-55"
+        className="mt-2 inline-flex h-[30px] items-center rounded-[5px] bg-accent px-2 text-[11px] font-semibold text-white disabled:opacity-55"
         disabled={actionPending}
         onClick={() => void retrySideTunnelConnect()}
       >

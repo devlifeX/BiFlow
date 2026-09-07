@@ -111,7 +111,7 @@ function InstallAction({
       type="button"
       disabled={installing}
       onClick={onClick}
-      className="inline-flex shrink-0 items-center gap-1 rounded-[5px] bg-brand px-2 py-0.5 text-[10px] font-semibold text-white disabled:opacity-50"
+      className="inline-flex shrink-0 items-center gap-1 rounded-[5px] bg-accent px-2 py-0.5 text-[10px] font-semibold text-white disabled:opacity-50"
     >
       {installing ? (
         <LoaderCircle className="animate-spin" size={12} aria-hidden />

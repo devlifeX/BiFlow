@@ -62,6 +62,10 @@ border-ink/10 pt-3`, with small buttons
 
 ## Chrome
 
+- Visual language is **Nero-inspired** (warm orange workspace gradient, grey
+  toolbars, icon category rail, bottom action bar) — not affiliated with or
+  copying Nero trademarks. A neutral workspace toggle removes the warm gradient
+  for operators who prefer flat grey chrome.
 - The settings-apply banner is `sticky top-0 z-40` inside the scroll
   container with `backdrop-blur` so it stays visible while scrolled.
 - Scrollbars are themed globally (thin, `rgb(var(--ink) / 0.22)` thumb,
@@ -78,7 +82,13 @@ border-ink/10 pt-3`, with small buttons
   per-component cards. Status chips are fixed `w-16 h-[18px]` with short labels
   (`Idle`, `Starting`, `Ready`, `Failed`, `Off`).
 - Stat strip uses `flex-[2]` for Exit IP and `flex-1` for Providers and Active
-  clients. Sidebar width is `w-44` with `h-7` nav rows.
+  clients. Sidebar width is `w-44` with Nero-style category rail items (icon
+  above label).
+- Advanced Dashboard uses horizontal tabs (Status | Components | Clients |
+  Routes) inside the workbench panel. Connect/Pause/Disconnect sit in a sticky
+  bottom action bar (`LifecycleActionBar`), not the page header.
+- App status footer includes a connection progress strip (Nero capacity-meter
+  analogue) during connect/disconnect operations.
 
 ## Accessibility guardrails
 

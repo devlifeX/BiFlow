@@ -11,8 +11,9 @@ import {
   SettingsIcon,
   Sun,
   X,
+  Palette,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import logo from "./assets/logo.png";
 import { desktop } from "./api/desktop";
@@ -36,7 +37,13 @@ import { BottomNav } from "./components/BottomNav";
 import { UiModeSwitch } from "./components/UiModeSwitch";
 import { isMobileViewport, subscribeMobileViewport } from "./lib/viewport";
 import { readUiMode, writeUiMode, type UiMode } from "./lib/uiMode";
+import {
+  readWorkspaceTheme,
+  writeWorkspaceTheme,
+  type WorkspaceTheme,
+} from "./lib/workspaceTheme";
 import { useAppStore } from "./store/app";
+import { LifecycleActionBar } from "./components/LifecycleActionBar";
 
 /** Only a live stack lights the border: running is green, paused is amber, and
  * every stopped or transitional phase leaves the window unringed. */
@@ -53,6 +60,9 @@ export function App() {
   const store = useAppStore();
   const [uiMode, setUiMode] = useState<UiMode>(() => readUiMode());
   const [mobile, setMobile] = useState(isMobileViewport);
+  const [workspaceTheme, setWorkspaceTheme] = useState<WorkspaceTheme>(() =>
+    readWorkspaceTheme(),
+  );
   const [dark, setDark] = useState(
     () =>
       (localStorage.getItem("biflow-theme") ??
@@ -60,6 +70,11 @@ export function App() {
   );
 
   useEffect(() => subscribeMobileViewport(setMobile), []);
+
+  useEffect(() => {
+    document.documentElement.dataset.workspace = workspaceTheme;
+    writeWorkspaceTheme(workspaceTheme);
+  }, [workspaceTheme]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -125,6 +140,9 @@ export function App() {
       : "hiddify";
 
   const glow = connectionGlow(store.snapshot?.phase);
+  const showLifecycleBar =
+    store.snapshot !== null &&
+    (store.page === "dashboard" || (!advanced && store.page !== "about"));
 
   return (
     <div
@@ -136,56 +154,67 @@ export function App() {
       {advanced && !mobile ? (
         <aside
           data-testid="sidebar-nav"
-          className="app-sidebar hidden h-full min-h-0 w-44 shrink-0 flex-col border-r border-[rgb(var(--border-default))] bg-surface px-2 py-3 md:flex"
+          className="app-sidebar hidden h-full min-h-0 w-44 shrink-0 flex-col border-r border-[rgb(var(--border-default))] bg-[rgb(var(--toolbar))] px-1.5 py-2 md:flex"
         >
-          <div className="flex items-center gap-2 px-2 py-1">
+          <div className="flex flex-col items-center gap-1 border-b border-[rgb(var(--border-default))] px-1 pb-2">
             <img
               src={logo}
               alt=""
-              className="h-7 w-7 rounded-[5px] object-contain"
+              className="h-8 w-8 rounded-[5px] object-contain"
             />
-            <div className="min-w-0">
-              <p className="truncate text-[12px] font-semibold">
-                {t("appName")}
-              </p>
-              <p className="truncate text-[10px] text-muted">{t("tagline")}</p>
-            </div>
+            <p className="truncate text-center text-[11px] font-semibold">
+              {t("appName")}
+            </p>
           </div>
           <nav
             aria-label="Primary navigation"
-            className="mt-3 grid flex-1 content-start gap-1"
+            className="mt-2 grid flex-1 content-start gap-1"
           >
-            <NavButton
+            <CategoryNavButton
               page="dashboard"
               label={t("dashboard")}
               icon={<LayoutDashboard />}
             />
-            <NavButton page="rules" label={t("rules")} icon={<BookOpen />} />
-            <NavButton
+            <CategoryNavButton
+              page="rules"
+              label={t("rules")}
+              icon={<BookOpen />}
+            />
+            <CategoryNavButton
               page="diagnostics"
               label={t("diagnostics")}
               icon={<Activity />}
             />
-            <NavButton
+            <CategoryNavButton
               page="settings"
               label={t("settings")}
               icon={<SettingsIcon />}
             />
-            <NavButton page="about" label={t("about")} icon={<Info />} />
-          </nav>
-          <div className="mt-auto flex gap-1 px-1 pt-4">
-            <ThemeButton dark={dark} setDark={setDark} />
-            <LanguageButton
-              language={i18n.language}
-              change={(lng) => void i18n.changeLanguage(lng)}
+            <CategoryNavButton
+              page="about"
+              label={t("about")}
+              icon={<Info />}
             />
+          </nav>
+          <div className="mt-auto flex flex-col gap-1 border-t border-[rgb(var(--border-default))] pt-2">
+            <WorkspaceThemeButton
+              theme={workspaceTheme}
+              setTheme={setWorkspaceTheme}
+            />
+            <div className="flex justify-center gap-1">
+              <ThemeButton dark={dark} setDark={setDark} />
+              <LanguageButton
+                language={i18n.language}
+                change={(lng) => void i18n.changeLanguage(lng)}
+              />
+            </div>
           </div>
         </aside>
       ) : null}
 
       <div className="flex min-h-0 min-w-0 flex-col overflow-hidden">
-        <main className="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col overflow-hidden px-4 py-3">
-          <div className="shrink-0 pb-3">
+        <main className="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col overflow-hidden px-3 py-2">
+          <div className="app-title-bar mb-2 flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-[6px] px-3 py-1.5">
             <UiModeSwitch
               mode={uiMode}
               onChange={(mode) => {
@@ -195,8 +224,9 @@ export function App() {
                 }
               }}
             />
+            <p className="truncate text-[10px] text-muted">{t("tagline")}</p>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="app-workbench min-h-0 flex-1 overflow-y-auto px-3 py-3">
             <SettingsApplyBanner />
             {!advanced && store.page !== "about" && store.snapshot ? (
               <BasicDashboard snapshot={store.snapshot} />
@@ -216,6 +246,9 @@ export function App() {
             {store.page === "about" ? <About /> : null}
           </div>
         </main>
+        {showLifecycleBar && store.snapshot ? (
+          <LifecycleActionBar snapshot={store.snapshot} />
+        ) : null}
         {mobile ? (
           <BottomNav
             onNavigate={(page) => {
@@ -330,14 +363,14 @@ export function App() {
   );
 }
 
-function NavButton({
+function CategoryNavButton({
   page,
   label,
   icon,
 }: {
   page: "dashboard" | "rules" | "diagnostics" | "settings" | "about";
   label: string;
-  icon: React.ReactNode;
+  icon: ReactNode;
 }) {
   const { page: current, setPage } = useAppStore();
   const active = current === page;
@@ -346,17 +379,34 @@ function NavButton({
       type="button"
       aria-current={active ? "page" : undefined}
       onClick={() => setPage(page)}
-      className={`flex h-7 min-w-0 items-center gap-2 rounded-[5px] px-2 text-[12px] font-medium transition ${
-        active
-          ? "bg-blue-50 font-semibold text-blue-700 dark:bg-brand/15 dark:text-brand"
-          : "text-muted hover:bg-ink/5 hover:text-ink"
-      }`}
+      className={`category-rail-item ${active ? "category-rail-item-active" : ""}`}
     >
-      <span className="shrink-0 [&>svg]:h-3.5 [&>svg]:w-3.5" aria-hidden>
+      <span className="category-rail-icon [&>svg]:h-5 [&>svg]:w-5" aria-hidden>
         {icon}
       </span>
-      <span className="truncate">{label}</span>
+      <span className="max-w-full truncate text-center">{label}</span>
     </button>
+  );
+}
+
+function WorkspaceThemeButton({
+  theme,
+  setTheme,
+}: {
+  theme: WorkspaceTheme;
+  setTheme: (theme: WorkspaceTheme) => void;
+}) {
+  const { t } = useTranslation();
+  const warm = theme === "warm";
+  const label = warm ? t("useNeutralWorkspace") : t("useWarmWorkspace");
+  return (
+    <IconOnlyButton
+      label={label}
+      onClick={() => setTheme(warm ? "neutral" : "warm")}
+      className="mx-auto rounded-[5px] p-1.5 text-muted hover:bg-ink/5 hover:text-ink"
+    >
+      <Palette size={16} aria-hidden className={warm ? "text-accent" : ""} />
+    </IconOnlyButton>
   );
 }
 

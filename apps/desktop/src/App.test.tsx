@@ -36,6 +36,7 @@ describe("App", () => {
       await screen.findByRole("heading", { name: "Ready when you are" }),
     ).toBeVisible();
     expect(screen.getByText("BiFlow")).toBeVisible();
+    await userEvent.click(screen.getByRole("tab", { name: "Components" }));
     expect(screen.getAllByRole("button", { name: /^Install$/ })).toHaveLength(
       2,
     );
@@ -123,6 +124,7 @@ describe("App", () => {
     expect(
       await screen.findByRole("heading", { name: "Ready when you are" }),
     ).toBeVisible();
+    await userEvent.click(screen.getByRole("tab", { name: "Clients" }));
     await userEvent.click(screen.getByRole("button", { name: "Add client" }));
     await userEvent.click(screen.getByRole("button", { name: /^OpenVPN/ }));
     const card = await screen.findByTestId("client-card-openvpn");

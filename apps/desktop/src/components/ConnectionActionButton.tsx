@@ -60,11 +60,7 @@ export function ConnectionActionButton({
       onClick={onClick}
       className={`connection-action connection-action-${variant} ${
         progress.processing ? "connection-action-processing" : ""
-      } ${glow ? "connect-button-glow" : ""} ${
-        variant === "primary"
-          ? "bg-brand text-white"
-          : "border border-[rgb(var(--border-default))] bg-surface text-ink"
-      } relative isolate inline-flex ${CONNECTION_BUTTON_WIDTH_CLASS} ${CONNECTION_BUTTON_HEIGHT_CLASS} shrink-0 items-center justify-center gap-1 rounded-[5px] px-2 text-[11px] font-semibold leading-none disabled:cursor-not-allowed disabled:opacity-55`}
+      } ${glow ? "connect-button-glow" : ""} relative isolate inline-flex ${CONNECTION_BUTTON_WIDTH_CLASS} ${CONNECTION_BUTTON_HEIGHT_CLASS} shrink-0 items-center justify-center gap-1 rounded-[5px] px-2 text-[11px] font-semibold leading-none disabled:cursor-not-allowed disabled:opacity-55`}
     >
       <span className="connection-action-fill-clip" aria-hidden>
         <span

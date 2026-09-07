@@ -95,3 +95,18 @@ The Advanced and Basic dashboards adopt a flat, list-first layout aligned with
   and the same lifecycle row — not an empty canvas with one button.
 - Border tokens `--border-default` / `--border-strong` centralize 1px chrome;
   IPs, ports, counts, and traffic use `tabular-nums`.
+
+## Nero-inspired workspace chrome (6.2.9)
+
+The UI borrows classic desktop-tool patterns from Nero Burning ROM (warm
+gradient workspace, grey toolbars, icon category rail, bottom action bar) without
+using Nero trademarks or assets:
+
+- `--accent` orange drives Connect/Burn-equivalent primary buttons; `--brand`
+  blue remains for diagrams and links.
+- Warm vertical gradient workspace with optional neutral toggle
+  (`data-workspace="neutral"`).
+- Advanced Dashboard tabs (Status | Components | Clients | Routes) and a sticky
+  `LifecycleActionBar` anchor Connect/Pause/Disconnect bottom-right.
+- App footer progress strip mirrors Nero’s capacity meter during connect
+  operations.

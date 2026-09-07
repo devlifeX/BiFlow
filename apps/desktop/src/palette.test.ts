@@ -45,15 +45,16 @@ describe("BiFlow palette", () => {
     const dark = block(".dark {", "* {");
 
     expect(rgbToken(light, "brand")).toEqual([0, 104, 230]);
+    expect(rgbToken(light, "accent")).toEqual([180, 83, 9]);
     expect(rgbToken(light, "success")).toEqual([0, 124, 131]);
-    expect(rgbToken(dark, "canvas")).toEqual([2, 11, 22]);
+    expect(rgbToken(dark, "canvas")).toEqual([18, 18, 18]);
     expect(rgbToken(dark, "success")).toEqual([0, 210, 209]);
   });
 
-  it("keeps white button text readable on the logo-derived brand blue", () => {
+  it("keeps white button text readable on the Nero accent orange", () => {
     const light = block(":root {", ".dark {");
     expect(
-      contrast(rgbToken(light, "brand"), [255, 255, 255]),
+      contrast(rgbToken(light, "accent"), [255, 255, 255]),
     ).toBeGreaterThanOrEqual(4.5);
   });
 });

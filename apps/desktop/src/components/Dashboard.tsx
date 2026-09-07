@@ -6,67 +6,18 @@ import { isHiddenProductionHost } from "../lib/hiddenHosts";
 import { clientColor } from "../lib/outbound";
 import { presetById, type PresetId } from "../lib/presets";
 import { useAppStore } from "../store/app";
-import { ClientRegistry } from "./ClientRegistry";
-import { ComponentStatusList } from "./ComponentStatusList";
-import { LifecycleControls } from "./LifecycleControls";
-import { StatStrip } from "./StatStrip";
+import { DashboardWorkbenchTabs } from "./DashboardWorkbenchTabs";
 import { StatusPill } from "./StatusPill";
 
 export function Dashboard({ snapshot }: { snapshot: StackSnapshot }) {
-  const { t } = useTranslation();
-  const { boot, dependencies, installingId, installDependency, installHelper } =
-    useAppStore();
   const active = snapshot.phase === "running" || snapshot.phase === "degraded";
 
   return (
-    <section
-      aria-labelledby="dashboard-title"
-      className="flex flex-col gap-3 px-4 py-3 pb-2"
-    >
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <p className="text-[11px] font-medium text-brand">{t("status")}</p>
-          <h1
-            id="dashboard-title"
-            className="text-lg font-semibold leading-snug tracking-tight"
-          >
-            {snapshot.phase === "running" || snapshot.phase === "degraded"
-              ? t("activeTitle")
-              : snapshot.phase === "paused"
-                ? t("pausedTitle")
-                : t("readyTitle")}
-          </h1>
-          <p className="mt-1 max-w-2xl text-[12px] leading-snug text-muted">
-            {t("routingSummary")}
-          </p>
-        </div>
-        <LifecycleControls snapshot={snapshot} />
-      </div>
-
-      <StatStrip snapshot={snapshot} />
-
-      <div>
-        <h2 className="mb-2 text-[13px] font-semibold">{t("components")}</h2>
-        <ComponentStatusList
-          snapshot={snapshot}
-          dependencies={dependencies}
-          installingId={installingId}
-          onInstallHelper={() => void installHelper()}
-          onInstallDependency={(id) => void installDependency(id)}
-        />
-      </div>
-
-      <ClientRegistry />
-
-      {active ? <TrafficFlow /> : null}
-
-      <p className="text-[11px] text-muted">
-        {t("lastUpdated")}:{" "}
-        <span className="tabular-nums">
-          {new Date(snapshot.updated_at).toLocaleTimeString()}
-        </span>
-        {boot?.mock_mode ? ` · ${t("mockMode")}` : ""}
-      </p>
+    <section aria-labelledby="dashboard-title" className="flex flex-col pb-2">
+      <DashboardWorkbenchTabs
+        snapshot={snapshot}
+        routesPanel={active ? <TrafficFlow /> : null}
+      />
     </section>
   );
 }
@@ -251,7 +202,7 @@ function TrafficFlow() {
   const directIp = useAppStore((state) => state.networkStatus?.public_ip);
 
   return (
-    <section className="overflow-x-hidden rounded-md border border-[rgb(var(--border-default))] bg-surface px-3 py-3">
+    <section className="overflow-x-hidden rounded-[6px] border border-[rgb(var(--border-default))] bg-surface px-3 py-3">
       <h2 className="text-[13px] font-semibold">{t("liveRouting")}</h2>
       <p className="mt-1 text-[12px] leading-snug text-muted">
         {t("liveRoutingHelp")}

@@ -4,35 +4,61 @@
 
 :root {
   font-family:
+    "Segoe UI",
     Inter,
     ui-sans-serif,
     system-ui,
     -apple-system,
     BlinkMacSystemFont,
-    "Segoe UI",
     sans-serif;
   color-scheme: light;
-  /* BiFlow logo palette: navy surfaces, route blue, and flow teal. */
-  --canvas: 247 251 255;
-  --surface: 255 255 255;
-  --ink: 6 25 46;
-  --muted: 83 109 131;
+  /* BiFlow identity blue for links, selection, and diagrams. */
   --brand: 0 104 230;
+  /* Nero-inspired warm accent for primary burn/connect actions. */
+  --accent: 180 83 9;
+  --accent-strong: 154 52 18;
+  --canvas: 255 248 242;
+  --surface: 255 255 255;
+  --toolbar: 244 244 244;
+  --ink: 28 28 28;
+  --muted: 96 96 96;
   --success: 0 124 131;
   --danger: 201 54 70;
-  --border-default: var(--ink) / 0.1;
-  --border-strong: var(--ink) / 0.18;
+  --border-default: var(--ink) / 0.12;
+  --border-strong: var(--ink) / 0.2;
+  --workspace-top: 255 228 210;
+  --workspace-mid: 255 205 175;
+  --workspace-bottom: 255 168 120;
+}
+
+:root[data-workspace="neutral"] {
+  --canvas: 245 245 245;
+  --workspace-top: 248 248 248;
+  --workspace-mid: 240 240 240;
+  --workspace-bottom: 232 232 232;
 }
 
 .dark {
   color-scheme: dark;
-  --canvas: 2 11 22;
-  --surface: 7 21 37;
-  --ink: 234 246 255;
-  --muted: 143 170 193;
-  --brand: 0 104 230;
+  --canvas: 18 18 18;
+  --surface: 32 32 32;
+  --toolbar: 40 40 40;
+  --ink: 245 245 245;
+  --muted: 170 170 170;
+  --brand: 96 165 250;
+  --accent: 251 146 60;
+  --accent-strong: 234 88 12;
   --success: 0 210 209;
   --danger: 239 91 103;
+  --workspace-top: 28 28 28;
+  --workspace-mid: 22 22 22;
+  --workspace-bottom: 16 16 16;
+}
+
+.dark[data-workspace="neutral"] {
+  --workspace-top: 24 24 24;
+  --workspace-mid: 20 20 20;
+  --workspace-bottom: 16 16 16;
 }
 
 * {
@@ -50,22 +76,17 @@ body,
 body {
   margin: 0;
   min-width: 320px;
-  background:
-    radial-gradient(
-      circle at 20% 0%,
-      rgb(var(--brand) / 0.1),
-      transparent 32rem
-    ),
-    rgb(var(--canvas));
+  background: linear-gradient(
+    180deg,
+    rgb(var(--workspace-top)) 0%,
+    rgb(var(--workspace-mid)) 42%,
+    rgb(var(--workspace-bottom)) 100%
+  );
   color: rgb(var(--ink));
 }
 
 button,
 input,
-/* The forms plugin sets 1rem on inputs WITH a type attribute, which made
-   password/number fields taller than their untyped text siblings (a
-   password box 42px tall next to a 34px username). input[type] outranks
-   the plugin's [type='...'] selectors so every input inherits alike. */
 input[type],
 select {
   font: inherit;
@@ -107,8 +128,67 @@ button:focus-visible,
 input:focus-visible,
 select:focus-visible,
 [tabindex]:focus-visible {
-  outline: 3px solid rgb(var(--brand) / 0.35);
+  outline: 3px solid rgb(var(--accent) / 0.35);
   outline-offset: 2px;
+}
+
+.app-workbench {
+  background: rgb(var(--surface));
+  border: 1px solid rgb(var(--border-default));
+  border-radius: 6px;
+  box-shadow: 0 1px 0 rgb(var(--ink) / 0.04);
+}
+
+.app-title-bar {
+  background: rgb(var(--toolbar));
+  border-bottom: 1px solid rgb(var(--border-default));
+}
+
+.category-rail-item {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  border-radius: 5px;
+  padding: 6px 4px;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.1;
+  color: rgb(var(--muted));
+  transition:
+    background-color 120ms ease-out,
+    color 120ms ease-out;
+}
+
+.category-rail-item:hover {
+  background: rgb(var(--ink) / 0.05);
+  color: rgb(var(--ink));
+}
+
+.category-rail-item-active {
+  background: linear-gradient(
+    180deg,
+    rgb(var(--accent) / 0.18),
+    rgb(var(--accent) / 0.08)
+  );
+  box-shadow: inset 3px 0 0 rgb(var(--accent));
+  color: rgb(var(--ink));
+  font-weight: 600;
+}
+
+.category-rail-icon {
+  display: flex;
+  height: 1.25rem;
+  width: 1.25rem;
+  align-items: center;
+  justify-content: center;
+}
+
+.express-hero {
+  border: 1px solid rgb(var(--border-default));
+  border-radius: 6px;
+  background: linear-gradient(180deg, rgb(var(--surface)), rgb(var(--canvas)));
 }
 
 .traffic-flow-base {
@@ -173,11 +253,6 @@ select:focus-visible,
   }
 }
 
-/* Connection glow: the window border breathes while the stack is live, so the
-   state is readable from across the room without reading the dashboard. The
-   ring is drawn on an inset overlay rather than the shell's own border so it
-   never shifts layout. Square corners keep the ring flush with the window
-   edges at 100% and scaled displays. */
 .connection-glow::after {
   content: "";
   position: fixed;
@@ -244,16 +319,27 @@ select:focus-visible,
   transition: width 280ms ease-out;
 }
 
+.connection-action-primary {
+  background-color: rgb(var(--accent));
+  color: rgb(255 255 255);
+}
+
 .connection-action-primary .connection-action-fill {
   background: rgb(255 255 255 / 0.28);
 }
 
+.connection-action-secondary {
+  border: 1px solid rgb(var(--border-default));
+  background: rgb(var(--surface));
+  color: rgb(var(--ink));
+}
+
 .connection-action-secondary .connection-action-fill {
-  background: rgb(var(--brand) / 0.28);
+  background: rgb(var(--accent) / 0.2);
 }
 
 .connection-action-processing.connection-action-primary {
-  background-color: rgb(var(--brand) / 0.62);
+  background-color: rgb(var(--accent-strong) / 0.82);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -262,13 +348,10 @@ select:focus-visible,
   }
 }
 
-/* Available Connect only: a quiet pulse that sits on the button box-shadow
-   so the in-button progress fill can keep animating independently. */
 .connect-button-glow {
-  box-shadow: 0 0 0 1px rgb(var(--brand) / 0.35);
+  box-shadow: 0 0 0 1px rgb(var(--accent) / 0.45);
 }
 
-/* Themed scrollbars so overflow areas never show the OS default chrome. */
 * {
   scrollbar-width: thin;
   scrollbar-color: rgb(var(--ink) / 0.25) transparent;

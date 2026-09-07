@@ -1,11 +1,10 @@
-import { Download } from "lucide-react";
+import { Download, Power } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import logo from "../assets/logo.png";
 import type { StackSnapshot } from "../api/models";
 import { useAppStore } from "../store/app";
 import { AppButton, BUTTON_ICON_PX } from "./AppButton";
 import { ComponentStatusList } from "./ComponentStatusList";
-import { LifecycleControls } from "./LifecycleControls";
 import { SideTunnelRetryBanner } from "./SideTunnelRetryBanner";
 import { StatStrip } from "./StatStrip";
 
@@ -27,48 +26,55 @@ export function BasicDashboard({ snapshot }: { snapshot: StackSnapshot }) {
   const showError =
     error ?? (snapshot.last_error ? t(snapshot.last_error.message_key) : null);
   const clients = settings?.clients ?? [];
+  const title = active
+    ? t("activeTitle")
+    : paused
+      ? t("pausedTitle")
+      : t("readyTitle");
 
   return (
     <section
       aria-labelledby="basic-dashboard-title"
-      className="flex flex-col gap-3 px-4 py-3 pb-2"
+      className="flex flex-col gap-3 pb-2"
     >
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[rgb(var(--border-default))] pb-3">
-        <div className="flex min-w-0 items-center gap-2">
+      <div className="express-hero flex flex-col gap-3 px-4 py-4">
+        <div className="flex min-w-0 items-center gap-3">
           <img
             src={logo}
             alt=""
-            className="h-8 w-8 shrink-0 rounded-[5px] object-contain"
+            className="h-10 w-10 shrink-0 rounded-[6px] object-contain"
           />
           <div className="min-w-0 text-start">
-            <p className="text-[11px] font-semibold text-brand">
-              {t("appName")}
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-accent">
+              {t("expressModeLabel")}
             </p>
             <h1
               id="basic-dashboard-title"
-              className="truncate text-[13px] font-semibold leading-snug"
+              className="text-base font-semibold leading-snug"
             >
-              {active
-                ? t("activeTitle")
-                : paused
-                  ? t("pausedTitle")
-                  : t("readyTitle")}
+              {title}
             </h1>
           </div>
         </div>
-        <LifecycleControls snapshot={snapshot} />
+        <p className="text-[12px] leading-snug text-muted">
+          {t("expressModeHelp")}
+        </p>
+        <div className="flex items-center gap-2 text-[11px] text-muted">
+          <Power size={14} className="shrink-0 text-accent" aria-hidden />
+          <span>{t("expressConnectHint")}</span>
+        </div>
       </div>
 
       {showError ? (
         <div
-          className="rounded-md border border-danger/20 bg-danger/5 px-3 py-2 text-[12px] text-danger"
+          className="rounded-[6px] border border-danger/20 bg-danger/5 px-3 py-2 text-[12px] text-danger"
           role="alert"
         >
           <p>{showError}</p>
           {missing ? (
             <AppButton
               icon={<Download size={BUTTON_ICON_PX} aria-hidden />}
-              className="mt-2 h-[30px] rounded-[5px] bg-brand px-2 text-[11px] font-semibold text-white"
+              className="mt-2 h-[30px] rounded-[5px] bg-accent px-2 text-[11px] font-semibold text-white"
               onClick={() => void installDependency(missingId)}
             >
               {t("install")} {missingId === "mihomo" ? "Mihomo" : "Hiddify"}
@@ -93,10 +99,6 @@ export function BasicDashboard({ snapshot }: { snapshot: StackSnapshot }) {
       {settings ? (
         <SideTunnelRetryBanner snapshot={snapshot} clients={clients} />
       ) : null}
-
-      <p className="text-[11px] leading-snug text-muted">
-        {t("basicModeHelp")}
-      </p>
     </section>
   );
 }

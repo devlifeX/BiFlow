@@ -9,9 +9,11 @@ export default {
       colors: {
         canvas: "rgb(var(--canvas) / <alpha-value>)",
         surface: "rgb(var(--surface) / <alpha-value>)",
+        toolbar: "rgb(var(--toolbar) / <alpha-value>)",
         ink: "rgb(var(--ink) / <alpha-value>)",
         muted: "rgb(var(--muted) / <alpha-value>)",
         brand: "rgb(var(--brand) / <alpha-value>)",
+        accent: "rgb(var(--accent) / <alpha-value>)",
         danger: "rgb(var(--danger) / <alpha-value>)",
         success: "rgb(var(--success) / <alpha-value>)",
       },

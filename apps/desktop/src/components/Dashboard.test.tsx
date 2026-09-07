@@ -1,9 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import type { StackSnapshot } from "../api/models";
 import { baseSnapshot } from "../test/fixtures";
 import { useAppStore } from "../store/app";
 import { Dashboard } from "./Dashboard";
+import { LifecycleActionBar } from "./LifecycleActionBar";
 
 vi.mock("../api/desktop", () => ({
   desktop: {
@@ -30,10 +32,24 @@ vi.mock("../api/desktop", () => ({
 const now = new Date().toISOString();
 const stopped = baseSnapshot({ updated_at: now });
 
+function renderDashboard(snapshot: StackSnapshot) {
+  return render(
+    <>
+      <Dashboard snapshot={snapshot} />
+      <LifecycleActionBar snapshot={snapshot} />
+    </>,
+  );
+}
+
+async function openComponentsTab() {
+  await userEvent.click(screen.getByRole("tab", { name: "Components" }));
+}
+
 describe("Dashboard", () => {
   it("shows real component state and starts without blocking the UI", async () => {
     useAppStore.setState({ snapshot: stopped, actionPending: false });
-    render(<Dashboard snapshot={stopped} />);
+    renderDashboard(stopped);
+    await openComponentsTab();
     expect(screen.getAllByText("Idle")).toHaveLength(4);
     expect(screen.getAllByText("Ready")).toHaveLength(1);
     const connect = screen.getByRole("button", { name: "Connect" });
@@ -44,17 +60,14 @@ describe("Dashboard", () => {
   });
 
   it("disables every lifecycle control during a transition", () => {
-    const { rerender } = render(
-      <Dashboard
-        snapshot={{
-          ...stopped,
-          phase: "starting_client",
-          busy: "connecting",
-          operation_stage: "starting_client",
-          operation_id: "operation-1",
-        }}
-      />,
-    );
+    const starting = {
+      ...stopped,
+      phase: "starting_client" as const,
+      busy: "connecting" as const,
+      operation_stage: "starting_client" as const,
+      operation_id: "operation-1",
+    };
+    const { rerender } = renderDashboard(starting);
     const connecting = screen.getByRole("button", { name: /^Start client/ });
     expect(connecting).toBeDisabled();
     expect(connecting).toHaveAttribute("data-progress", "25");
@@ -70,38 +83,51 @@ describe("Dashboard", () => {
       since: now,
     };
     rerender(
-      <Dashboard
-        snapshot={{
-          ...stopped,
-          phase: "running",
-          busy: "pausing",
-          helper: running,
-          clients: stopped.clients.map((client) => ({
-            ...client,
-            status: running,
-          })),
-          mihomo: running,
-          tun: running,
-          dns: running,
-        }}
-      />,
+      <>
+        <Dashboard
+          snapshot={{
+            ...stopped,
+            phase: "running",
+            busy: "pausing",
+            helper: running,
+            clients: stopped.clients.map((client) => ({
+              ...client,
+              status: running,
+            })),
+            mihomo: running,
+            tun: running,
+            dns: running,
+          }}
+        />
+        <LifecycleActionBar
+          snapshot={{
+            ...stopped,
+            phase: "running",
+            busy: "pausing",
+            helper: running,
+            clients: stopped.clients.map((client) => ({
+              ...client,
+              status: running,
+            })),
+            mihomo: running,
+            tun: running,
+            dns: running,
+          }}
+        />
+      </>,
     );
     expect(screen.getByRole("button", { name: "Stop Mihomo" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Disconnect" })).toBeDisabled();
   });
 
   it("exposes cancellation and in-button progress during an operation", () => {
-    render(
-      <Dashboard
-        snapshot={{
-          ...stopped,
-          phase: "starting_core",
-          busy: "connecting",
-          operation_stage: "starting_core",
-          operation_id: "operation-1",
-        }}
-      />,
-    );
+    renderDashboard({
+      ...stopped,
+      phase: "starting_core",
+      busy: "connecting",
+      operation_stage: "starting_core",
+      operation_id: "operation-1",
+    });
     expect(
       screen.getByRole("button", { name: "Cancel operation" }),
     ).toBeEnabled();
@@ -135,7 +161,8 @@ describe("Dashboard", () => {
       ],
       installDependency: install,
     });
-    render(<Dashboard snapshot={stopped} />);
+    renderDashboard(stopped);
+    await openComponentsTab();
     const buttons = screen.getAllByRole("button", { name: /^Install$/ });
     expect(buttons).toHaveLength(2);
     await userEvent.click(buttons[0]!);
@@ -174,12 +201,13 @@ describe("Dashboard", () => {
       ],
       installHelper,
     });
-    render(<Dashboard snapshot={unavailable} />);
+    renderDashboard(unavailable);
+    await openComponentsTab();
     await userEvent.click(screen.getByRole("button", { name: /^Install$/ }));
     expect(installHelper).toHaveBeenCalledOnce();
   });
 
-  it("hides install actions when Hiddify and Mihomo are already installed", () => {
+  it("hides install actions when Hiddify and Mihomo are already installed", async () => {
     useAppStore.setState({
       snapshot: stopped,
       actionPending: false,
@@ -201,34 +229,33 @@ describe("Dashboard", () => {
         },
       ],
     });
-    render(<Dashboard snapshot={stopped} />);
+    renderDashboard(stopped);
+    await openComponentsTab();
     expect(screen.queryByRole("button", { name: /^Install$/ })).toBeNull();
     expect(screen.getAllByText("Idle")).toHaveLength(4);
     expect(screen.getAllByText("Ready")).toHaveLength(1);
   });
 
-  it("shows animated direct and VPN routes only while connected", () => {
+  it("shows animated direct and VPN routes only while connected", async () => {
     const running = {
       phase: "running" as const,
       message: "Ready",
       since: now,
     };
-    const { rerender } = render(
-      <Dashboard
-        snapshot={{
-          ...stopped,
-          phase: "running",
-          helper: running,
-          clients: stopped.clients.map((client) => ({
-            ...client,
-            status: running,
-          })),
-          mihomo: running,
-          tun: running,
-          dns: running,
-        }}
-      />,
-    );
+    const runningSnapshot = {
+      ...stopped,
+      phase: "running" as const,
+      helper: running,
+      clients: stopped.clients.map((client) => ({
+        ...client,
+        status: running,
+      })),
+      mihomo: running,
+      tun: running,
+      dns: running,
+    };
+    const { rerender } = renderDashboard(runningSnapshot);
+    await userEvent.click(screen.getByRole("tab", { name: "Routes" }));
 
     expect(
       screen.getByRole("img", {
@@ -236,7 +263,12 @@ describe("Dashboard", () => {
       }),
     ).toBeVisible();
 
-    rerender(<Dashboard snapshot={stopped} />);
+    rerender(
+      <>
+        <Dashboard snapshot={stopped} />
+        <LifecycleActionBar snapshot={stopped} />
+      </>,
+    );
     expect(screen.queryByRole("img")).toBeNull();
   });
 
@@ -247,35 +279,34 @@ describe("Dashboard", () => {
       since: now,
     };
     useAppStore.setState({ snapshot: stopped, actionPending: false });
-    const { rerender } = render(
-      <Dashboard
-        snapshot={{
-          ...stopped,
-          phase: "running",
-          helper: running,
-          clients: stopped.clients.map((client) => ({
-            ...client,
-            status: running,
-          })),
-          mihomo: running,
-          tun: running,
-          dns: running,
-        }}
-      />,
-    );
+    const runningSnapshot = {
+      ...stopped,
+      phase: "running" as const,
+      helper: running,
+      clients: stopped.clients.map((client) => ({
+        ...client,
+        status: running,
+      })),
+      mihomo: running,
+      tun: running,
+      dns: running,
+    };
+    const { rerender } = renderDashboard(runningSnapshot);
     expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Disconnect" })).toBeEnabled();
+    const pausedSnapshot = {
+      ...stopped,
+      phase: "paused" as const,
+      clients: stopped.clients.map((client) => ({
+        ...client,
+        status: running,
+      })),
+    };
     rerender(
-      <Dashboard
-        snapshot={{
-          ...stopped,
-          phase: "paused",
-          clients: stopped.clients.map((client) => ({
-            ...client,
-            status: running,
-          })),
-        }}
-      />,
+      <>
+        <Dashboard snapshot={pausedSnapshot} />
+        <LifecycleActionBar snapshot={pausedSnapshot} />
+      </>,
     );
     expect(screen.getByRole("button", { name: "Resume" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Disconnect" })).toBeEnabled();
@@ -284,23 +315,25 @@ describe("Dashboard", () => {
   });
 
   it("truncates long stat values inside the strip", () => {
-    render(<Dashboard snapshot={stopped} />);
+    renderDashboard(stopped);
     const exitIp = screen.getByText("Available after connection");
     expect(exitIp.className).toMatch(/truncate/);
   });
 
   it("lets the shell scroll overflowing dashboard content", () => {
-    const { container } = render(<Dashboard snapshot={stopped} />);
+    const { container } = renderDashboard(stopped);
     expect(container.querySelector("section")?.className).not.toMatch(
       /overflow-y-auto/,
     );
     expect(container.querySelector("section")?.className).toMatch(/pb-2/);
   });
 
-  it("renders unified component and provider summaries", () => {
-    render(<Dashboard snapshot={stopped} />);
-    expect(screen.getByTestId("connection-status-strip")).toBeInTheDocument();
+  it("renders unified component and provider summaries", async () => {
+    const user = userEvent.setup();
+    renderDashboard(stopped);
     expect(screen.getByTestId("provider-summary")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Components" }));
+    expect(screen.getByTestId("connection-status-strip")).toBeInTheDocument();
     expect(
       screen
         .getByTestId("connection-status-strip")

@@ -88,7 +88,7 @@ function ModeOption({
       tabIndex={checked ? 0 : -1}
       onClick={onSelect}
       className={`relative z-10 inline-flex h-7 items-center justify-center gap-1 rounded-[5px] px-2 text-[10px] font-semibold transition-colors ${
-        checked ? "text-brand" : "text-muted hover:text-ink"
+        checked ? "text-accent" : "text-muted hover:text-ink"
       }`}
     >
       {icon}
