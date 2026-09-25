@@ -1,6 +1,6 @@
 //! Privileged supervision of an `OwnedSideTunnel` `OpenVPN` process.
 //!
-//! Invariants: `--route-noexec`, `--script-security 0` after `--config`,
+//! Invariants: `--route-noexec`, `--script-security 2` after `--config`,
 //! helper-installed scoped routes only, reject `0.0.0.0/0`, Linux fwmark
 //! policy table, Windows `interface-name` bind (no policy table).
 
@@ -101,7 +101,7 @@ impl Supervisor {
         let sanitized_profile =
             sanitized_profile_copy(&self.settings.runtime_dir, client_id, profile)?;
         let profile = sanitized_profile.as_path();
-        let mut child = self
+        let (mut child, device) = self
             .launch_openvpn(OpenVpnLaunch {
                 binary: &binary,
                 profile,
@@ -240,7 +240,10 @@ struct OpenVpnLaunch<'a> {
 impl Supervisor {
     /// Tries a direct connection, then the ready client's SOCKS port.
     /// Both attempts share the caller's budget.
-    async fn launch_openvpn(&self, launch: OpenVpnLaunch<'_>) -> Result<Child, HelperServiceError> {
+    async fn launch_openvpn(
+        &self,
+        launch: OpenVpnLaunch<'_>,
+    ) -> Result<(Child, String), HelperServiceError> {
         let OpenVpnLaunch {
             binary,
             profile,
@@ -281,8 +284,8 @@ impl Supervisor {
             )?;
             outcome = wait_for_device(&mut child, device, attempt_seconds, &log).await;
         }
-        outcome?;
-        Ok(child)
+        let opened = outcome?;
+        Ok((child, opened))
     }
 }
 
@@ -303,17 +306,59 @@ fn sanitized_profile_copy(
     Ok(copy)
 }
 
+#[derive(Clone, Default)]
+struct OpenVpnSessionLog {
+    last_line: String,
+    failure: Option<String>,
+    device: Option<String>,
+    ready: bool,
+}
+
+fn observe_openvpn_line(state: &mut OpenVpnSessionLog, line: &str) {
+    let line: String = redact(line).chars().take(200).collect();
+    if let Some(name) = openvpn_adapter_name(&line) {
+        state.device = Some(name);
+    }
+    if line.contains("Initialization Sequence Completed") {
+        state.ready = true;
+    }
+    if line.contains("ERROR:") || line.contains("Options error:") {
+        state.failure = Some(line.clone());
+    }
+    state.last_line = line;
+}
+
+/// Adapter name from an `OpenVPN` "device … opened" line.
+///
+/// `OpenVPN` 2.7 opens an existing ovpn-dco adapter such as
+/// `OpenVPN Connect DCO Adapter` instead of the `tun-<id>` name older
+/// Wintun builds created.
+fn openvpn_adapter_name(line: &str) -> Option<String> {
+    let rest = line.split(" device ").nth(1)?.trim();
+    let rest = rest.strip_suffix(" opened").unwrap_or(rest).trim();
+    let name = rest
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(rest)
+        .trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_owned())
+    }
+}
+
 fn spawn_openvpn(
     binary: &Path,
     args: &[String],
-) -> Result<(Child, Arc<tokio::sync::Mutex<String>>), HelperServiceError> {
+) -> Result<(Child, Arc<tokio::sync::Mutex<OpenVpnSessionLog>>), HelperServiceError> {
     let mut command = Command::new(binary);
     command
         .args(args)
         .env_clear()
         .stdin(Stdio::null())
         // OpenVPN writes its session log to stdout. Keep the last line so a
-        // timeout can say why the adapter never appeared.
+        // timeout or early exit can say why the adapter never appeared.
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -321,7 +366,7 @@ fn spawn_openvpn(
     let mut child = command
         .spawn()
         .map_err(|error| HelperServiceError::SideTunnel(redact(&error.to_string())))?;
-    let log = Arc::new(tokio::sync::Mutex::new(String::new()));
+    let log = Arc::new(tokio::sync::Mutex::new(OpenVpnSessionLog::default()));
     if let Some(stdout) = child.stdout.take() {
         let slot = Arc::clone(&log);
         tokio::spawn(async move {
@@ -332,34 +377,46 @@ fn spawn_openvpn(
                 if line.is_empty() {
                     continue;
                 }
-                let line: String = redact(line).chars().take(200).collect();
-                *slot.lock().await = line;
+                observe_openvpn_line(&mut *slot.lock().await, line);
             }
         });
     }
     Ok((child, log))
 }
 
-/// Waits for `OpenVPN` to bring `device` up, failing fast when it exits.
+/// Waits until `OpenVPN` finishes startup and returns the adapter it opened.
+///
+/// On Windows that name comes from the session log, because ovpn-dco picks an
+/// existing adapter. On Linux the requested `tun-<id>` device is the adapter.
 async fn wait_for_device(
     child: &mut Child,
     device: &str,
     timeout_seconds: u64,
-    log: &Arc<tokio::sync::Mutex<String>>,
-) -> Result<(), HelperServiceError> {
+    log: &Arc<tokio::sync::Mutex<OpenVpnSessionLog>>,
+) -> Result<String, HelperServiceError> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds.max(1));
     loop {
         if let Ok(Some(status)) = child.try_wait() {
-            let detail = last_stderr_line(child).await;
+            let state = log.lock().await.clone();
+            let stdout = state.failure.unwrap_or(state.last_line);
+            let detail = if stdout.is_empty() {
+                last_stderr_line(child).await
+            } else {
+                format!(": {stdout}")
+            };
             return Err(HelperServiceError::SideTunnel(format!(
                 "openvpn exited early with status {status}{detail}"
             )));
         }
-        if device_is_up(device).await {
-            return Ok(());
+        let state = log.lock().await.clone();
+        if state.ready {
+            return Ok(state.device.unwrap_or_else(|| device.to_owned()));
+        }
+        if !cfg!(windows) && device_is_up(device).await {
+            return Ok(device.to_owned());
         }
         if tokio::time::Instant::now() >= deadline {
-            let detail = log.lock().await.clone();
+            let detail = state.failure.unwrap_or(state.last_line);
             let _ = child.start_kill();
             let suffix = if detail.is_empty() {
                 String::new()
@@ -648,6 +705,37 @@ mod tests {
         let path = directory.join(name);
         fs::write(&path, contents).expect("fixture file");
         path
+    }
+
+    #[test]
+    fn openvpn_log_keeps_the_dco_adapter_and_the_last_line() {
+        let mut state = OpenVpnSessionLog::default();
+        observe_openvpn_line(
+            &mut state,
+            "ovpn-dco device [OpenVPN Connect DCO Adapter] opened",
+        );
+        observe_openvpn_line(
+            &mut state,
+            "Options error: option 'tcp-nodelay' cannot be used",
+        );
+        assert_eq!(state.device.as_deref(), Some("OpenVPN Connect DCO Adapter"));
+        assert_eq!(
+            state.failure.as_deref(),
+            Some("Options error: option 'tcp-nodelay' cannot be used")
+        );
+        observe_openvpn_line(&mut state, "Exiting due to fatal error");
+        assert!(state
+            .failure
+            .as_deref()
+            .unwrap_or("")
+            .contains("tcp-nodelay"));
+        assert!(!state.ready);
+        observe_openvpn_line(&mut state, "Initialization Sequence Completed");
+        assert!(state.ready);
+        assert_eq!(
+            openvpn_adapter_name("TUN/TAP device tun0 opened").as_deref(),
+            Some("tun0")
+        );
     }
 
     #[test]

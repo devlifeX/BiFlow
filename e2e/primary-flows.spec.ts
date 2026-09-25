@@ -17,7 +17,11 @@ async function openFresh(page: Page, mode: "basic" | "advanced" = "advanced") {
 }
 
 function connectButton(page: Page) {
-  return page.getByRole("button", { name: "Connect", exact: true });
+  return page.locator("[data-connection-action='connect']");
+}
+
+function disconnectButton(page: Page) {
+  return page.locator("[data-connection-action='disconnect']");
 }
 
 async function expectNoDocumentOverflow(page: Page) {
@@ -92,7 +96,7 @@ test.describe("primary BiFlow flows", () => {
       page.getByRole("heading", { name: "Protected split routing is active" }),
     ).toBeVisible();
 
-    await page.getByRole("button", { name: "Disconnect" }).click();
+    await disconnectButton(page).click();
     await expect(
       page.getByRole("heading", { name: "Ready when you are" }),
     ).toBeVisible();
@@ -164,9 +168,7 @@ test.describe("primary BiFlow flows", () => {
       page.getByRole("heading", { name: "Protected split routing is active" }),
     ).toBeVisible();
     await expect(page.getByRole("button", { name: "Pause" })).toBeEnabled();
-    await expect(
-      page.getByRole("button", { name: "Disconnect" }),
-    ).toBeEnabled();
+    await expect(disconnectButton(page)).toBeEnabled();
     const stages = await page.evaluate(() => {
       window.__BIFLOW_STAGE_STOP?.();
       return window.__BIFLOW_STAGE_SEEN ?? [];
@@ -333,7 +335,7 @@ test.describe("primary BiFlow flows", () => {
     await page.getByRole("button", { name: "Resume" }).click();
     await expect(shell).toHaveAttribute("data-connection-glow", "active");
 
-    await page.getByRole("button", { name: "Disconnect" }).click();
+    await disconnectButton(page).click();
     await expect(shell).toHaveAttribute("data-connection-glow", "none");
     await expect(shell).not.toHaveClass(/connection-glow\b/);
   });
@@ -543,7 +545,7 @@ test.describe("primary BiFlow flows", () => {
     await expect(
       page.getByRole("heading", { name: "Protected split routing is active" }),
     ).toBeVisible();
-    await page.getByRole("button", { name: "Disconnect" }).click();
+    await disconnectButton(page).click();
 
     await page.getByRole("radio", { name: "Advanced" }).click();
     await expect(
@@ -577,7 +579,7 @@ test.describe("primary BiFlow flows", () => {
     await expect(
       page.getByRole("heading", { name: "Protected split routing is active" }),
     ).toBeVisible();
-    await page.getByRole("button", { name: "Disconnect" }).click();
+    await disconnectButton(page).click();
     await expect(connectButton(page)).toBeVisible();
 
     await page.getByRole("radio", { name: "Advanced" }).click();

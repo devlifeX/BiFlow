@@ -50,6 +50,7 @@ export function ClientRegistry() {
     retrySideTunnelConnect,
     connectClient,
     disconnectClient,
+    clientActionError,
   } = useAppStore();
   const platform = boot?.platform ?? "linux";
   const [catalogOpen, setCatalogOpen] = useState(false);
@@ -275,6 +276,11 @@ export function ClientRegistry() {
             }
             onConnect={() => void connectClient(client.id)}
             onDisconnect={() => void disconnectClient(client.id)}
+            actionError={
+              clientActionError?.id === client.id
+                ? clientActionError.message
+                : null
+            }
           />
         ))}
       </div>
@@ -307,6 +313,7 @@ function ClientCard({
   stackReady,
   onConnect,
   onDisconnect,
+  actionError,
 }: {
   client: ClientInstance;
   pins: PinnedRoute[];
@@ -332,6 +339,7 @@ function ClientCard({
   stackReady: boolean;
   onConnect: () => void;
   onDisconnect: () => void;
+  actionError: string | null;
 }) {
   const { t } = useTranslation();
   const [host, setHost] = useState("");
@@ -460,9 +468,16 @@ function ClientCard({
         </p>
       ) : null}
 
-      {client.config.kind === "owned_side_tunnel" &&
-      phase === "stopped" &&
-      statusMessage ? (
+      {actionError ? (
+        <p
+          className="mt-2 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger"
+          data-testid="client-action-error"
+        >
+          {actionError}
+        </p>
+      ) : client.config.kind === "owned_side_tunnel" &&
+        phase === "stopped" &&
+        statusMessage ? (
         <p className="mt-2 rounded-xl border border-ink/10 bg-canvas px-3 py-2 text-xs text-muted">
           {statusMessage}
         </p>

@@ -61,6 +61,8 @@ describe("release artifact names", () => {
     assert.match(source, /cargo.*build.*iran-split-helper/);
     assert.match(source, /Windows-InstallerName/);
     assert.doesNotMatch(source, /build_linux|AppImage|\.deb/);
+    assert.doesNotMatch(source, /Invoke-Tool "corepack" @\("enable"/);
+    assert.match(source, /corepack", "pnpm"/);
   });
 
   it("rejects a --from stage that does not exist on that packaging target", () => {

@@ -12,6 +12,8 @@ vi.mock("../api/desktop", () => ({
     subscribeUpdateProgress: vi.fn(async () => () => undefined),
     start: vi.fn(),
     retrySideTunnels: vi.fn(),
+    connectClient: vi.fn(),
+    disconnectClient: vi.fn(),
     stop: vi.fn(),
     pause: vi.fn(),
     resume: vi.fn(),
@@ -663,5 +665,26 @@ describe("app store", () => {
     await useAppStore.getState().retrySideTunnelConnect();
     expect(desktop.retrySideTunnels).toHaveBeenCalledWith(30);
     expect(useAppStore.getState().sideTunnelLastTimeout).toBe(30);
+  });
+
+  it("keeps a client connect failure on the card instead of the global dialog", async () => {
+    vi.mocked(desktop.connectClient).mockRejectedValue(
+      new Error("openvpn exited early with status exit code: 1"),
+    );
+    useAppStore.setState({
+      snapshot: { ...boot.snapshot, phase: "running" },
+      settings: baseSettings(),
+      actionPending: false,
+      error: null,
+      clientActionError: null,
+    });
+    const id = baseSettings().clients[0]?.id;
+    if (!id) throw new Error("fixture client missing");
+    await useAppStore.getState().connectClient(id);
+    expect(useAppStore.getState().error).toBeNull();
+    expect(useAppStore.getState().clientActionError).toEqual({
+      id,
+      message: "openvpn exited early with status exit code: 1",
+    });
   });
 });

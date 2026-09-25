@@ -143,24 +143,51 @@ function Refresh-ToolPath {
     }
 }
 
-function Ensure-Pnpm {
-    if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
-        if (Get-Command corepack -ErrorAction SilentlyContinue) {
-            Invoke-Tool "corepack" @("enable")
-            Invoke-Tool "corepack" @("prepare", "pnpm@$PnpmVersion", "--activate")
-        } else {
-            Fail "pnpm is required. Install pnpm $PnpmVersion or enable Corepack."
-        }
+$script:PnpmLaunch = @("pnpm")
+
+function Invoke-Pnpm([string[]]$Arguments) {
+    $file = $script:PnpmLaunch[0]
+    $prefix = @()
+    if ($script:PnpmLaunch.Count -gt 1) {
+        $prefix = $script:PnpmLaunch[1..($script:PnpmLaunch.Count - 1)]
     }
-    Require-Command "pnpm" "Install pnpm $PnpmVersion and run this script again."
-    Log "pnpm $((& pnpm --version).Trim()) is ready"
+    Invoke-Tool $file @($prefix + $Arguments)
+}
+
+function Ensure-Pnpm {
+    # `corepack enable` writes pnpm next to node.exe under Program Files and
+    # fails with EPERM for a normal user. `corepack pnpm` uses the user cache.
+    $env:COREPACK_ENABLE_DOWNLOAD_PROMPT = "0"
+    $pnpmWorks = $false
+    if (Get-Command pnpm -ErrorAction SilentlyContinue) {
+        & pnpm --version | Out-Null
+        $pnpmWorks = $LASTEXITCODE -eq 0
+    }
+    if ($pnpmWorks) {
+        $script:PnpmLaunch = @("pnpm")
+    } elseif (Get-Command corepack -ErrorAction SilentlyContinue) {
+        Invoke-Tool "corepack" @("prepare", "pnpm@$PnpmVersion")
+        $script:PnpmLaunch = @("corepack", "pnpm")
+    } else {
+        Fail "pnpm is required. Install pnpm $PnpmVersion or use the Node.js Corepack that ships with it."
+    }
+    $file = $script:PnpmLaunch[0]
+    $prefix = @()
+    if ($script:PnpmLaunch.Count -gt 1) {
+        $prefix = $script:PnpmLaunch[1..($script:PnpmLaunch.Count - 1)]
+    }
+    $version = (& $file @prefix --version)
+    if ($LASTEXITCODE -ne 0) {
+        Fail "$file exited with code $LASTEXITCODE"
+    }
+    Log "pnpm $($version.Trim()) is ready"
 }
 
 function Ensure-NodeModules {
     if (-not (Test-Path -LiteralPath (Join-Path $ProjectDir "node_modules"))) {
         Log "Installing pinned frontend dependencies..."
         Push-Location $ProjectDir
-        try { Invoke-Tool "pnpm" @("install", "--frozen-lockfile") }
+        try { Invoke-Pnpm @("install", "--frozen-lockfile") }
         finally { Pop-Location }
     }
 }
@@ -259,7 +286,7 @@ function Invoke-TauriBuild([bool]$SkipFrontend, [string[]]$TauriArgs) {
         }
         $args = @("tauri", "build") + $TauriArgs + $configArgs
         Push-Location $ProjectDir
-        try { Invoke-Tool "pnpm" $args }
+        try { Invoke-Pnpm $args }
         finally { Pop-Location }
     }
     finally {
@@ -385,7 +412,7 @@ if ($From -and @("compile", "nsis", "collect") -notcontains $From.ToLowerInvaria
 
 Ensure-Requirements
 Push-Location $ProjectDir
-try { Invoke-Tool "pnpm" @("version:sync") }
+try { Invoke-Pnpm @("version:sync") }
 finally { Pop-Location }
 $BuildVersion = Get-Plan "version"
 Assert-BuildVersion

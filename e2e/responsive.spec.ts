@@ -121,10 +121,7 @@ test.describe("responsive viewports", () => {
       }
 
       await page.getByRole("button", { name: "Dashboard" }).click();
-      const connect = page.getByRole("button", {
-        name: "Connect",
-        exact: true,
-      });
+      const connect = page.locator("[data-connection-action='connect']");
       await connect.click();
       const processing = page.locator("[data-connection-action='connect']");
       await expect(processing).toHaveAttribute("data-processing", "true");
@@ -179,7 +176,7 @@ test.describe("responsive viewports", () => {
     await openAdvanced(page);
     await expect(page.getByTestId("provider-summary")).toBeVisible();
     await expect(page.getByTestId("connection-status-strip")).toBeVisible();
-    await page.getByRole("button", { name: "Connect", exact: true }).click();
+    await page.locator("[data-connection-action='connect']").click();
     await expect(
       page.getByRole("heading", { name: "Protected split routing is active" }),
     ).toBeVisible();

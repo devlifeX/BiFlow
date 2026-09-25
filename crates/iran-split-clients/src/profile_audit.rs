@@ -180,7 +180,11 @@ pub fn sanitize_openvpn_profile(text: &str) -> String {
 }
 
 /// Helper-owned `OpenVPN` argv. Always includes `--route-noexec` and pins
-/// `--script-security 0` after `--config`.
+/// `--script-security 2` after `--config`.
+///
+/// Level 2 is the minimum `OpenVPN` 2.7 accepts for its own `netsh` address
+/// setup. Level 0 blocks that command and the tunnel exits. The sanitized
+/// profile still has no `up` or `down` scripts, so user scripts are not run.
 ///
 /// `pinned_remote` goes **before** `--config` so it becomes the first entry in
 /// `OpenVPN`'s connection list and wins over the profile's own `remote`. The
@@ -211,7 +215,7 @@ pub fn openvpn_arguments(
         "--config".into(),
         profile.to_string_lossy().into_owned(),
         "--script-security".into(),
-        "0".into(),
+        "2".into(),
         "--route-noexec".into(),
         "--dev".into(),
         if windows { "tun".into() } else { device.into() },
@@ -224,14 +228,11 @@ pub fn openvpn_arguments(
         "2".into(),
     ]);
     if windows {
-        // A profile `dev tun` would attach the first TAP/Wintun adapter,
-        // which may already be Mihomo. Ask OpenVPN to create this name.
-        args.extend([
-            "--windows-driver".into(),
-            "wintun".into(),
-            "--dev-node".into(),
-            device.into(),
-        ]);
+        // OpenVPN 2.7 dropped Wintun. `AES-256-CBC` in a profile's
+        // `ncp-ciphers` also disables ovpn-dco and falls back to a TAP
+        // adapter that is often already taken. Keep only AEAD ciphers so
+        // the default DCO driver can open.
+        args.extend(["--data-ciphers".into(), "AES-256-GCM:AES-128-GCM".into()]);
     }
     for pushed in [
         "redirect-gateway",
@@ -242,6 +243,7 @@ pub fn openvpn_arguments(
         "register-dns",
         "route-ipv6",
         "route ",
+        "tcp-nodelay",
     ] {
         args.extend(["--pull-filter".into(), "ignore".into(), pushed.into()]);
     }
@@ -299,6 +301,9 @@ mod tests {
             .position(|arg| arg == "--script-security")
             .expect("script");
         assert!(config < script);
+        assert!(args
+            .windows(2)
+            .any(|window| window[0] == "--script-security" && window[1] == "2"));
         assert!(args.iter().any(|arg| arg == "--route-noexec"));
     }
 
@@ -390,13 +395,15 @@ not a real certificate
         }));
         assert!(args.iter().any(|arg| arg == "--route-nopull"));
         assert!(args.iter().any(|arg| arg == "--connect-retry-max"));
-        assert!(args.iter().any(|arg| arg == "--windows-driver"));
+        assert!(args.windows(3).any(|window| {
+            window[0] == "--pull-filter" && window[1] == "ignore" && window[2] == "tcp-nodelay"
+        }));
+        assert!(args.windows(2).any(|window| {
+            window[0] == "--data-ciphers" && window[1] == "AES-256-GCM:AES-128-GCM"
+        }));
+        assert!(!args.iter().any(|arg| arg == "--windows-driver"));
+        assert!(!args.iter().any(|arg| arg == "--dev-node"));
         let dev = args.iter().position(|arg| arg == "--dev").expect("dev");
         assert_eq!(args[dev + 1], "tun");
-        let node = args
-            .iter()
-            .position(|arg| arg == "--dev-node")
-            .expect("dev-node");
-        assert_eq!(args[node + 1], "tun-1234abcd");
     }
 }

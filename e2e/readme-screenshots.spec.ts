@@ -29,7 +29,7 @@ async function connectStack(page: Page) {
       .first()
       .click();
   }
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await page.locator("[data-connection-action='connect']").click();
   await expect(
     page.getByRole("heading", { name: "Protected split routing is active" }),
   ).toBeVisible();

@@ -215,8 +215,9 @@ If a required command fails or emits a warning from project code, fix it in the 
   `openvpn.exe` must be a DIRECT process bypass before that spawn. Otherwise
   the live TUN captures OpenVPN, the poisoned name never becomes a public
   IP, and the helper only reports that the tunnel did not come up (ADR 0093).
-  On Windows the adapter is `--dev tun` plus `--dev-node tun-<id>`; `--dev`
-  set to the node name never shows up in `netsh`.
+  On Windows OpenVPN 2.7 the adapter is the ovpn-dco device the log names
+  (`device […] opened`). `--dev-node tun-<id>` and `--windows-driver wintun`
+  do not create that adapter (ADR 0099).
 - Backticks inside a double-quoted shell search pattern are command
   substitutions. Quote `rg` patterns with single quotes when they contain
   Markdown code spans so validation does not accidentally execute the text.
@@ -226,6 +227,7 @@ If a required command fails or emits a warning from project code, fix it in the 
 - Playwright `getByText("Reachable")` is a substring match, so it also hits every "Unreachable" label. Pass `{ exact: true }` when one status label is a suffix of another.
 - An isolated `CARGO_TARGET_DIR` can consume enough disk to make a later workspace link fail with `No space left on device`. Remove only the known disposable isolated target; never use `cargo clean` on the shared incremental cache.
 - In the managed sandbox, `pnpm version:sync` can fail with `spawn EPERM` when pnpm launches the configured Node binary. Re-run the same synchronization command with approved execution; do not bypass the root `version` source by hand-editing generated manifest versions.
+- `build.ps1` must not run `corepack enable`. That writes `pnpm` under `C:\Program Files\nodejs` and a normal PowerShell gets `EPERM`. Call `corepack prepare pnpm@9.0.1` and then `corepack pnpm` (ADR 0087).
 - Structured audit calls can push an existing Rust handler over Clippy's `too_many_lines` limit. Extract request execution plus its start/result audit events into a focused helper instead of suppressing the warning.
 - Diagnostics contains several independent live regions, so Playwright `getByRole("status")` is ambiguous after multiple actions. Assert the unique result text or scope the locator to the relevant card.
 - Cross-target Clippy sees only the active `cfg` branch; a helper that can fail only on Linux may look unnecessarily wrapped on Windows. Prefer a total cross-platform helper when a safe fallback exists, and validate both host and `cargo xwin clippy` targets.
@@ -250,7 +252,7 @@ If a required command fails or emits a warning from project code, fix it in the 
 - The diagnostics **Test flow** button stays disabled until the target field is non-empty.
 - The Zustand store is a process singleton. App tests that change `page` must reset store state in `beforeEach`, or the next test stays on Settings and never sees the dashboard heading.
 - `getByRole(..., { name: "Install" })` substring-matches **Installing…**. Use `{ name: /^Install$/ }` in Vitest and `{ exact: true }` in Playwright.
-- Playwright `getByRole("button", { name: "Connect" })` also matches the status-bar **Internet connected** control. Use `{ name: "Connect", exact: true }`. After click the accessible name becomes the current stage, so keep asserting the same control with `[data-connection-action='connect']`. Stage labels last only a few hundred milliseconds, so record them with a `MutationObserver` instead of sequential `getByRole` name waits. Basic mode has no sidebar **BiFlow** wordmark, so wait for the mode switch instead.
+- Playwright `getByRole("button", { name: "Connect" })` also matches the status-bar **Internet connected** control and each client card's Connect button. Select the stack control with `[data-connection-action='connect']` and `[data-connection-action='disconnect']`. After click the accessible name becomes the current stage. Stage labels last only a few hundred milliseconds, so record them with a `MutationObserver` instead of sequential `getByRole` name waits. Basic mode has no sidebar **BiFlow** wordmark, so wait for the mode switch instead.
 - `scripts/sync-version.mjs` must only sync manifests when it is the process entry point. Importing `readAppVersion` from tests or `build-plan.mjs` must not rewrite `package.json`.
 - After installing rustup, the same shell must prepend `$HOME/.cargo/bin` (or `source "$HOME/.cargo/env"`) or `cargo` is still missing. Both `./build.sh` and `./dev.sh` do this before every toolchain check, including clean/non-interactive shells.
 - Hiddify/Mihomo Install buttons must use PATH and `~/.local/bin`, not only `~/.local/share/biflow`. Mock UI reads the same locations at Vite startup; Playwright still forces missing deps via `sessionStorage` so e2e can test Install.
@@ -385,7 +387,7 @@ already in progress"`. Cache the last `UpdateInfo` (never log asset URLs).
 - If Windows helper install artifacts remain persistently locked, do not keep reusing them: write timestamped config and Task XML files below the machine-wide runtime directory and point the new scheduled task at them, leaving old files untouched (ADR 0089).
 - Windows keeps a running `mihomo.exe` write-locked even when the packaged and installed bytes are identical. Before copying helper payloads during reinstall, compare length and SHA-256 and skip the copy when they match; path equality alone does not prevent `os error 32` (ADR 0090).
 - Connect progress must not call the helper or the Mihomo controller on a short interval: those calls queue behind `StartMihomo` and steal the controller while providers load. After Mihomo has exited, TUN status must treat a closed controller port as inactive instead of waiting on HTTP. Pause keeps a successful egress probe so Resume can skip `generate_204` and a repeated `mihomo -t` when the config hash is unchanged. A stack `error` phase must show `technical_details`, not only the word error (ADR 0091).
-- A Windscribe `.ovpn` with `client` pulls `redirect-gateway`, DNS, and `block-outside-dns` even when those lines are absent from the file. `--route-noexec` does not stop that, and Windows `dev tun` grabs the first Wintun adapter (often Mihomo). Sanitize a temp copy, `--pull-filter ignore` those pushes, and on Windows create a private `--dev-node` with `--windows-driver wintun` (ADR 0092).
+- A Windscribe `.ovpn` with `client` pulls `redirect-gateway`, DNS, and `block-outside-dns` even when those lines are absent from the file. `--route-noexec` does not stop that. Sanitize a temp copy and `--pull-filter ignore` those pushes, plus `tcp-nodelay`. OpenVPN 2.7 drops Wintun; `AES-256-CBC` in `ncp-ciphers` disables ovpn-dco. Pass `--data-ciphers AES-256-GCM:AES-128-GCM` and `--script-security 2` (level 0 blocks OpenVPN's own `netsh`). Wait for `Initialization Sequence Completed`, and read the adapter name from stdout. Put per-client Connect failures on the card, not the global dialog (ADR 0099).
 - Debian calls `prerm upgrade <new-version>` before unpacking an upgrade and
   `postinst configure` afterward; stopping/disabling the Helper in every
   `prerm` leaves the upgraded app without its service. Preserve existing

@@ -115,6 +115,7 @@ interface AppStore {
   retrySideTunnelConnect: () => Promise<void>;
   connectClient: (id: string) => Promise<void>;
   disconnectClient: (id: string) => Promise<void>;
+  clientActionError: { id: string; message: string } | null;
 }
 
 function message(error: unknown): string {
@@ -183,6 +184,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   installGuide: null,
   update: initialUpdateProgress(),
   sideTunnelLastTimeout: null,
+  clientActionError: null,
   setPage: (page) => set({ page }),
   initialize: async () => {
     try {
@@ -796,22 +798,22 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
   connectClient: async (id) => {
     if (get().actionPending) return;
-    set({ actionPending: true, error: null });
+    set({ actionPending: true, clientActionError: null });
     try {
       await desktop.connectClient(id, 60);
     } catch (error) {
-      set({ error: message(error) });
+      set({ clientActionError: { id, message: message(error) } });
     } finally {
       set({ actionPending: false });
     }
   },
   disconnectClient: async (id) => {
     if (get().actionPending) return;
-    set({ actionPending: true, error: null });
+    set({ actionPending: true, clientActionError: null });
     try {
       await desktop.disconnectClient(id);
     } catch (error) {
-      set({ error: message(error) });
+      set({ clientActionError: { id, message: message(error) } });
     } finally {
       set({ actionPending: false });
     }

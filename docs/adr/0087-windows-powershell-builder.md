@@ -26,4 +26,6 @@ Linux cross-compilation remain the responsibility of `build.sh` and CI.
 Windows developers can run `./build.ps1` from PowerShell without Git Bash.
 The script still requires the pinned Node, pnpm, Rust, and NSIS toolchains and
 uses the same version-stability and resumable-stage checks as the shell
-builder.
+builder. When `pnpm` is not on `PATH`, it runs `corepack pnpm` after
+`corepack prepare`. It does not run `corepack enable`, which tries to write
+the shim into `Program Files` and fails with `EPERM` for a normal user.
