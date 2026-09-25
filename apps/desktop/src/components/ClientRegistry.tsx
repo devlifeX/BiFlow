@@ -174,7 +174,9 @@ export function ClientRegistry() {
                   type="button"
                   disabled={disabled || actionPending}
                   onClick={() => {
-                    void addClient(preset.id).then(() => setCatalogOpen(false));
+                    void addClient(preset.id).then((saved) => {
+                      if (saved) setCatalogOpen(false);
+                    });
                   }}
                   className="text-start"
                 >
@@ -255,7 +257,9 @@ export function ClientRegistry() {
               void deleteClient(
                 client.id,
                 moveTo === "direct" ? undefined : moveTo,
-              ).then(() => setPendingDelete(null));
+              ).then((deleted) => {
+                if (deleted) setPendingDelete(null);
+              });
             }}
             onEnabled={(enabled) => void setClientEnabled(client.id, enabled)}
             onAllowDirectWhenDown={(allow) =>

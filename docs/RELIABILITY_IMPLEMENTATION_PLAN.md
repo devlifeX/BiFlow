@@ -112,3 +112,65 @@ release without a separate request.
 R0 → R1 → R2 → R3 → R4 → R5 → R6. Independently testable corrections may be
 landed in smaller increments, but no work package is marked complete from a
 mock-only or source-only check.
+
+## Implementation progress — 2026-09-25 (incomplete)
+
+The current increment implements and regression-tests the following partial
+work; none of R1–R6 is marked complete until its full acceptance criteria and
+native platform verification pass:
+
+- Windows NSIS Helper hooks now abort when the privileged helper install or
+  uninstall exits unsuccessfully. The in-app NSIS handoff waits for the old
+  process, checks the elevated installer's exit code, identifies UAC denial,
+  reports failure, and relaunches the old app only when its executable remains.
+- Debian package scripts preserve an installed Helper during upgrades, update
+  only the packaged Mihomo digest in the existing authorization config, and
+  restart/verify the service. Fresh installs auto-provision only after
+  validating `SUDO_*` against passwd; otherwise they defer authorization to
+  the app. Helper configuration writes are now same-filesystem atomic renames.
+- Client addition stops when settings persistence fails. Client deletion saves
+  settings before changing pins and attempts a revision-aware restoration if
+  the pin operation fails; this is compensation, not a cross-document atomic
+  transaction. RuleManager now publishes each candidate rules document before
+  replacing its in-memory copy, so a failed single-document write cannot leave
+  memory ahead of disk.
+- The About updater rejects loose platform-suffix matches and release tags that
+  are not stable semantic versions. It checks the exact target/version/URL
+  against `latest.json`, downloads through Tauri's signature-verifying updater,
+  checks the byte count, and stages verified bytes privately before pausing the
+  stack. The release workflow now signs `.deb` as well as AppImage and NSIS;
+  an unsigned or stale manifest fails closed. The pre-upgrade route-pin guard
+  must now be recorded successfully, and a missing rules file leaves that
+  guard in place across restarts instead of clearing the warning once.
+- Updated-app and deferred-update logs now distinguish a completed package
+  install from merely launching the restart helper. The frontend production
+  bundle is split into sub-500KB chunks instead of emitting Rollup's chunk
+  size warning.
+- Verified so far on the Windows host: Rust formatting, desktop crate tests
+  (77), rules crate tests (45), Clippy with `-D warnings`, full `pnpm check`,
+  frontend unit tests (184), script/contract tests (87), `cargo deny check`
+  (advisories/bans/licenses/sources all pass; transitive duplicate-version
+  notices remain), version consistency, and production build with no
+  bundle-size warning. Under WSL, `iran-split-rules` tests (45) and
+  `iran-split-platform-linux` tests (14) plus Clippy pass; `build.sh` passes
+  `bash -n`, and all three Linux maintainer scripts pass `sh -n`.
+
+Still explicitly unverified: native Windows NSIS install/upgrade/UAC-denial
+E2E; native Debian fresh-install/upgrade/removal/service-failure E2E; the Linux
+Tauri desktop crate (WSL lacks `pkg-config`, GTK, and WebKit2GTK development
+packages); true atomicity for client settings plus rules;
+live Mihomo rollback; client health/recovery; typed connectivity diagnosis;
+and post-install version/Helper/protocol verification. Authenticated package
+download has source and unit/contract coverage but not disposable native
+update E2E on either platform.
+
+This host has no available Docker/Podman/Vagrant runner or `makensis` for a
+disposable native packaging test; its WSL Ubuntu lacks `pkg-config` and the
+GTK/WebKit2GTK development libraries. No privileged package operation was
+attempted on the user's live Windows or WSL profile.
+
+The initial repository-wide `pnpm check` exposed an EditorConfig LF versus
+Windows `core.autocrlf=true` mismatch (201 line-ending warnings), not 201
+independent source-format defects. Root Prettier scripts now explicitly use
+`--end-of-line auto`; canonical CI still checks out LF, while Windows developer
+worktrees no longer fail on line-ending conversion alone.

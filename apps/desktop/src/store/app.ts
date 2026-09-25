@@ -74,7 +74,7 @@ interface AppStore {
   pauseConnection: () => Promise<void>;
   resumeConnection: () => Promise<void>;
   cancel: () => Promise<void>;
-  saveSettings: (draft: AppConfig) => Promise<void>;
+  saveSettings: (draft: AppConfig) => Promise<boolean>;
   addRule: (input: string) => Promise<void>;
   pinRoute: (input: string, outbound: string) => Promise<void>;
   createList: (name: string, outbound: string) => Promise<void>;
@@ -84,8 +84,8 @@ interface AppStore {
   pinToList: (input: string, listId: string) => Promise<void>;
   discardClientPins: (id: string) => Promise<void>;
   reassignClientPins: (from: string, to: string) => Promise<void>;
-  addClient: (preset: PresetId) => Promise<void>;
-  deleteClient: (id: string, moveTo?: string) => Promise<void>;
+  addClient: (preset: PresetId) => Promise<boolean>;
+  deleteClient: (id: string, moveTo?: string) => Promise<boolean>;
   setClientEnabled: (id: string, enabled: boolean) => Promise<void>;
   setClientAllowDirectWhenDown: (id: string, allow: boolean) => Promise<void>;
   updateClient: (id: string, config: ClientConfig) => Promise<void>;
@@ -288,7 +288,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
   saveSettings: async (draft) => {
     const current = get().settings;
-    if (!current) return;
+    if (!current) return false;
     set({ actionPending: true, error: null });
     try {
       const sanitized = sanitizeDefaultRoute(draft);
@@ -308,8 +308,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
           ? { previous: existing?.previous ?? current }
           : existing,
       });
+      return true;
     } catch (error) {
       set({ actionPending: false, error: message(error) });
+      return false;
     }
   },
   addRule: async (input) => {
@@ -432,16 +434,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
   addClient: async (preset) => {
     const current = get().settings;
-    if (!current) return;
+    if (!current) return false;
     if (!canAddPreset(preset, current.clients)) {
-      throw new Error("that client is already added or is not available yet");
+      set({ error: "that client is already added or is not available yet" });
+      return false;
     }
     const instance = createClientInstance(preset);
     const next = {
       ...current,
       clients: [...current.clients, instance],
     };
-    await get().saveSettings(next);
+    if (!(await get().saveSettings(next))) return false;
     // Every client starts with its own named list so the pin flow has an
     // obvious destination. Best-effort: the client itself is already saved.
     try {
@@ -449,19 +452,43 @@ export const useAppStore = create<AppStore>((set, get) => ({
     } catch {
       // The registry stays usable without the list; the user can add one.
     }
+    return true;
   },
   deleteClient: async (id, moveTo) => {
-    if (moveTo) {
-      await get().reassignClientPins(id, moveTo);
-    } else {
-      await get().discardClientPins(id);
-    }
     const current = get().settings;
-    if (!current) return;
-    await get().saveSettings({
+    if (!current || !current.clients.some((client) => client.id === id)) {
+      return false;
+    }
+    const updated = await get().saveSettings({
       ...current,
       clients: current.clients.filter((client) => client.id !== id),
     });
+    if (!updated) return false;
+    try {
+      if (moveTo) {
+        await get().reassignClientPins(id, moveTo);
+      } else {
+        await get().discardClientPins(id);
+      }
+      return true;
+    } catch (error) {
+      // Restore the client if its dependent pin mutation failed. Use the new
+      // revision from the successful removal write to avoid stale-revision
+      // conflicts while compensating.
+      const afterRemoval = get().settings;
+      const restored = afterRemoval
+        ? await get().saveSettings({
+            ...afterRemoval,
+            clients: current.clients,
+          })
+        : false;
+      set({
+        error: restored
+          ? `Client was restored because its routes could not be updated: ${message(error)}`
+          : `Client restoration also failed after route update failed: ${message(error)}. Reload settings before retrying.`,
+      });
+      return false;
+    }
   },
   setClientEnabled: async (id, enabled) => {
     const current = get().settings;

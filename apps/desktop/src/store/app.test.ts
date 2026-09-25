@@ -30,6 +30,9 @@ vi.mock("../api/desktop", () => ({
     installUpdate: vi.fn(),
     openUrl: vi.fn(),
     saveSettings: vi.fn(),
+    createRuleList: vi.fn(),
+    reassignClientPins: vi.fn(),
+    discardClientPins: vi.fn(),
     applyLiveSettings: vi.fn(),
   },
 }));
@@ -575,6 +578,57 @@ describe("app store", () => {
     });
     await useAppStore.getState().saveSettings(next);
     expect(useAppStore.getState().settingsApplyNotice).toBeNull();
+  });
+
+  it("does not create a rule list when adding a client settings write fails", async () => {
+    const settings = baseSettings();
+    vi.mocked(desktop.saveSettings).mockRejectedValue(new Error("disk full"));
+    useAppStore.setState({ settings });
+
+    await expect(useAppStore.getState().addClient("windscribe")).resolves.toBe(
+      false,
+    );
+
+    expect(useAppStore.getState().settings).toEqual(settings);
+    expect(desktop.createRuleList).not.toHaveBeenCalled();
+  });
+
+  it("restores a client when its pin reassignment fails during deletion", async () => {
+    const settings = baseSettings({
+      clients: [...baseSettings().clients, createClientInstance("windscribe")],
+    });
+    const withoutClient = {
+      ...settings,
+      revision: settings.revision + 1,
+      clients: settings.clients.slice(1),
+    };
+    const restored = {
+      ...settings,
+      revision: settings.revision + 2,
+    };
+    vi.mocked(desktop.saveSettings)
+      .mockResolvedValueOnce(withoutClient)
+      .mockResolvedValueOnce(restored);
+    vi.mocked(desktop.reassignClientPins).mockRejectedValue(
+      new Error("rules changed concurrently"),
+    );
+    useAppStore.setState({
+      settings,
+      rules: { revision: 1, pins: [], lists: [] },
+    });
+
+    await expect(
+      useAppStore
+        .getState()
+        .deleteClient(settings.clients[0]!.id, settings.clients[1]!.id),
+    ).resolves.toBe(false);
+
+    expect(desktop.reassignClientPins).toHaveBeenCalledOnce();
+    expect(desktop.saveSettings).toHaveBeenCalledTimes(2);
+    expect(useAppStore.getState().settings).toEqual(restored);
+    expect(useAppStore.getState().error).toContain(
+      "routes could not be updated",
+    );
   });
 
   it("escalates side-tunnel retries from 15 to 30 seconds", async () => {

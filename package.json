@@ -1,6 +1,6 @@
 {
   "name": "iran-split-desktop-workspace",
-  "version": "6.2.26",
+  "version": "6.2.27",
   "private": true,
   "packageManager": "pnpm@9.0.1",
   "engines": {
@@ -13,8 +13,8 @@
     "dev": "pnpm --filter @iran-split/desktop dev",
     "prebuild": "node scripts/sync-version.mjs && pnpm bundle:check",
     "build": "pnpm --filter @iran-split/desktop build",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
+    "format": "prettier --write . --end-of-line auto",
+    "format:check": "prettier --check . --end-of-line auto",
     "lint": "pnpm --filter @iran-split/desktop lint",
     "typecheck": "pnpm --filter @iran-split/desktop typecheck",
     "test": "pnpm --filter @iran-split/desktop test",

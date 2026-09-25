@@ -410,10 +410,16 @@ describe("Tauri frontend contract", () => {
       /async fn collect_update_status\([\s\S]*?fetch_github_update\(app, initiator\)/,
     );
     assert.match(rust, /fn fetch_github_update\(/);
-    assert.match(githubUpdate, /async fn download_asset\(/);
+    assert.match(rust, /async fn fetch_verified_update_bytes\(/);
+    assert.match(rust, /signed\.download\(/);
+    assert.match(rust, /validate_signed_metadata\(/);
+    assert.doesNotMatch(githubUpdate, /async fn download_asset\(/);
     assert.match(githubUpdate, /pkexec/);
     assert.match(githubUpdate, /apt-get/);
-    assert.match(githubUpdate, /apply-update\.bat/);
+    assert.match(githubUpdate, /apply-update\.ps1/);
+    assert.match(githubUpdate, /-Verb RunAs -Wait -PassThru/);
+    assert.match(githubUpdate, /\$process\.ExitCode -ne 0/);
+    assert.match(githubUpdate, /1223/);
     assert.match(rust, /\.try_begin\(/);
     assert.match(rust, /phase: "installed"/);
     assert.doesNotMatch(rust, /fn spawn_background_update_checks\(/);
@@ -462,6 +468,59 @@ describe("Tauri frontend contract", () => {
       assert.match(body, /StrCmp \$R0 "0"/);
       assert.match(body, /SetErrorLevel 1[\s\S]*?Abort/);
     }
+  });
+
+  it("preserves and restarts the Linux Helper on package upgrades", () => {
+    const postinst = readFileSync(
+      join(root, "packaging/linux/postinst.sh"),
+      "utf8",
+    );
+    const prerm = readFileSync(join(root, "packaging/linux/prerm.sh"), "utf8");
+    const helperInstaller = readFileSync(
+      join(root, "packaging/linux/install-helper.sh"),
+      "utf8",
+    );
+
+    assert.match(postinst, /case "\$\{1:-\}" in\s+configure\)/);
+    assert.match(postinst, /if \[ -f "\$\{CONFIG\}" \]; then/);
+    assert.match(postinst, /mihomo_sha256 =/);
+    assert.match(postinst, /mv -f -- "\$\{config_temp\}" "\$\{CONFIG\}"/);
+    assert.match(postinst, /trap 'exit 129' HUP/);
+    assert.match(postinst, /systemctl restart iran-split-helper\.service/);
+    assert.match(
+      postinst,
+      /systemctl is-active --quiet iran-split-helper\.service/,
+    );
+    assert.match(postinst, /getent passwd "\$\{SUDO_UID\}"/);
+    assert.match(postinst, /install it from the app/);
+    assert.match(prerm, /remove\|deconfigure\)/);
+    assert.match(prerm, /upgrade\|failed-upgrade\|abort-upgrade/);
+    assert.doesNotMatch(
+      prerm,
+      /upgrade\|failed-upgrade\|abort-upgrade\|\*\)[\s\S]*?systemctl (?:stop|disable)/,
+    );
+    assert.match(
+      helperInstaller,
+      /systemctl restart iran-split-helper\.service/,
+    );
+    assert.match(
+      helperInstaller,
+      /systemctl is-active --quiet iran-split-helper\.service/,
+    );
+    assert.match(
+      helperInstaller,
+      /mktemp \/etc\/iran-split\/helper\.toml\.XXXXXX/,
+    );
+    assert.match(helperInstaller, /trap 'exit 130' INT/);
+    assert.match(
+      helperInstaller,
+      /mv -f -- "\$\{config_temp\}" "\$\{CONFIG_DEST\}"/,
+    );
+  });
+
+  it("strips Windows carriage returns from the Rust toolchain read by build.sh", () => {
+    const buildScript = readFileSync(join(root, "build.sh"), "utf8");
+    assert.match(buildScript, /RUST_VERSION=.*\| tr -d '\\r'/);
   });
 
   it("gates Linux helper-install paths so Windows dead_code stays clean", () => {

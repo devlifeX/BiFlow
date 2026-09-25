@@ -29,6 +29,7 @@ reqwest.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+semver.workspace = true
 sha2.workspace = true
 tauri = { version = "2.5.1", features = ["tray-icon"] }
 tauri-plugin-autostart = "2.3.0"
@@ -37,6 +38,7 @@ tauri-plugin-dialog = "2.3.2"
 tauri-plugin-process = "2.3.0"
 tauri-plugin-single-instance = "2.2.0"
 tauri-plugin-updater = "2.7.1"
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -49,9 +51,6 @@ iran-split-platform-linux = { path = "../crates/iran-split-platform-linux" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 iran-split-platform-win = { path = "../crates/iran-split-platform-win" }
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [lints]
 workspace = true

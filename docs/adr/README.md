@@ -98,3 +98,7 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0092](./0092-windscribe-openvpn-conflict-filters.md)          | Windscribe OpenVPN must not take the system route           | Accepted   |
 | [0093](./0093-windscribe-resolve-and-manual-connect.md)        | Resolve Windscribe through Hiddify, then connect it by hand | Accepted   |
 | [0094](./0094-remember-side-tunnel-address.md)                 | Remember a side-tunnel address without editing the profile  | Accepted   |
+| [0095](./0095-package-helper-lifecycle.md)                     | Preserve Helper identity across package upgrades            | Accepted   |
+| [0096](./0096-client-removal-compensation.md)                  | Compensate client removal when route updates fail           | Accepted   |
+| [0097](./0097-rules-publish-before-memory.md)                  | Publish rule documents before replacing in-memory state     | Accepted   |
+| [0098](./0098-signed-exact-release-updates.md)                 | Require exact signed packages before pausing connectivity   | Accepted   |

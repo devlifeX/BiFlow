@@ -21,8 +21,8 @@ describe("Settings", () => {
 
   it("lets the operator pick a DIRECT DNS preset including Mokhaberat", async () => {
     const saveSettings = vi
-      .fn<(draft: AppConfig) => Promise<void>>()
-      .mockResolvedValue(undefined);
+      .fn<(draft: AppConfig) => Promise<boolean>>()
+      .mockResolvedValue(true);
     useAppStore.setState({ saveSettings });
     render(<Settings settings={settings} />);
     await userEvent.click(screen.getByRole("tab", { name: "Mihomo" }));

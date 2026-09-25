@@ -70,6 +70,24 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- `RuleManager` must publish a candidate rule document before replacing its
+  in-memory copy. Mutating memory first leaves an unpublished revision visible
+  after a failed atomic rename; a restart then silently loses the change.
+  Block the destination with a directory in a cross-platform regression test
+  (ADR 0097).
+- GitHub Releases asset names and HTTPS downloads do not authenticate update
+  bytes. Require an exact version/architecture asset, a matching signed Tauri
+  manifest, and signature verification before pausing the stack. Sign `.deb`
+  in addition to AppImage/NSIS and fail closed when a signed manifest is stale
+  or missing; keep raw updater errors/URLs out of `debug.log` (ADR 0098).
+- An upgrade guard is a persistent recovery record, not a best-effort hint.
+  Abort before pausing the stack if it cannot be recorded; never delete it
+  before confirming the protected rule document survived. Preserve a missing
+  document warning across repeated app launches (ADR 0098).
+- A multiline YAML or JavaScript patch can be functionally correct yet fail
+  the strict `pnpm check` formatting gate. Run Prettier on touched files, then
+  re-run the full check; never interpret formatting warnings as a pass.
+
 - Never merge extras into Chocolate4U snapshots. Extra CIDRs need
   containment-diff against `iran-networks.txt` plus a first-party CDN page
   or an Iranian ASN; RIPEstat IR leftovers are often announced from
@@ -213,6 +231,13 @@ If a required command fails or emits a warning from project code, fix it in the 
 - Cross-target Clippy sees only the active `cfg` branch; a helper that can fail only on Linux may look unnecessarily wrapped on Windows. Prefer a total cross-platform helper when a safe fallback exists, and validate both host and `cargo xwin clippy` targets.
 - A native Tauri dev launch is not operational when its privileged helper is absent. `dev.sh` must prepare and verify the helper boundary before starting the UI, and must keep the root helper's executable/config/runtime outside the mutable workspace.
 - Shell EXIT and signal traps must not invoke privileged cleanup twice. Convert INT, TERM, and HUP to exit statuses and keep one EXIT cleanup handler; put per-user dev locks below the private user runtime directory, not shared `/tmp`.
+- Linux Helper configuration is a root security boundary: stage replacements on the same `/etc/iran-split` filesystem, set root ownership and mode 0600, then rename atomically. Do not copy a temp file over a live config with `install`, which can expose a truncated config to the service after interruption.
+- Store actions that combine settings with rule mutations must inspect an explicit persistence result; never continue after a swallowed settings-save error. Compensation across the two documents is not crash-atomic and must remain documented/tested as incomplete until a backend transaction or recovery journal closes the gap (ADR 0096).
+- Rust `format!` strings used to generate PowerShell must escape embedded quotes as `\"`; a bare PowerShell quote terminates the Rust string even when the generated script would be valid. Run `cargo fmt` immediately after changing these templates.
+- Prettier `end_of_line = lf` conflicts with a Windows worktree using `core.autocrlf=true` and reports repository-wide formatting failures for line endings alone. Use EditorConfig `auto`; Windows CI still sets `core.autocrlf=false` so its canonical checkout remains LF.
+- Keep both root Prettier scripts explicit with `--end-of-line auto`; Prettier CLI defaults to LF even when EditorConfig says `auto`, otherwise a Windows developer with autocrlf enabled sees hundreds of false format failures.
+- Bash entrypoints executed from WSL must have LF line endings or the shebang resolves as `bash\r`. Pin Unix shell scripts with `.gitattributes` `eol=lf` and syntax-check/invoke them from WSL after editing on Windows.
+- Values read from Windows-edited config files in shell scripts must strip a trailing carriage return before passing them to tools; rustup rejects `1.88.0\r` as an invalid toolchain. Keep build-script contract tests for this normalization.
 
 - Older Pillow has no `Image.Resampling`; generate icons with `Image.LANCZOS` / `Image.BICUBIC`.
 - Inner `#![allow(...)]` attributes must be the first item in a Rust module, before `use`.
@@ -361,3 +386,13 @@ already in progress"`. Cache the last `UpdateInfo` (never log asset URLs).
 - Windows keeps a running `mihomo.exe` write-locked even when the packaged and installed bytes are identical. Before copying helper payloads during reinstall, compare length and SHA-256 and skip the copy when they match; path equality alone does not prevent `os error 32` (ADR 0090).
 - Connect progress must not call the helper or the Mihomo controller on a short interval: those calls queue behind `StartMihomo` and steal the controller while providers load. After Mihomo has exited, TUN status must treat a closed controller port as inactive instead of waiting on HTTP. Pause keeps a successful egress probe so Resume can skip `generate_204` and a repeated `mihomo -t` when the config hash is unchanged. A stack `error` phase must show `technical_details`, not only the word error (ADR 0091).
 - A Windscribe `.ovpn` with `client` pulls `redirect-gateway`, DNS, and `block-outside-dns` even when those lines are absent from the file. `--route-noexec` does not stop that, and Windows `dev tun` grabs the first Wintun adapter (often Mihomo). Sanitize a temp copy, `--pull-filter ignore` those pushes, and on Windows create a private `--dev-node` with `--windows-driver wintun` (ADR 0092).
+- Debian calls `prerm upgrade <new-version>` before unpacking an upgrade and
+  `postinst configure` afterward; stopping/disabling the Helper in every
+  `prerm` leaves the upgraded app without its service. Preserve existing
+  root-owned authorization/configuration, update only the packaged Mihomo
+  digest atomically, restart, and verify the service in `postinst`. A fresh
+  GUI or pkexec package install may not carry `SUDO_*`; never guess the desktop
+  UID. Leave Helper provisioning to the app's explicit authorization flow and
+  explain that state. On NSIS, always pop and check `nsExec::ExecToLog`'s
+  result; an unchecked privileged-helper error must fail the package operation
+  (ADR 0095).

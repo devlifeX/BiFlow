@@ -9,7 +9,6 @@ use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
 };
-use tokio::io::AsyncWriteExt;
 use tracing::{info, warn};
 
 pub const LATEST_RELEASE_API: &str = "https://api.github.com/repos/devlifeX/BiFlow/releases/latest";
@@ -128,28 +127,56 @@ pub fn detect_install_kind() -> InstallKind {
 /// Returns an error when the release has no matching `.deb`, `AppImage`, or NSIS
 /// installer.
 pub fn pick_asset(release: &Release, kind: InstallKind) -> Result<Asset, String> {
+    if !cfg!(target_arch = "x86_64") {
+        return Err("automatic updates are not available for this architecture".into());
+    }
     let version = &release.version;
     let exact = match kind {
         InstallKind::Deb => format!("BiFlow_{version}_amd64.deb"),
         InstallKind::AppImage => format!("BiFlow_{version}_amd64.AppImage"),
         InstallKind::Nsis => format!("BiFlow_{version}_x64-setup.exe"),
     };
-    if let Some(asset) = release.assets.iter().find(|asset| asset.name == exact) {
-        return Ok(asset.clone());
+    release
+        .assets
+        .iter()
+        .find(|asset| asset.name == exact && asset.size > 0)
+        .cloned()
+        .ok_or_else(|| {
+            "no exact nonempty update package for this version and platform is attached to the latest GitHub Release".into()
+        })
+}
+
+#[must_use]
+pub const fn signed_target(kind: InstallKind) -> &'static str {
+    match kind {
+        InstallKind::Deb => "linux-deb-x86_64",
+        InstallKind::AppImage => "linux-x86_64",
+        InstallKind::Nsis => "windows-x86_64",
     }
-    let fallback = release.assets.iter().find(|asset| {
-        let name = asset.name.to_ascii_lowercase();
-        match kind {
-            InstallKind::Deb => name.starts_with("biflow_") && name.ends_with("_amd64.deb"),
-            InstallKind::AppImage => {
-                name.starts_with("biflow_") && name.ends_with("_amd64.appimage")
-            }
-            InstallKind::Nsis => name.starts_with("biflow_") && name.ends_with("_x64-setup.exe"),
-        }
-    });
-    fallback.cloned().ok_or_else(|| {
-        "no update package for this platform is attached to the latest GitHub Release".into()
-    })
+}
+
+/// Checks that the signed manifest identifies the exact GitHub asset selected
+/// for this release. Signature verification of the bytes is done by Tauri's
+/// updater before this package is written or the stack is paused.
+///
+/// # Errors
+///
+/// Returns an error when any release identity differs.
+pub fn validate_signed_metadata(
+    expected_version: &str,
+    asset: &Asset,
+    kind: InstallKind,
+    signed_version: &str,
+    signed_url: &str,
+    target: &str,
+) -> Result<(), String> {
+    if signed_version != expected_version
+        || signed_url != asset.url
+        || target != signed_target(kind)
+    {
+        return Err("signed update manifest does not match the selected release package".into());
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -178,10 +205,13 @@ pub fn parse_release(body: &[u8]) -> Result<Release, String> {
     let payload: GithubReleasePayload =
         serde_json::from_slice(body).map_err(|error| error.to_string())?;
     let tag_name = payload.tag_name.unwrap_or_default();
-    let version = normalize_version(&tag_name);
-    if version == "0.0.0" && tag_name.is_empty() {
-        return Err("github release response missing tag_name".into());
+    let raw_version = tag_name.strip_prefix('v').unwrap_or(&tag_name);
+    let parsed_version = semver::Version::parse(raw_version)
+        .map_err(|error| format!("github release tag is not a semantic version: {error}"))?;
+    if !parsed_version.pre.is_empty() || !parsed_version.build.is_empty() {
+        return Err("github release tag must be a stable X.Y.Z version".into());
     }
+    let version = parsed_version.to_string();
     let notes = payload.body.unwrap_or_default();
     let notes = notes.trim();
     let notes = if notes.chars().count() > 300 {
@@ -268,79 +298,6 @@ async fn fetch_latest(
     parse_release(&bytes)
 }
 
-/// Downloads `asset` into `{temp}/biflow-update/{name}`.
-///
-/// # Errors
-///
-/// Returns an error when the HTTP body is empty or cannot be written.
-pub async fn download_asset(
-    current_version: &str,
-    asset: &Asset,
-    timeout: std::time::Duration,
-    mut on_progress: impl FnMut(u64, Option<u64>),
-    mut should_cancel: impl FnMut() -> bool,
-) -> Result<PathBuf, String> {
-    let dest_dir = std::env::temp_dir().join("biflow-update");
-    tokio::fs::create_dir_all(&dest_dir)
-        .await
-        .map_err(|error| error.to_string())?;
-    let dest = dest_dir.join(&asset.name);
-    let part = dest_dir.join(format!("{}.part", asset.name));
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
-        .user_agent(user_agent(current_version))
-        .build()
-        .map_err(|error| error.to_string())?;
-    let mut response = client
-        .get(&asset.url)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    if !response.status().is_success() {
-        return Err("update package download failed".into());
-    }
-    let total = response.content_length();
-    let mut file = tokio::fs::File::create(&part)
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut written = 0_u64;
-    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
-        if should_cancel() {
-            drop(file);
-            remove_partial(&part).await;
-            return Err("update download cancelled".into());
-        }
-        file.write_all(&chunk)
-            .await
-            .map_err(|error| error.to_string())?;
-        written = written.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-        on_progress(written, total);
-    }
-    file.flush().await.map_err(|error| error.to_string())?;
-    drop(file);
-    if written == 0 {
-        remove_partial(&part).await;
-        return Err("downloaded update package is empty".into());
-    }
-    tokio::fs::rename(&part, &dest)
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(dest)
-}
-
-async fn remove_partial(part: &Path) {
-    if let Err(cause) = tokio::fs::remove_file(part).await {
-        warn!(
-            event = "update.partial_cleanup_failed",
-            section = "updates",
-            initiator = "github_update",
-            cause = %cause,
-            trace_route = "github_update->temp_file",
-            "incomplete update download could not be removed"
-        );
-    }
-}
-
 /// Applies a downloaded package. The caller must pause the stack first.
 ///
 /// # Errors
@@ -351,6 +308,7 @@ pub async fn apply_package(
     kind: InstallKind,
     package: &Path,
     current_exe: &Path,
+    expected_version: &str,
 ) -> Result<ApplyOutcome, String> {
     match kind {
         InstallKind::Deb => {
@@ -362,7 +320,7 @@ pub async fn apply_package(
             Ok(ApplyOutcome::HelperRestart)
         }
         InstallKind::Nsis => {
-            install_nsis(package, current_exe).await?;
+            install_nsis(package, current_exe, expected_version).await?;
             Ok(ApplyOutcome::HelperRestart)
         }
     }
@@ -439,18 +397,15 @@ async fn install_appimage(package: &Path) -> Result<(), String> {
     Ok(())
 }
 
-async fn install_nsis(package: &Path, current_exe: &Path) -> Result<(), String> {
+async fn install_nsis(
+    package: &Path,
+    current_exe: &Path,
+    expected_version: &str,
+) -> Result<(), String> {
     let script = std::env::temp_dir()
         .join("biflow-update")
-        .join("apply-update.bat");
-    let dest = current_exe.to_string_lossy().replace('"', "");
-    let src = package.to_string_lossy().replace('"', "");
-    let body = format!(
-        "@echo off\r\nsetlocal\r\nset PID={pid}\r\n:wait\r\ntasklist /FI \"PID eq %PID%\" 2>NUL | find /I \"%PID%\" >NUL\r\nif not errorlevel 1 (\r\n  timeout /t 1 /nobreak >NUL\r\n  goto wait\r\n)\r\npowershell -NoProfile -NonInteractive -Command \"Start-Process -FilePath '{src}' -ArgumentList '/S' -Verb RunAs -Wait\"\r\nstart \"\" \"{dest}\"\r\ndel \"%~f0\"\r\n",
-        pid = std::process::id(),
-        src = src.replace('\'', "''"),
-        dest = dest,
-    );
+        .join("apply-update.ps1");
+    let body = nsis_update_script(std::process::id(), package, current_exe, expected_version);
     if let Some(parent) = script.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -459,9 +414,15 @@ async fn install_nsis(package: &Path, current_exe: &Path) -> Result<(), String> 
     tokio::fs::write(&script, body)
         .await
         .map_err(|error| error.to_string())?;
-    let script_path = script.to_string_lossy().into_owned();
-    let mut command = tokio::process::Command::new("cmd");
-    command.args(["/C", "start", "", &script_path]);
+    let mut command = tokio::process::Command::new("powershell");
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ]);
+    command.arg(&script);
     #[cfg(windows)]
     {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -474,9 +435,63 @@ async fn install_nsis(package: &Path, current_exe: &Path) -> Result<(), String> 
         initiator = "github_update",
         cause = "windows_nsis",
         trace_route = "tauri_command->github_update->apply_helper",
-        "NSIS helper will install after this process exits"
+        "NSIS updater will verify elevation and installer status after this process exits"
     );
     Ok(())
+}
+
+fn nsis_update_script(
+    process_id: u32,
+    package: &Path,
+    current_exe: &Path,
+    expected_version: &str,
+) -> String {
+    format!(
+        "$ErrorActionPreference = 'Stop'\n\
+    $processId = {process_id}\n\
+    $installerPath = '{installer}'\n\
+    $applicationPath = '{application}'\n\
+    $expectedVersion = '{version}'\n\
+    $deadline = [DateTime]::UtcNow.AddMinutes(3)\n\
+    $failure = $null\n\
+    try {{\n\
+    while (Get-Process -Id $processId -ErrorAction SilentlyContinue) {{\n\
+    if ([DateTime]::UtcNow -ge $deadline) {{ throw 'The previous BiFlow process did not exit within 3 minutes.' }}\n\
+    Start-Sleep -Seconds 1\n\
+    }}\n\
+    $process = Start-Process -FilePath $installerPath -ArgumentList '/S' -Verb RunAs -Wait -PassThru -ErrorAction Stop\n\
+    if ($process.ExitCode -ne 0) {{ throw \"The installer returned exit code $($process.ExitCode).\" }}\n\
+    if (-not (Test-Path -LiteralPath $applicationPath -PathType Leaf)) {{ throw 'The installer reported success but BiFlow.exe is missing.' }}\n\
+    $installedVersion = (Get-Item -LiteralPath $applicationPath).VersionInfo.ProductVersion\n\
+    $versionMatch = [regex]::Match($installedVersion, '^(?<semver>\\d+\\.\\d+\\.\\d+)(?:\\.\\d+)?(?:\\s|$)')\n\
+    if (-not $versionMatch.Success -or $versionMatch.Groups['semver'].Value -ne $expectedVersion) {{ throw \"Expected BiFlow $expectedVersion but found '$installedVersion'.\" }}\n\
+    }} catch {{\n\
+    $errorCode = $_.Exception.HResult -band 65535\n\
+    if ($errorCode -eq 1223) {{\n\
+    $failure = 'Administrator approval was cancelled. BiFlow was not updated.'\n\
+    }} else {{\n\
+    $failure = \"BiFlow could not complete the update: $($_.Exception.Message)\"\n\
+    }}\n\
+    try {{\n\
+    Add-Type -AssemblyName System.Windows.Forms\n\
+    [System.Windows.Forms.MessageBox]::Show($failure, 'BiFlow update failed', 'OK', 'Error') | Out-Null\n\
+    }} catch {{}}\n\
+    if (Test-Path -LiteralPath $applicationPath -PathType Leaf) {{ try {{ Start-Process -FilePath $applicationPath -ErrorAction Stop }} catch {{}} }}\n\
+    exit 1\n\
+    }}\n\
+    try {{ Start-Process -FilePath $applicationPath -ErrorAction Stop }} catch {{\n\
+    Add-Type -AssemblyName System.Windows.Forms\n\
+    [System.Windows.Forms.MessageBox]::Show(\"BiFlow was updated to $expectedVersion but could not be started: $($_.Exception.Message)\", 'BiFlow update failed', 'OK', 'Error') | Out-Null\n\
+    exit 1\n\
+    }}\n",
+        installer = powershell_single_quote(&package.to_string_lossy()),
+        application = powershell_single_quote(&current_exe.to_string_lossy()),
+        version = normalize_version(expected_version),
+    )
+}
+
+fn powershell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn sh_single_quote(value: &str) -> String {
@@ -525,21 +540,83 @@ mod tests {
     }
 
     #[test]
-    fn pick_asset_falls_back_to_platform_suffix() {
+    fn release_tag_must_be_a_stable_semantic_version() {
+        for tag in ["", "v3.6", "v3.6.0-rc.1", "v3.6.0+local", "v3.6.0-notes"] {
+            let body = format!(r#"{{"tag_name":"{tag}","assets":[]}}"#);
+            assert!(parse_release(body.as_bytes()).is_err(), "accepted {tag}");
+        }
+    }
+
+    #[test]
+    fn pick_asset_requires_exact_release_version_and_architecture() {
         let release = Release {
             tag_name: "v9.9.9".into(),
             version: "9.9.9".into(),
             notes: String::new(),
             html_url: String::new(),
             assets: vec![Asset {
-                name: "BiFlow_9.9.9_x64-setup.exe".into(),
+                name: "BiFlow_9.9.8_x64-setup.exe".into(),
                 url: "https://example.invalid/setup.exe".into(),
                 size: 1,
             }],
         };
         assert!(pick_asset(&release, InstallKind::Deb).is_err());
-        let nsis = pick_asset(&release, InstallKind::Nsis).expect("nsis");
-        assert!(nsis.name.ends_with("_x64-setup.exe"));
+        assert!(pick_asset(&release, InstallKind::Nsis).is_err());
+        let mut release = release;
+        release.assets.push(Asset {
+            name: "BiFlow_9.9.9_arm64.deb".into(),
+            url: "https://example.invalid/arm64.deb".into(),
+            size: 1,
+        });
+        assert!(pick_asset(&release, InstallKind::Deb).is_err());
+        release.assets.push(Asset {
+            name: "BiFlow_9.9.9_x64-setup.exe".into(),
+            url: "https://example.invalid/exact-setup.exe".into(),
+            size: 1,
+        });
+        assert_eq!(
+            pick_asset(&release, InstallKind::Nsis)
+                .expect("exact NSIS")
+                .url,
+            "https://example.invalid/exact-setup.exe"
+        );
+    }
+
+    #[test]
+    fn signed_metadata_must_match_selected_package() {
+        let asset = Asset {
+            name: "BiFlow_9.9.9_x64-setup.exe".into(),
+            url: "https://github.com/devlifeX/BiFlow/releases/download/v9.9.9/BiFlow_9.9.9_x64-setup.exe".into(),
+            size: 42,
+        };
+        assert!(validate_signed_metadata(
+            "9.9.9",
+            &asset,
+            InstallKind::Nsis,
+            "9.9.9",
+            &asset.url,
+            "windows-x86_64",
+        )
+        .is_ok());
+        for (version, url, target) in [
+            ("9.9.8", asset.url.as_str(), "windows-x86_64"),
+            (
+                "9.9.9",
+                "https://example.invalid/other.exe",
+                "windows-x86_64",
+            ),
+            ("9.9.9", asset.url.as_str(), "linux-x86_64"),
+        ] {
+            assert!(validate_signed_metadata(
+                "9.9.9",
+                &asset,
+                InstallKind::Nsis,
+                version,
+                url,
+                target
+            )
+            .is_err());
+        }
     }
 
     #[test]
@@ -550,5 +627,25 @@ mod tests {
         );
         assert_eq!(install_kind_from(None, false), InstallKind::Deb);
         assert_eq!(install_kind_from(None, true), InstallKind::Nsis);
+    }
+
+    #[test]
+    fn nsis_update_waits_for_elevation_and_never_masks_installer_failure() {
+        let script = nsis_update_script(
+            42,
+            Path::new(r"C:\Users\A User\BiFlow's setup.exe"),
+            Path::new(r"C:\Program Files\BiFlow\BiFlow.exe"),
+            "6.2.27",
+        );
+
+        assert!(script.contains("AddMinutes(3)"));
+        assert!(script.contains("-Verb RunAs -Wait -PassThru"));
+        assert!(script.contains("$process.ExitCode -ne 0"));
+        assert!(script.contains("$expectedVersion = '6.2.27'"));
+        assert!(script.contains("$versionMatch.Groups['semver'].Value -ne $expectedVersion"));
+        assert!(script.contains("1223"));
+        assert!(script.contains("BiFlow''s setup.exe"));
+        assert!(script.contains("BiFlow update failed"));
+        assert!(script.contains("if (Test-Path -LiteralPath $applicationPath -PathType Leaf)"));
     }
 }

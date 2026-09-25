@@ -131,6 +131,17 @@ jobs:
       - uses: tauri-apps/tauri-action@v1
         with:
           args: ${{ matrix.args }}
+      - name: Sign Debian updater package
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          debs=(target/release/bundle/deb/*.deb)
+          (( ${#debs[@]} == 1 )) || { echo "Expected one Debian package to sign"; exit 1; }
+          TAURI_PRIVATE_KEY="${TAURI_SIGNING_PRIVATE_KEY}" \
+            TAURI_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+            pnpm exec tauri signer sign "${debs[0]}"
       - name: Stage portable Windows app
         if: runner.os == 'Windows'
         shell: bash
@@ -146,6 +157,7 @@ jobs:
           name: release-linux
           path: |
             target/release/bundle/deb/*.deb
+            target/release/bundle/deb/*.deb.sig
             target/release/bundle/appimage/*.AppImage
             target/release/bundle/appimage/*.AppImage.sig
           if-no-files-found: error
@@ -195,6 +207,7 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t debs < <(find release-assets -type f -name '*.deb' -print | sort)
+          mapfile -t deb_sigs < <(find release-assets -type f -name '*.deb.sig' -print | sort)
           mapfile -t appimages < <(find release-assets -type f -name '*.AppImage' -print | sort)
           mapfile -t appimage_sigs < <(find release-assets -type f -name '*.AppImage.sig' -print | sort)
           mapfile -t portable < <(find release-assets -type f -name 'BiFlow.exe' -print | sort)
@@ -202,13 +215,13 @@ jobs:
           mapfile -t installer_sigs < <(find release-assets -type f -name '*-setup.exe.sig' -print | sort)
           mapfile -t manifests < <(find release-assets -type f -name 'latest.json' -print | sort)
 
-          if (( ${#debs[@]} != 1 || ${#appimages[@]} != 1 || ${#appimage_sigs[@]} != 1 || ${#portable[@]} != 1 || ${#installers[@]} != 1 || ${#installer_sigs[@]} != 1 || ${#manifests[@]} != 1 )); then
-            echo "Expected one deb, AppImage, AppImage signature, portable exe, NSIS installer, NSIS signature, and latest.json"
+          if (( ${#debs[@]} != 1 || ${#deb_sigs[@]} != 1 || ${#appimages[@]} != 1 || ${#appimage_sigs[@]} != 1 || ${#portable[@]} != 1 || ${#installers[@]} != 1 || ${#installer_sigs[@]} != 1 || ${#manifests[@]} != 1 )); then
+            echo "Expected one deb and signature, AppImage and signature, portable exe, NSIS installer and signature, and latest.json"
             find release-assets -type f -print
             exit 1
           fi
 
-          assets=("${debs[@]}" "${appimages[@]}" "${appimage_sigs[@]}" "${portable[@]}" "${installers[@]}" "${installer_sigs[@]}" "${manifests[@]}")
+          assets=("${debs[@]}" "${deb_sigs[@]}" "${appimages[@]}" "${appimage_sigs[@]}" "${portable[@]}" "${installers[@]}" "${installer_sigs[@]}" "${manifests[@]}")
           if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release create "${GITHUB_REF_NAME}" \
               --draft \

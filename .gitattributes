@@ -2,3 +2,5 @@
 resources/rules/*.txt -text
 resources/rules/*.json -text
 resources/rules/SNAPSHOT.md -text
+build.sh text eol=lf
+packaging/linux/*.sh text eol=lf

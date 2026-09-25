@@ -26,11 +26,17 @@ describe("generate-latest-json", () => {
     assert.equal(normalizeVersion("1.2.0"), "1.2.0");
   });
 
-  it("builds a dual-platform manifest with embedded signatures", () => {
+  it("builds a signed manifest for deb, AppImage, and NSIS", () => {
     const manifest = buildLatestJson(
       "devlifeX/BiFlow",
       "v1.2.0",
       [
+        {
+          platform: "linux-deb-x86_64",
+          bundlePath: "/tmp/BiFlow_1.2.0_amd64.deb",
+          fileName: "BiFlow_1.2.0_amd64.deb",
+          signature: FAKE_SIG,
+        },
         {
           platform: "linux-x86_64",
           bundlePath: "/tmp/BiFlow_1.2.0_amd64.AppImage",
@@ -49,6 +55,10 @@ describe("generate-latest-json", () => {
 
     assert.equal(manifest.version, "1.2.0");
     assert.equal(manifest.notes, "Signed updater test");
+    assert.equal(
+      manifest.platforms["linux-deb-x86_64"].url,
+      "https://github.com/devlifeX/BiFlow/releases/download/v1.2.0/BiFlow_1.2.0_amd64.deb",
+    );
     assert.equal(
       manifest.platforms["linux-x86_64"].url,
       "https://github.com/devlifeX/BiFlow/releases/download/v1.2.0/BiFlow_1.2.0_amd64.AppImage",
@@ -69,6 +79,10 @@ describe("generate-latest-json", () => {
           notes: "x",
           pub_date: "2026-08-13T12:00:00.000Z",
           platforms: {
+            "linux-deb-x86_64": {
+              url: "https://github.com/devlifeX/BiFlow/releases/download/v1.2.0/app.deb",
+              signature: FAKE_SIG,
+            },
             "linux-x86_64": {
               url: "https://github.com/devlifeX/BiFlow/releases/download/v1.2.0/app.AppImage",
               signature: "https://example.com/app.AppImage.sig",
@@ -81,12 +95,14 @@ describe("generate-latest-json", () => {
 
   it("discovers fake signed artifacts from a staging directory", () => {
     const directory = mkdtempSync(join(tmpdir(), "biflow-latest-json-"));
+    writeFakeBundle(directory, "BiFlow_1.2.0_amd64.deb");
     writeFakeBundle(directory, "BiFlow_1.2.0_amd64.AppImage");
     writeFakeBundle(directory, "BiFlow_1.2.0_x64-setup.exe");
 
     const artifacts = discoverSignedArtifacts(directory);
-    assert.equal(artifacts.length, 2);
+    assert.equal(artifacts.length, 3);
     assert.deepEqual(artifacts.map((artifact) => artifact.platform).sort(), [
+      "linux-deb-x86_64",
       "linux-x86_64",
       "windows-x86_64",
     ]);
@@ -115,17 +131,16 @@ describe("generate-latest-json", () => {
       "BiFlow_1.2.16_x64-setup.exe",
     );
     writeFileSync(join(directory, "BiFlow.exe"), "portable", "utf8");
-    mkdirSync(join(directory, "deb"), { recursive: true });
-    writeFileSync(
-      join(directory, "deb", "BiFlow_1.2.16_amd64.deb"),
-      "deb",
-      "utf8",
-    );
+    writeFakeBundle(join(directory, "deb"), "BiFlow_1.2.16_amd64.deb");
 
     const manifest = generateLatestJsonFromDirectory(
       directory,
       "devlifeX/BiFlow",
       "v1.2.16",
+    );
+    assert.equal(
+      manifest.platforms["linux-deb-x86_64"].url,
+      "https://github.com/devlifeX/BiFlow/releases/download/v1.2.16/BiFlow_1.2.16_amd64.deb",
     );
     assert.equal(
       manifest.platforms["linux-x86_64"].url,
@@ -168,7 +183,7 @@ describe("generate-latest-json", () => {
     );
   });
 
-  it("requires both signed updater platforms before publishing", () => {
+  it("requires all three signed updater packages before publishing", () => {
     const directory = mkdtempSync(
       join(tmpdir(), "biflow-latest-json-missing-"),
     );
@@ -177,7 +192,22 @@ describe("generate-latest-json", () => {
     assert.throws(
       () =>
         generateLatestJsonFromDirectory(directory, "devlifeX/BiFlow", "v1.2.0"),
-      /expected 2 signed updater artifacts/,
+      /expected 3 signed updater artifacts/,
+    );
+  });
+
+  it("rejects a stale package name even when its signature is present", () => {
+    assert.throws(
+      () =>
+        buildLatestJson("devlifeX/BiFlow", "v1.2.0", [
+          {
+            platform: "linux-deb-x86_64",
+            bundlePath: "/tmp/BiFlow_1.1.9_amd64.deb",
+            fileName: "BiFlow_1.1.9_amd64.deb",
+            signature: FAKE_SIG,
+          },
+        ]),
+      /unexpected linux-deb-x86_64 asset/,
     );
   });
 });

@@ -40,6 +40,8 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, LogicalSize, Manager, Runtime, Size, Window, WindowEvent,
 };
+use tauri_plugin_updater::UpdaterExt;
+use tokio::io::AsyncWriteExt;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -647,12 +649,12 @@ async fn bootstrap_app(app: AppHandle) -> Result<BootstrapResult, String> {
         let services = services(&app)?;
         if let Err(cause) = verify_direct_rules_after_upgrade(&services.paths.data) {
             error!(
-                event = "update.rules_lost",
+                event = "update.rules_guard_verification_failed",
                 section = "updates",
                 initiator = "bootstrap_app",
                 cause = cause.as_str(),
                 trace_route = "bootstrap->direct_rules_guard",
-                "custom route pins were missing after an application update"
+                "custom route pins could not be verified after an application update"
             );
             emit_update_progress(
                 &app,
@@ -2397,13 +2399,14 @@ async fn check_for_update(app: AppHandle) -> Result<UpdateStatus, String> {
 
 const DIRECT_RULES_UPGRADE_GUARD: &str = "direct-rules.upgrade-guard";
 
-fn record_direct_rules_upgrade_guard(data: &Path) {
+fn record_direct_rules_upgrade_guard(data: &Path) -> Result<(), String> {
+    verify_direct_rules_after_upgrade(data)?;
     let marker = if data.join("direct-rules.json").is_file() {
         "present"
     } else {
         "absent"
     };
-    if let Err(cause) = fs::write(data.join(DIRECT_RULES_UPGRADE_GUARD), marker) {
+    fs::write(data.join(DIRECT_RULES_UPGRADE_GUARD), marker).map_err(|cause| {
         warn!(
             event = "update.rules_guard_write_failed",
             section = "updates",
@@ -2412,28 +2415,26 @@ fn record_direct_rules_upgrade_guard(data: &Path) {
             trace_route = "install_update->direct_rules_guard",
             "could not record whether custom route pins existed before the upgrade"
         );
-    }
+        "could not record the route-pin upgrade guard; update was not started".to_owned()
+    })
 }
 
 fn verify_direct_rules_after_upgrade(data: &Path) -> Result<(), String> {
     let guard = data.join(DIRECT_RULES_UPGRADE_GUARD);
-    let Ok(marker) = fs::read_to_string(&guard) else {
-        return Ok(());
+    let marker = match fs::read_to_string(&guard) {
+        Ok(marker) => marker,
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(cause) => return Err(format!("could not read route-pin upgrade guard: {cause}")),
     };
-    if let Err(cause) = fs::remove_file(&guard) {
-        warn!(
-            event = "update.rules_guard_clear_failed",
-            section = "updates",
-            initiator = "bootstrap_app",
-            cause = %cause,
-            trace_route = "bootstrap->direct_rules_guard",
-            "upgrade guard file could not be removed"
-        );
+    match marker.trim() {
+        "present" if !data.join("direct-rules.json").is_file() => {
+            return Err("custom route pins were lost during the update".into());
+        }
+        "present" | "absent" => {}
+        _ => return Err("route-pin upgrade guard is invalid; verification is required".into()),
     }
-    if marker.trim() == "present" && !data.join("direct-rules.json").is_file() {
-        return Err("custom route pins were lost during the update".into());
-    }
-    Ok(())
+    fs::remove_file(&guard)
+        .map_err(|cause| format!("could not clear route-pin upgrade guard: {cause}"))
 }
 
 async fn restore_stack_after_failed_install(services: &AppServices) {
@@ -2506,32 +2507,28 @@ async fn download_github_package(
             thirdparty_available: None,
         },
     );
-    let app_for_progress = app.clone();
-    let version_for_progress = target_version.clone();
-    let cancel_app = app.clone();
-    github_update::download_asset(
-        version::app_version(),
-        asset,
-        UPDATE_INSTALL_TIMEOUT,
-        move |written, total| {
-            emit_update_progress(
-                &app_for_progress,
-                UpdateProgress {
-                    phase: "downloading".into(),
-                    percent: update_download_percent(written, total),
-                    version: Some(version_for_progress.clone()),
-                    error: None,
-                    operation_id: None,
-                    app_available: None,
-                    rules_available: None,
-                    thirdparty_available: None,
-                },
-            );
-        },
-        move || update_check_cancelled(&cancel_app),
-    )
-    .await
-    .inspect_err(|cause| {
+    let result: Result<PathBuf, String> = async {
+        let verified = fetch_verified_update_bytes(app, info, asset).await?;
+        if u64::try_from(verified.len()).unwrap_or(u64::MAX) != asset.size {
+            return Err("signed update package size differs from the GitHub Release asset".into());
+        }
+        let destination_dir = tempfile::Builder::new()
+            .prefix("biflow-update-")
+            .tempdir()
+            .map_err(|error| error.to_string())?;
+        let destination = destination_dir.path().join(&asset.name);
+        let mut file = tokio::fs::File::create(&destination)
+            .await
+            .map_err(|error| error.to_string())?;
+        file.write_all(&verified)
+            .await
+            .map_err(|error| error.to_string())?;
+        file.sync_all().await.map_err(|error| error.to_string())?;
+        drop(file);
+        Ok(destination_dir.keep().join(&asset.name))
+    }
+    .await;
+    result.inspect_err(|cause| {
         emit_update_progress(
             app,
             UpdateProgress {
@@ -2549,12 +2546,72 @@ async fn download_github_package(
             event = "update.download_failed",
             section = "updates",
             initiator = "install_update",
-            cause = "download_error",
+            cause = "authentication_or_download_failure",
             trace_route = "tauri_command->github_update->download",
             trace_id = %operation_id,
-            "application update could not be downloaded"
+            "application update could not be authenticated and staged"
         );
     })
+}
+
+async fn fetch_verified_update_bytes(
+    app: &AppHandle,
+    info: &github_update::UpdateInfo,
+    asset: &github_update::Asset,
+) -> Result<Vec<u8>, String> {
+    let kind = github_update::detect_install_kind();
+    let updater = app
+        .updater_builder()
+        .target(github_update::signed_target(kind))
+        .timeout(UPDATE_INSTALL_TIMEOUT)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let signed = updater
+        .check()
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            "signed update manifest has no newer package for this platform".to_owned()
+        })?;
+    github_update::validate_signed_metadata(
+        &info.latest_version,
+        asset,
+        kind,
+        &signed.version,
+        signed.download_url.as_str(),
+        &signed.target,
+    )?;
+    let mut written = 0_u64;
+    let download = signed.download(
+        |chunk_size, total| {
+            written = written.saturating_add(u64::try_from(chunk_size).unwrap_or(u64::MAX));
+            emit_update_progress(
+                app,
+                UpdateProgress {
+                    phase: "downloading".into(),
+                    percent: update_download_percent(written, total.or(Some(asset.size))),
+                    version: Some(info.latest_version.clone()),
+                    error: None,
+                    operation_id: None,
+                    app_available: None,
+                    rules_available: None,
+                    thirdparty_available: None,
+                },
+            );
+        },
+        || {},
+    );
+    tokio::pin!(download);
+    loop {
+        tokio::select! {
+            result = &mut download => return result.map_err(|error| error.to_string()),
+            () = tokio::time::sleep(Duration::from_millis(200)) => {
+                if update_check_cancelled(app) {
+                    return Err("update download cancelled".into());
+                }
+            }
+        }
+    }
 }
 
 async fn apply_downloaded_package(
@@ -2582,6 +2639,7 @@ async fn apply_downloaded_package(
         github_update::detect_install_kind(),
         package,
         &current_exe,
+        &target_version,
     )
     .await
     {
@@ -2604,16 +2662,7 @@ async fn apply_downloaded_package(
             return Err(cause);
         }
     };
-    info!(
-        event = "update.install_succeeded",
-        section = "updates",
-        initiator = "install_update",
-        cause = "download_and_install_complete",
-        trace_route = "tauri_command->github_update->apply",
-        trace_id = %operation_id,
-        update_version = %target_version,
-        "application update installed"
-    );
+    record_package_apply_outcome(operation_id, &target_version, outcome);
     match outcome {
         github_update::ApplyOutcome::ManualRestart => {
             emit_update_progress(
@@ -2653,6 +2702,35 @@ async fn apply_downloaded_package(
     }
 }
 
+fn record_package_apply_outcome(
+    operation_id: Uuid,
+    target_version: &str,
+    outcome: github_update::ApplyOutcome,
+) {
+    match outcome {
+        github_update::ApplyOutcome::ManualRestart => info!(
+            event = "update.install_succeeded",
+            section = "updates",
+            initiator = "install_update",
+            cause = "package_manager_completed",
+            trace_route = "tauri_command->github_update->apply",
+            trace_id = %operation_id,
+            update_version = %target_version,
+            "application package installation completed; restart is required"
+        ),
+        github_update::ApplyOutcome::HelperRestart => info!(
+            event = "update.restart_helper_started",
+            section = "updates",
+            initiator = "install_update",
+            cause = "package_install_pending",
+            trace_route = "tauri_command->github_update->apply_helper",
+            trace_id = %operation_id,
+            update_version = %target_version,
+            "application update helper was launched; package installation is pending"
+        ),
+    }
+}
+
 async fn perform_complete_update_install(
     app: &AppHandle,
     operation_id: Uuid,
@@ -2685,7 +2763,7 @@ async fn perform_complete_update_install(
         });
     }
     let package = download_github_package(app, operation_id, &update).await?;
-    record_direct_rules_upgrade_guard(&services(app)?.paths.data);
+    record_direct_rules_upgrade_guard(&services(app)?.paths.data)?;
     pause_stack_for_update(services(app)?).await?;
     apply_downloaded_package(app, operation_id, &update, &package).await
 }
@@ -3684,9 +3762,19 @@ mod tests {
         fs::write(data.join("direct-rules.upgrade-guard"), "present").expect("guard");
         let error = super::verify_direct_rules_after_upgrade(data).expect_err("lost");
         assert!(error.contains("lost"));
+        assert!(data.join("direct-rules.upgrade-guard").is_file());
+        assert!(super::verify_direct_rules_after_upgrade(data).is_err());
         fs::write(data.join("direct-rules.json"), "{}").expect("pins");
-        fs::write(data.join("direct-rules.upgrade-guard"), "present").expect("guard");
         super::verify_direct_rules_after_upgrade(data).expect("kept");
+        assert!(!data.join("direct-rules.upgrade-guard").exists());
+    }
+
+    #[test]
+    fn upgrade_guard_must_be_recorded_before_install() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let data = directory.path();
+        fs::create_dir(data.join("direct-rules.upgrade-guard")).expect("block guard write");
+        assert!(super::record_direct_rules_upgrade_guard(data).is_err());
     }
 
     #[test]

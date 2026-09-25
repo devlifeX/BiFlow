@@ -17,7 +17,7 @@ PNPM_VERSION="9.0.1"
 # cargo-xwin 0.20+ requires rustc 1.89; pin the last release that builds on 1.88.
 CARGO_XWIN_VERSION="0.19.2"
 TOOL_PREFIX="${HOME}/.local/share/biflow-tools"
-RUST_VERSION="$(sed -n 's/^channel = "\([^"]*\)"/\1/p' "${PROJECT_DIR}/rust-toolchain.toml" | head -n 1)"
+RUST_VERSION="$(sed -n 's/^channel = "\([^"]*\)"/\1/p' "${PROJECT_DIR}/rust-toolchain.toml" | head -n 1 | tr -d '\r')"
 [[ -n "${RUST_VERSION}" ]] || RUST_VERSION="1.88.0"
 
 die() {

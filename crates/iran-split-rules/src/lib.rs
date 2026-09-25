@@ -548,8 +548,9 @@ impl RuleManager {
             DirectTarget::Domain(_) => Vec::new(),
             DirectTarget::Ip(address) => vec![*address],
         };
-        let mut document = self.document.lock().await;
-        ensure_revision(&document, expected_revision)?;
+        let mut current = self.document.lock().await;
+        ensure_revision(&current, expected_revision)?;
+        let mut document = current.clone();
         let list_id = list_id.unwrap_or_else(|| document.default_list_for(outbound));
 
         let already_pinned = document
@@ -578,9 +579,9 @@ impl RuleManager {
                     attach_google_search_companions(&mut document, &target, outbound, list_id);
                 if moved || companions {
                     document.revision = document.revision.saturating_add(1);
-                    publish(&self.path, &document)?;
+                    return self.publish_and_replace(&mut current, document);
                 }
-                return Ok(document.clone());
+                return Ok(document);
             }
             attach_google_search_companions(&mut document, &target, outbound, list_id);
         } else {
@@ -597,8 +598,7 @@ impl RuleManager {
             document.pins.sort_by_key(|pin| pin.target.display_value());
         }
         document.revision = document.revision.saturating_add(1);
-        publish(&self.path, &document)?;
-        Ok(document.clone())
+        self.publish_and_replace(&mut current, document)
     }
 
     /// Creates a named list bound to one outbound.
@@ -614,16 +614,16 @@ impl RuleManager {
         expected_revision: u64,
     ) -> Result<RoutePinsDocument, RuleError> {
         let name = validate_list_name(name)?;
-        let mut document = self.document.lock().await;
-        ensure_revision(&document, expected_revision)?;
+        let mut current = self.document.lock().await;
+        ensure_revision(&current, expected_revision)?;
+        let mut document = current.clone();
         document.lists.push(RuleListMeta {
             id: Uuid::new_v4(),
             name,
             outbound,
         });
         document.revision = document.revision.saturating_add(1);
-        publish(&self.path, &document)?;
-        Ok(document.clone())
+        self.publish_and_replace(&mut current, document)
     }
 
     /// Renames a list.
@@ -639,8 +639,9 @@ impl RuleManager {
         expected_revision: u64,
     ) -> Result<RoutePinsDocument, RuleError> {
         let name = validate_list_name(name)?;
-        let mut document = self.document.lock().await;
-        ensure_revision(&document, expected_revision)?;
+        let mut current = self.document.lock().await;
+        ensure_revision(&current, expected_revision)?;
+        let mut document = current.clone();
         let list = document
             .lists
             .iter_mut()
@@ -648,8 +649,7 @@ impl RuleManager {
             .ok_or_else(|| RuleError::InvalidRule("unknown list".into()))?;
         list.name = name;
         document.revision = document.revision.saturating_add(1);
-        publish(&self.path, &document)?;
-        Ok(document.clone())
+        self.publish_and_replace(&mut current, document)
     }
 
     /// Deletes a list and every pin in it.
@@ -663,16 +663,16 @@ impl RuleManager {
         list_id: Uuid,
         expected_revision: u64,
     ) -> Result<RoutePinsDocument, RuleError> {
-        let mut document = self.document.lock().await;
-        ensure_revision(&document, expected_revision)?;
+        let mut current = self.document.lock().await;
+        ensure_revision(&current, expected_revision)?;
+        let mut document = current.clone();
         if document.list_meta(list_id).is_none() {
             return Err(RuleError::InvalidRule("unknown list".into()));
         }
         document.lists.retain(|list| list.id != list_id);
         document.pins.retain(|pin| pin.list_id != Some(list_id));
         document.revision = document.revision.saturating_add(1);
-        publish(&self.path, &document)?;
-        Ok(document.clone())
+        self.publish_and_replace(&mut current, document)
     }
 
     /// Re-binds a list (and every pin in it) to another outbound.
@@ -688,8 +688,9 @@ impl RuleManager {
         policy: PinPolicy,
         expected_revision: u64,
     ) -> Result<RoutePinsDocument, RuleError> {
-        let mut document = self.document.lock().await;
-        ensure_revision(&document, expected_revision)?;
+        let mut current = self.document.lock().await;
+        ensure_revision(&current, expected_revision)?;
+        let mut document = current.clone();
         if document.list_meta(list_id).is_none() {
             return Err(RuleError::InvalidRule("unknown list".into()));
         }
@@ -713,8 +714,7 @@ impl RuleManager {
             }
         }
         document.revision = document.revision.saturating_add(1);
-        publish(&self.path, &document)?;
-        Ok(document.clone())
+        self.publish_and_replace(&mut current, document)
     }
 
     /// Removes an exact domain or IP pin from whichever list holds it.
@@ -729,15 +729,16 @@ impl RuleManager {
         expected_revision: u64,
     ) -> Result<DirectRulesDocument, RuleError> {
         let target = DirectTarget::parse(input)?;
-        let mut document = self.document.lock().await;
-        ensure_revision(&document, expected_revision)?;
+        let mut current = self.document.lock().await;
+        ensure_revision(&current, expected_revision)?;
+        let mut document = current.clone();
         let before = document.pins.len();
         document.pins.retain(|pin| pin.target != target);
         if document.pins.len() != before {
             document.revision = document.revision.saturating_add(1);
-            publish(&self.path, &document)?;
+            return self.publish_and_replace(&mut current, document);
         }
-        Ok(document.clone())
+        Ok(document)
     }
 
     /// Refreshes resolved IP addresses for every stored domain rule.
@@ -762,7 +763,8 @@ impl RuleManager {
             resolved.push((domain.clone(), self.resolver.resolve(&domain).await?));
         }
         let now = Utc::now();
-        let mut document = self.document.lock().await;
+        let mut current = self.document.lock().await;
+        let mut document = current.clone();
         for rule in &mut document.pins {
             if let DirectTarget::Domain(domain) = &rule.target {
                 if let Some((_, addresses)) = resolved.iter().find(|(name, _)| name == domain) {
@@ -772,12 +774,11 @@ impl RuleManager {
             }
         }
         document.revision = document.revision.saturating_add(1);
-        publish(&self.path, &document)?;
-        Ok(document.clone())
+        self.publish_and_replace(&mut current, document)
     }
 
-    /// Replaces the in-memory document and publishes it. Used to roll a failed
-    /// live apply back to the last-good pins.
+    /// Publishes a replacement and then updates the in-memory document. Used
+    /// to roll a failed live apply back to the last-good pins.
     ///
     /// # Errors
     ///
@@ -787,9 +788,27 @@ impl RuleManager {
         document: DirectRulesDocument,
     ) -> Result<DirectRulesDocument, RuleError> {
         let mut current = self.document.lock().await;
-        *current = document;
-        publish(&self.path, &current)?;
-        Ok(current.clone())
+        self.publish_and_replace(&mut current, document)
+    }
+
+    fn publish_and_replace(
+        &self,
+        current: &mut DirectRulesDocument,
+        next: DirectRulesDocument,
+    ) -> Result<DirectRulesDocument, RuleError> {
+        if let Err(cause) = publish(&self.path, &next) {
+            tracing::warn!(
+                event = "rules.publish_failed",
+                section = "rules",
+                initiator = "rule_manager",
+                cause = "atomic_publication_failed",
+                trace_route = "rule_manager->rules_document",
+                "rule document publication failed; in-memory state is unchanged"
+            );
+            return Err(cause);
+        }
+        *current = next.clone();
+        Ok(next)
     }
 }
 
@@ -1318,6 +1337,33 @@ mod tests {
         assert!(directory.path().join("direct-rules.json.corrupt").exists());
         // The published replacement parses cleanly on the next load.
         RuleManager::load(&path, Arc::new(FixedResolver)).expect("reload");
+    }
+
+    #[tokio::test]
+    async fn failed_publication_keeps_the_in_memory_rules_unchanged() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("direct-rules.json");
+        let manager = RuleManager::load(&path, Arc::new(FixedResolver)).expect("manager");
+        let previous = manager.list().await;
+        // A directory at the destination makes the atomic rename fail on
+        // Windows and Linux without changing permissions outside this test.
+        fs::create_dir(&path).expect("block publication");
+
+        assert!(manager
+            .create_list("Office", test_outbound(), 0)
+            .await
+            .is_err());
+        assert_eq!(manager.list().await, previous);
+        assert!(manager.add("example.com", 0).await.is_err());
+        assert_eq!(manager.list().await, previous);
+        assert!(manager
+            .restore(RoutePinsDocument {
+                revision: 42,
+                ..RoutePinsDocument::default()
+            })
+            .await
+            .is_err());
+        assert_eq!(manager.list().await, previous);
     }
 
     #[tokio::test]

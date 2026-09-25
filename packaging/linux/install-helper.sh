@@ -195,8 +195,12 @@ install_or_reown 0755 "${MIHOMO_SRC}" "${MIHOMO_DEST}"
 install_or_reown 0644 "${UNIT_SRC}" "${UNIT_DEST}"
 install_or_reown 0755 "$0" /usr/lib/biflow/install-helper.sh
 
-config_temp="$(mktemp /tmp/biflow-helper.XXXXXX.toml)"
-chmod 600 "${config_temp}"
+config_temp="$(mktemp /etc/iran-split/helper.toml.XXXXXX)"
+trap 'rm -f -- "${config_temp}"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+chmod 0600 -- "${config_temp}"
 {
   printf 'authorized_uid = %s\n' "${AUTHORIZED_UID}"
   printf 'authorized_gid = %s\n' "${AUTHORIZED_GID}"
@@ -207,11 +211,17 @@ chmod 600 "${config_temp}"
   printf 'mihomo_sha256 = "%s"\n' "${actual_mihomo}"
   printf 'tun_name = "%s"\n' "${TUN_NAME}"
 } >"${config_temp}"
-install -o root -g root -m 0600 "${config_temp}" "${CONFIG_DEST}"
-rm -f "${config_temp}"
+chown root:root -- "${config_temp}"
+mv -f -- "${config_temp}" "${CONFIG_DEST}"
+trap - EXIT HUP INT TERM
 
 [ "$(sha256_of "${HELPER_DEST}")" = "${actual_helper}" ] || { printf 'installed helper failed checksum verification\n' >&2; exit 1; }
 [ "$(sha256_of "${MIHOMO_DEST}")" = "${actual_mihomo}" ] || { printf 'installed mihomo failed checksum verification\n' >&2; exit 1; }
 
 systemctl daemon-reload
-systemctl enable --now iran-split-helper.service
+systemctl enable iran-split-helper.service
+systemctl restart iran-split-helper.service
+if ! systemctl is-active --quiet iran-split-helper.service; then
+  printf 'installed Helper service did not become active\n' >&2
+  exit 1
+fi

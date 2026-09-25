@@ -482,6 +482,9 @@ describe("release artifact names", () => {
     assert.match(workflow, /generate-latest-json\.mjs/);
     assert.match(workflow, /latest\.json/);
     assert.match(workflow, /\.AppImage\.sig/);
+    assert.match(workflow, /Sign Debian updater package/);
+    assert.match(workflow, /tauri signer sign/);
+    assert.match(workflow, /\.deb\.sig/);
     assert.doesNotMatch(workflow, /includeUpdaterJson|releaseDraft|tagName:/);
     assert.doesNotMatch(workflow, /hiddify/i);
     assert.doesNotMatch(workflow, /mihomo/i);

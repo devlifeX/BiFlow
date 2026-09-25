@@ -3,7 +3,7 @@ import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const PLATFORM_KEYS = ["linux-x86_64", "windows-x86_64"];
+const PLATFORM_KEYS = ["linux-deb-x86_64", "linux-x86_64", "windows-x86_64"];
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
@@ -34,8 +34,18 @@ export function buildLatestJson(repo, releaseTag, artifacts, options = {}) {
   const notes = options.notes ?? `BiFlow ${version}`;
   const base = `https://github.com/${repo}/releases/download/${releaseTag}`;
   const platforms = {};
+  const expectedNames = {
+    "linux-deb-x86_64": `BiFlow_${version}_amd64.deb`,
+    "linux-x86_64": `BiFlow_${version}_amd64.AppImage`,
+    "windows-x86_64": `BiFlow_${version}_x64-setup.exe`,
+  };
 
   for (const artifact of artifacts) {
+    if (artifact.fileName !== expectedNames[artifact.platform]) {
+      throw new Error(
+        `unexpected ${artifact.platform} asset for ${releaseTag}: ${artifact.fileName}`,
+      );
+    }
     platforms[artifact.platform] = {
       url: `${base}/${artifact.fileName}`,
       signature: artifact.signature.trim(),
@@ -149,6 +159,16 @@ function findUniqueBundle(files, suffix) {
 export function discoverSignedArtifacts(directory) {
   const files = collectFiles(directory);
   const artifacts = [];
+
+  const deb = findUniqueBundle(files, "_amd64.deb");
+  if (deb) {
+    artifacts.push({
+      platform: "linux-deb-x86_64",
+      bundlePath: deb,
+      fileName: basename(deb),
+      signature: readSignature(`${deb}.sig`),
+    });
+  }
 
   const appImage = findUniqueBundle(files, ".AppImage");
   if (appImage) {
