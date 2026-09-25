@@ -933,6 +933,25 @@ impl ControllerClient {
         Ok(closed)
     }
 
+    /// Closes every live connection so traffic reconnects on the reloaded
+    /// `MATCH` route. Used when the default outbound changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the controller rejects the request.
+    pub async fn close_all_connections(&self) -> Result<(), MihomoError> {
+        let response = self
+            .client
+            .delete(format!("{}/connections", self.base_url))
+            .bearer_auth(&self.secret)
+            .send()
+            .await?;
+        if response.status().is_success() || response.status() == StatusCode::NO_CONTENT {
+            return Ok(());
+        }
+        Err(MihomoError::UnexpectedStatus(response.status()))
+    }
+
     /// Closes live connections for a pin apply. `google.com` also closes
     /// Search companion hosts so stale MATCH sockets cannot keep the page on
     /// the previous outbound.
@@ -2073,6 +2092,32 @@ mod tests {
         assert_eq!(closed, 1);
         let deleted = server.await.expect("server");
         assert_eq!(deleted, vec!["aaa"]);
+    }
+
+    #[tokio::test]
+    async fn close_all_connections_deletes_the_connection_list() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0_u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+            let request = String::from_utf8_lossy(&buf);
+            let response =
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await;
+            request.starts_with("DELETE /connections HTTP")
+        });
+        let client = ControllerClient::new(
+            "127.0.0.1",
+            port,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect("client");
+        client.close_all_connections().await.expect("close all");
+        assert!(server.await.expect("server"));
     }
 
     #[tokio::test]

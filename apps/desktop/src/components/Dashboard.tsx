@@ -401,7 +401,9 @@ function TrafficFlow() {
   const defaultIsDirect = settings?.default_route.kind === "direct";
   const [selected, setSelected] = useState<string | null>(null);
   const [packets, setPackets] = useState<FlowPacket[]>([]);
-  const recentPackets = useRef<Map<string, number>>(new Map());
+  const recentPackets = useRef<Map<string, { branch: string; at: number }>>(
+    new Map(),
+  );
   const laneFlip = useRef<1 | -1>(1);
   const pathRefs = useRef<Map<string, SVGPathElement>>(new Map());
   const packetRefs = useRef<Map<string, SVGGElement>>(new Map());
@@ -429,7 +431,7 @@ function TrafficFlow() {
     ];
     const gap = 96;
     const top = 58;
-    const svgHeight = Math.max(top + (rows.length - 1) * gap + 78, 210);
+    const svgHeight = Math.max(top + (rows.length - 1) * gap + 110, 230);
     const centerY = svgHeight / 2 - 6;
     const placed = rows.map((row, index) => {
       const y = top + index * gap;
@@ -446,6 +448,11 @@ function TrafficFlow() {
   // its real route so the user sees which domain uses which client.
   // A stable signature keeps the polling effect from restarting on every
   // render (branch objects are rebuilt whenever settings re-memoize).
+  useEffect(() => {
+    recentPackets.current.clear();
+    setPackets([]);
+  }, [defaultClientId]);
+
   const branchSignature = branches.map((branch) => branch.key).join("|");
   useEffect(() => {
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -472,16 +479,31 @@ function TrafficFlow() {
             if (!branchKey) continue;
             const label = row.host || row.destination_ip;
             if (!label) continue;
-            const dedupe = `${label}|${branchKey}`;
-            const lastSeen = recentPackets.current.get(dedupe) ?? 0;
-            if (Date.now() - lastSeen < FLOW_PACKET_LIFE_MS * 2) continue;
-            recentPackets.current.set(dedupe, Date.now());
+            const lastSeen = recentPackets.current.get(label);
+            const sameBranch = lastSeen?.branch === branchKey;
+            if (
+              sameBranch &&
+              Date.now() - (lastSeen?.at ?? 0) < FLOW_PACKET_LIFE_MS * 2
+            ) {
+              continue;
+            }
+            recentPackets.current.set(label, {
+              branch: branchKey,
+              at: Date.now(),
+            });
             added = true;
             laneFlip.current = laneFlip.current === 1 ? -1 : 1;
-            const id = `${dedupe}|${Date.now()}`;
+            const shown = label.length > 22 ? `${label.slice(0, 21)}…` : label;
+            for (let index = next.length - 1; index >= 0; index -= 1) {
+              const packet = next[index];
+              if (packet?.label === shown && packet.branchKey !== branchKey) {
+                next.splice(index, 1);
+              }
+            }
+            const id = `${label}|${branchKey}|${Date.now()}`;
             next.push({
               id,
-              label: label.length > 22 ? `${label.slice(0, 21)}…` : label,
+              label: shown,
               branchKey,
               // Staggered births keep simultaneous packets apart on the path.
               born: Date.now() + stagger,
@@ -503,7 +525,7 @@ function TrafficFlow() {
       }
     };
     void tick();
-    const interval = window.setInterval(() => void tick(), 2_500);
+    const interval = window.setInterval(() => void tick(), 1_000);
     return () => {
       stopped = true;
       window.clearInterval(interval);
@@ -638,7 +660,7 @@ function TrafficFlow() {
                 <text
                   className="traffic-flow-default"
                   x="686"
-                  y={branch.y - 36}
+                  y={branch.y + 58}
                   textAnchor="middle"
                 >
                   {t("matchDefault")}

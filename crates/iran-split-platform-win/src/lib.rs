@@ -401,6 +401,24 @@ impl WindowsBackend {
             "live Mihomo config reloaded"
         );
         let Some(host) = rebind_host else {
+            match controller.close_all_connections().await {
+                Ok(()) => info!(
+                    event = "mihomo.connections_reset",
+                    section = "rules",
+                    initiator = "windows_platform_backend",
+                    cause = "settings_apply",
+                    trace_route = "engine->windows_platform_backend->mihomo_controller",
+                    "closed live connections so they reconnect on the reloaded default route"
+                ),
+                Err(cause) => warn!(
+                    event = "mihomo.connections_reset_failed",
+                    section = "rules",
+                    initiator = "windows_platform_backend",
+                    cause = %cause,
+                    trace_route = "engine->windows_platform_backend->mihomo_controller",
+                    "could not close live connections after the settings reload"
+                ),
+            }
             return Ok(());
         };
         match controller.close_connections_for_pin_apply(host).await {
