@@ -43,7 +43,7 @@ fn is_allowed_generation_file(name: &str) -> bool {
 
 #[derive(Debug, Error)]
 pub enum HelperServiceError {
-    #[error("helper configuration I/O failed: {0}")]
+    #[error("helper I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error("helper configuration is invalid TOML: {0}")]
     Toml(#[from] toml::de::Error),
@@ -671,19 +671,38 @@ fn sha256_file(path: &Path) -> Result<String, HelperServiceError> {
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
-/// Copies `source` onto `destination` unless they already resolve to the same
-/// file. Windows `fs::copy` onto self fails; a leftover `ProgramData` helper
-/// used as the elevate source hits that path.
+/// Copies `source` onto `destination` unless they resolve to the same file or
+/// contain the same bytes. Windows locks a running executable against writes,
+/// so reinstall must not overwrite an identical Mihomo/helper payload.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn copy_file_unless_same(
     source: &Path,
     destination: &Path,
 ) -> Result<(), HelperServiceError> {
-    if paths_refer_to_same_file(source, destination) {
+    if paths_refer_to_same_file(source, destination)
+        || files_have_same_contents(source, destination)?
+    {
         return Ok(());
     }
     fs::copy(source, destination)?;
     Ok(())
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn files_have_same_contents(source: &Path, destination: &Path) -> Result<bool, HelperServiceError> {
+    let source_metadata = fs::metadata(source)?;
+    let destination_metadata = match fs::metadata(destination) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if !source_metadata.is_file()
+        || !destination_metadata.is_file()
+        || source_metadata.len() != destination_metadata.len()
+    {
+        return Ok(false);
+    }
+    Ok(sha256_file(source)? == sha256_file(destination)?)
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -1211,6 +1230,27 @@ tun_name = "clash-iran"
         let other = directory.path().join("other.bin");
         copy_file_unless_same(&path, &other).expect("distinct copy");
         assert_eq!(fs::read(&other).expect("copied"), b"payload");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_file_unless_same_skips_an_identical_write_locked_destination() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_SHARE_READ: u32 = 1;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let source = directory.path().join("source.bin");
+        let destination = directory.path().join("destination.bin");
+        fs::write(&source, b"same executable bytes").expect("source");
+        fs::write(&destination, b"same executable bytes").expect("destination");
+        let _write_lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&destination)
+            .expect("read-shared write lock");
+
+        copy_file_unless_same(&source, &destination)
+            .expect("identical locked destination should not be overwritten");
     }
 
     #[test]

@@ -121,6 +121,64 @@ pub fn audit_openvpn_profile(path: &Path) -> Result<OpenVpnProfileFacts, OpenVpn
     })
 }
 
+const CONFLICTING_DIRECTIVES: [&str; 12] = [
+    "redirect-gateway",
+    "redirect-private",
+    "block-outside-dns",
+    "block-ipv6",
+    "register-dns",
+    "dhcp-option",
+    "route",
+    "route-ipv6",
+    "route-metric",
+    "dev-node",
+    "ip-win32",
+    "resolv-retry",
+];
+
+/// Drops directives that would steal the system default route, DNS, or an
+/// existing TUN adapter. Inline certificates and keys are kept verbatim.
+/// Server pushes of the same options are ignored separately on the command line.
+#[must_use]
+pub fn sanitize_openvpn_profile(text: &str) -> String {
+    let mut sanitized = String::new();
+    let mut inline_block: Option<String> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(open) = inline_block.as_deref() {
+            sanitized.push_str(line);
+            sanitized.push('\n');
+            if trimmed.eq_ignore_ascii_case(&format!("</{open}>")) {
+                inline_block = None;
+            }
+            continue;
+        }
+        if let Some(tag) = trimmed
+            .strip_prefix('<')
+            .and_then(|rest| rest.strip_suffix('>'))
+        {
+            if !tag.starts_with('/') {
+                inline_block = Some(tag.to_ascii_lowercase());
+            }
+            sanitized.push_str(line);
+            sanitized.push('\n');
+            continue;
+        }
+        let directive = trimmed
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches("--")
+            .to_ascii_lowercase();
+        if CONFLICTING_DIRECTIVES.contains(&directive.as_str()) {
+            continue;
+        }
+        sanitized.push_str(line);
+        sanitized.push('\n');
+    }
+    sanitized
+}
+
 /// Helper-owned `OpenVPN` argv. Always includes `--route-noexec` and pins
 /// `--script-security 0` after `--config`.
 ///
@@ -136,6 +194,7 @@ pub fn openvpn_arguments(
     auth_file: Option<&PathBuf>,
     pinned_remote: Option<(IpAddr, u16)>,
     socks_proxy: Option<(&str, u16)>,
+    windows: bool,
 ) -> Vec<String> {
     let mut args = Vec::new();
     if let Some((host, port)) = socks_proxy {
@@ -158,7 +217,32 @@ pub fn openvpn_arguments(
         device.into(),
         "--dev-type".into(),
         "tun".into(),
+        "--route-nopull".into(),
+        "--resolv-retry".into(),
+        "2".into(),
     ]);
+    if windows {
+        // A profile `dev tun` would attach the first TAP/Wintun adapter,
+        // which may already be Mihomo. Ask OpenVPN to create this name.
+        args.extend([
+            "--windows-driver".into(),
+            "wintun".into(),
+            "--dev-node".into(),
+            device.into(),
+        ]);
+    }
+    for pushed in [
+        "redirect-gateway",
+        "redirect-private",
+        "block-outside-dns",
+        "block-ipv6",
+        "dhcp-option",
+        "register-dns",
+        "route-ipv6",
+        "route ",
+    ] {
+        args.extend(["--pull-filter".into(), "ignore".into(), pushed.into()]);
+    }
     if let Some(auth) = auth_file {
         args.push("--auth-user-pass".into());
         args.push(auth.to_string_lossy().into_owned());
@@ -196,7 +280,14 @@ mod tests {
 
     #[test]
     fn arguments_pin_script_security_after_config() {
-        let args = openvpn_arguments(Path::new("/tmp/office.ovpn"), "tun-ovpn", None, None, None);
+        let args = openvpn_arguments(
+            Path::new("/tmp/office.ovpn"),
+            "tun-ovpn",
+            None,
+            None,
+            None,
+            false,
+        );
         let config = args
             .iter()
             .position(|arg| arg == "--config")
@@ -217,6 +308,7 @@ mod tests {
             None,
             Some(("152.233.20.207".parse().expect("ip"), 587)),
             Some(("127.0.0.1", 12_334)),
+            false,
         );
         let config = args
             .iter()
@@ -252,5 +344,54 @@ mod tests {
         assert_eq!(facts.remote_port, Some(587));
         // A hostname yields no scoped route; only literals do.
         assert!(facts.server_networks.is_empty());
+    }
+
+    #[test]
+    fn windscribe_profile_drops_route_and_dns_takeover() {
+        let source = "\
+client
+dev tun
+remote vpn.example.com 443
+auth-user-pass
+redirect-gateway def1
+block-outside-dns
+dhcp-option DNS 10.255.255.1
+resolv-retry infinite
+<ca>
+not a real certificate
+</ca>
+";
+        let sanitized = sanitize_openvpn_profile(source);
+        assert!(sanitized.contains("remote vpn.example.com 443"));
+        assert!(sanitized.contains("auth-user-pass"));
+        assert!(sanitized.contains("not a real certificate"));
+        assert!(!sanitized.contains("redirect-gateway"));
+        assert!(!sanitized.contains("block-outside-dns"));
+        assert!(!sanitized.contains("dhcp-option"));
+        assert!(!sanitized.contains("resolv-retry infinite"));
+
+        let args = openvpn_arguments(
+            Path::new("windscribe.ovpn"),
+            "tun-1234abcd",
+            None,
+            None,
+            None,
+            true,
+        );
+        assert!(args.windows(3).any(|window| {
+            window[0] == "--pull-filter"
+                && window[1] == "ignore"
+                && window[2] == "block-outside-dns"
+        }));
+        assert!(args.windows(3).any(|window| {
+            window[0] == "--pull-filter" && window[1] == "ignore" && window[2] == "redirect-gateway"
+        }));
+        assert!(args.iter().any(|arg| arg == "--route-nopull"));
+        assert!(args.iter().any(|arg| arg == "--windows-driver"));
+        let node = args
+            .iter()
+            .position(|arg| arg == "--dev-node")
+            .expect("dev-node");
+        assert_eq!(args[node + 1], "tun-1234abcd");
     }
 }

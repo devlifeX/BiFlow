@@ -640,6 +640,7 @@ async function simulateInstallProgress(version: string) {
 
 let lifecycleBusy: LifecycleBusy | null = null;
 let mockSideTunnelConnectTimeout: number = INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT;
+let failNextConnectDetail: string | null = null;
 
 function sideTunnelStatusForTimeout(
   timeoutSeconds: number,
@@ -792,10 +793,32 @@ async function runStart(accepted: OperationAccepted) {
     }
   }
 
+  const failure = failNextConnectDetail;
+  failNextConnectDetail = null;
+  if (failure) {
+    snapshot = {
+      ...snapshot,
+      mihomo: component("error", failure),
+      tun: component("error", failure),
+      last_error: {
+        code: "INTERNAL",
+        message_key: "errors.platform",
+        retryable: true,
+        remediation: "run_diagnostics",
+        technical_details: failure,
+        correlation_id: "00000000-0000-0000-0000-000000000099",
+      },
+    };
+    lifecycleBusy = null;
+    emit("error", null, null, null);
+    return;
+  }
+
   snapshot = {
     ...snapshot,
     clients: clientsWithMockSideTunnelOutcomes(mockSideTunnelConnectTimeout),
     exit_ip: "203.0.113.42",
+    last_error: null,
   };
   lifecycleBusy = null;
   emit("running", null, null, null);
@@ -1536,6 +1559,7 @@ export function resetMockState() {
   });
   listeners.clear();
   updateListeners.clear();
+  failNextConnectDetail = null;
   if (typeof window !== "undefined") {
     delete window.__BIFLOW_NEXT_PROFILE_PATH__;
   }
@@ -1543,4 +1567,7 @@ export function resetMockState() {
 
 if (typeof window !== "undefined") {
   window.__BIFLOW_RESET_MOCK = resetMockState;
+  window.__BIFLOW_FAIL_NEXT_CONNECT = (detail: string) => {
+    failNextConnectDetail = detail;
+  };
 }

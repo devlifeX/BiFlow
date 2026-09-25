@@ -29,6 +29,7 @@ import { ConnectionActionButton } from "./ConnectionActionButton";
 import { ClientRegistry } from "./ClientRegistry";
 import { LifecycleCancelButton } from "./LifecycleCancelButton";
 import { StatusPill } from "./StatusPill";
+import { failureReason } from "../lib/failureReason";
 import { clientColor } from "../lib/outbound";
 import { presetById, type PresetId } from "../lib/presets";
 
@@ -129,6 +130,17 @@ export function Dashboard({ snapshot }: { snapshot: StackSnapshot }) {
           />
         </div>
       </div>
+
+      {snapshot.last_error ? (
+        <div
+          role="alert"
+          data-testid="stack-failure"
+          className="rounded-2xl border border-danger/30 bg-danger/10 p-3 text-sm text-danger"
+        >
+          <p className="font-semibold">{t("setupNeedsAttention")}</p>
+          <p className="mt-1">{failureReason(snapshot.last_error, t)}</p>
+        </div>
+      ) : null}
 
       <div
         data-testid="provider-summary"

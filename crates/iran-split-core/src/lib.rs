@@ -455,12 +455,8 @@ impl CoreError {
                 true,
                 Some(Remediation::Retry),
             ),
-            Self::QueueUnavailable | Self::Platform(_) => (
-                ErrorCode::Internal,
-                "errors.internal",
-                true,
-                Some(Remediation::RunDiagnostics),
-            ),
+            Self::QueueUnavailable => diagnostic_parts("errors.internal"),
+            Self::Platform(_) => diagnostic_parts("errors.platform"),
         };
         AppError {
             code,
@@ -473,9 +469,31 @@ impl CoreError {
     }
 }
 
+fn diagnostic_parts(key: &'static str) -> (ErrorCode, &'static str, bool, Option<Remediation>) {
+    (
+        ErrorCode::Internal,
+        key,
+        true,
+        Some(Remediation::RunDiagnostics),
+    )
+}
+
 #[async_trait]
 pub trait PlatformBackend: Send + Sync + 'static {
     async fn runtime_health(&self) -> RuntimeHealth;
+    /// Lightweight status for the connect/resume progress poll.
+    ///
+    /// The full health check talks to the helper and the Mihomo controller.
+    /// Doing that every few hundred milliseconds queues behind `StartMihomo`
+    /// and steals the controller while rule providers are still loading.
+    async fn connect_progress_health(&self) -> RuntimeHealth {
+        self.runtime_health().await
+    }
+    /// Drops cached egress probes so the next Connect verifies them again.
+    ///
+    /// Pause keeps the cache: Resume should not repeat a probe that already
+    /// succeeded while the client port is still open.
+    async fn forget_client_egress(&self) {}
     async fn helper_status(&self) -> Result<HelperStatus, CoreError>;
     async fn ensure_hiddify(&self, cancel: CancellationToken) -> Result<(), CoreError>;
     async fn ensure_clients(&self, cancel: CancellationToken) -> Result<(), CoreError> {
@@ -1068,6 +1086,20 @@ impl<B: PlatformBackend> Engine<B> {
         cancel: &CancellationToken,
         rebind_host: Option<String>,
     ) -> Result<(), CoreError> {
+        // A local proxy may have been optional when the stack started with a
+        // DIRECT default. If the user now selects that client as the default,
+        // recover it before generating Mihomo config so the new MATCH route
+        // uses a live handle instead of a stale fail-closed stub.
+        if self.backend.recover_clients().await? {
+            info!(
+                event = "client.apply_recovery_succeeded",
+                section = "clients",
+                initiator = "engine",
+                cause = "default_route_apply",
+                trace_route = "engine->apply_user_rules->recover_clients",
+                "recovered a local-proxy egress before applying live routing"
+            );
+        }
         info!(
             event = "rules.apply_started",
             section = "rules",
@@ -1334,6 +1366,7 @@ impl<B: PlatformBackend> Engine<B> {
                     let keep_paused = item.kind == OperationKind::Resume
                         && engine.snapshot().phase == StackPhase::Paused;
                     let health = engine.backend.runtime_health().await;
+                    let detail = error.to_string();
                     engine.update(|snapshot| {
                         apply_health(snapshot, health);
                         if keep_paused {
@@ -1342,6 +1375,8 @@ impl<B: PlatformBackend> Engine<B> {
                             snapshot.phase = StackPhase::Error;
                         }
                         snapshot.last_error = Some(error.to_app_error(item.id));
+                        explain_failed_component(&mut snapshot.mihomo, &detail);
+                        explain_failed_component(&mut snapshot.tun, &detail);
                     });
                 }
             }
@@ -1457,7 +1492,7 @@ impl<B: PlatformBackend> Engine<B> {
             .set_side_tunnel_connect_timeout(connect_timeout)
             .await;
         let mut ensure = Box::pin(self.backend.ensure_clients(cancel.clone()));
-        let mut poll = tokio::time::interval(Duration::from_millis(250));
+        let mut poll = tokio::time::interval(Duration::from_millis(1000));
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
@@ -1596,7 +1631,7 @@ impl<B: PlatformBackend> Engine<B> {
         cancel: CancellationToken,
     ) -> Result<ReadinessReport, CoreError> {
         let mut check = Box::pin(self.backend.check_readiness(cancel.clone()));
-        let mut poll = tokio::time::interval(Duration::from_millis(250));
+        let mut poll = tokio::time::interval(Duration::from_millis(1000));
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
@@ -1610,7 +1645,7 @@ impl<B: PlatformBackend> Engine<B> {
     }
 
     async fn publish_connect_client_health(&self) {
-        let health = self.backend.runtime_health().await;
+        let health = self.backend.connect_progress_health().await;
         self.update(|snapshot| {
             snapshot.helper = health.helper;
             snapshot.clients = merge_clients_during_connect(&snapshot.clients, &health.clients);
@@ -1619,7 +1654,7 @@ impl<B: PlatformBackend> Engine<B> {
     }
 
     async fn publish_connect_core_health(&self) {
-        let health = self.backend.runtime_health().await;
+        let health = self.backend.connect_progress_health().await;
         self.update(|snapshot| {
             apply_core_health_during_connect(snapshot, health);
         });
@@ -1720,6 +1755,7 @@ impl<B: PlatformBackend> Engine<B> {
                 report.warnings.join("; ")
             )));
         }
+        self.backend.forget_client_egress().await;
         let health = self.backend.runtime_health().await;
         self.set_stopped(health);
         Ok(())
@@ -1915,6 +1951,18 @@ impl<B: PlatformBackend> Engine<B> {
     }
 }
 
+fn explain_failed_component(status: &mut ComponentStatus, detail: &str) {
+    if status
+        .message
+        .as_deref()
+        .is_some_and(|message| !message.is_empty())
+    {
+        return;
+    }
+    status.phase = ComponentPhase::Error;
+    status.message = Some(detail.to_owned());
+}
+
 fn apply_health(snapshot: &mut StackSnapshot, health: RuntimeHealth) {
     snapshot.helper = health.helper;
     snapshot.clients = health.clients;
@@ -1972,7 +2020,8 @@ fn preserve_starting_component(
 ) -> ComponentStatus {
     if health.phase == ComponentPhase::Running {
         health
-    } else if current.phase == ComponentPhase::Starting {
+    } else if current.phase == ComponentPhase::Running || current.phase == ComponentPhase::Starting
+    {
         current.clone()
     } else {
         health
@@ -2013,11 +2062,13 @@ mod tests {
         hiddify_missing: AtomicBool,
         helper_missing: AtomicBool,
         recover_ready: AtomicBool,
+        apply_requires_recovery: AtomicBool,
         client_egress_ready: AtomicBool,
         /// 0 = no primary to probe, 1 = egress OK, 2 = egress dead.
         primary_probe: AtomicUsize,
         starts: AtomicUsize,
         reloads: AtomicUsize,
+        recover_calls: AtomicUsize,
         cleanups: AtomicUsize,
         proxy_stops: AtomicUsize,
         proxy_clears: AtomicUsize,
@@ -2126,7 +2177,12 @@ mod tests {
         }
 
         async fn recover_clients(&self) -> Result<bool, CoreError> {
-            Ok(self.recover_ready.swap(false, Ordering::SeqCst))
+            self.recover_calls.fetch_add(1, Ordering::SeqCst);
+            let recovered = self.recover_ready.swap(false, Ordering::SeqCst);
+            if recovered {
+                self.apply_requires_recovery.store(false, Ordering::SeqCst);
+            }
+            Ok(recovered)
         }
 
         async fn probe_primary_egress(&self) -> Option<Result<(), String>> {
@@ -2207,16 +2263,17 @@ mod tests {
             }
             self.tun.store(true, Ordering::SeqCst);
             let fail = self.fail_readiness.load(Ordering::SeqCst);
+            let egress_missing = self.apply_requires_recovery.load(Ordering::SeqCst);
             Ok(ReadinessReport {
                 controller_ready: !fail,
-                egress_ready: !fail,
+                egress_ready: !fail && !egress_missing,
                 providers: ProviderSummary {
                     ready: u32::from(!fail),
                     total: 1,
                     rules_loaded: 100,
                     last_refresh: Some(Utc::now()),
                 },
-                exit_ip: Some("203.0.113.10".into()),
+                exit_ip: (!egress_missing).then(|| "203.0.113.10".into()),
             })
         }
 
@@ -2728,6 +2785,33 @@ mod tests {
         assert_eq!(backend.reloads.load(Ordering::SeqCst), 2);
     }
 
+    #[tokio::test]
+    async fn live_settings_apply_recovers_default_proxy_before_readiness() {
+        let backend = Arc::new(FakeBackend::default());
+        let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+        engine.start_stack(None).await.expect("start");
+        engine
+            .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
+            .await
+            .expect("running");
+
+        // DIRECT can start while a local proxy is still unavailable. Selecting
+        // that proxy as the default must recover it before the live reload
+        // checks primary-egress readiness.
+        backend
+            .apply_requires_recovery
+            .store(true, Ordering::SeqCst);
+        backend.recover_ready.store(true, Ordering::SeqCst);
+        engine
+            .apply_user_rules()
+            .await
+            .expect("recovered proxy should apply");
+
+        assert_eq!(backend.recover_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.reloads.load(Ordering::SeqCst), 1);
+        assert!(!backend.apply_requires_recovery.load(Ordering::SeqCst));
+    }
+
     #[test]
     fn missing_hiddify_and_mihomo_ask_the_ui_to_install() {
         let hiddify = CoreError::HiddifyNotFound.to_app_error(Uuid::nil());
@@ -2779,7 +2863,13 @@ mod tests {
         let wrapped =
             CoreError::Platform("Mihomo readiness check timed out: controller unavailable".into())
                 .to_app_error(Uuid::nil());
-        assert_eq!(wrapped.message_key, "errors.internal");
+        assert_eq!(wrapped.message_key, "errors.platform");
+        assert_eq!(
+            wrapped.technical_details.as_deref(),
+            Some(
+                "platform operation failed: Mihomo readiness check timed out: controller unavailable"
+            )
+        );
     }
 
     #[tokio::test]

@@ -17,6 +17,7 @@ import { useTranslation } from "react-i18next";
 import logo from "./assets/logo.png";
 import { desktop } from "./api/desktop";
 import type { StackPhase } from "./api/models";
+import { failureReason } from "./lib/failureReason";
 import {
   AppButton,
   BUTTON_ICON_PX,
@@ -245,7 +246,9 @@ export function App() {
                 Action could not be completed
               </Dialog.Title>
               <Dialog.Description className="mt-2 text-sm text-muted">
-                {store.error}
+                {store.snapshot?.last_error
+                  ? failureReason(store.snapshot.last_error, t)
+                  : store.error}
               </Dialog.Description>
               {store.snapshot?.last_error ? (
                 <p className="mt-3 rounded-lg bg-canvas p-3 font-mono text-xs text-muted">

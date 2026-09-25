@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { artifactLayout } from "./build-plan.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const isWindows = process.platform === "win32";
 
 describe("release artifact names", () => {
   it("names all Linux and Windows artifacts from the version file", () => {
@@ -32,6 +33,7 @@ describe("release artifact names", () => {
   });
 
   it("documents linux deb and windows installer in build.sh help", () => {
+    if (isWindows) return;
     const result = spawnSync(join(root, "build.sh"), ["--help"], {
       encoding: "utf8",
     });
@@ -47,7 +49,22 @@ describe("release artifact names", () => {
     assert.match(result.stdout, /compile, deb, appimage, collect/);
   });
 
+  it("provides a native PowerShell builder for Windows artifacts", () => {
+    const source = readFileSync(join(root, "build.ps1"), "utf8");
+    assert.match(
+      source,
+      /Builds only the Windows portable executable and NSIS installer/,
+    );
+    assert.match(source, /ValidateSet\("compile", "nsis", "collect"\)/);
+    assert.match(source, /pnpm[\s\S]*tauri[\s\S]*build/);
+    assert.match(source, /--bundles.*nsis/);
+    assert.match(source, /cargo.*build.*iran-split-helper/);
+    assert.match(source, /Windows-InstallerName/);
+    assert.doesNotMatch(source, /build_linux|AppImage|\.deb/);
+  });
+
   it("rejects a --from stage that does not exist on that packaging target", () => {
+    if (isWindows) return;
     const result = spawnSync(
       join(root, "build.sh"),
       ["linux", "--from", "nsis"],
@@ -258,6 +275,7 @@ describe("release artifact names", () => {
   });
 
   it("plans a root-owned helper install without executing privileged steps", () => {
+    if (isWindows) return;
     const result = spawnSync(
       "sh",
       [
@@ -619,8 +637,8 @@ describe("release artifact names", () => {
     );
     const lock = readFileSync(join(root, "pnpm-lock.yaml"), "utf8");
     const importer = lock
-      .split(/^ {2}apps\/desktop:\n/m)[1]
-      ?.split(/^packages:\n/m)[0];
+      .split(/^ {2}apps\/desktop:\r?\n/m)[1]
+      ?.split(/^packages:\r?\n/m)[0];
     assert.ok(importer, "pnpm-lock.yaml must contain an apps/desktop importer");
     const specs = { ...pkg.dependencies, ...pkg.devDependencies };
     for (const [name, spec] of Object.entries(specs)) {
@@ -629,7 +647,7 @@ describe("release artifact names", () => {
       assert.match(
         importer,
         new RegExp(
-          `(?:^|\\n)\\s+['"]?${escape(name)}['"]?:\\n\\s+specifier: ${escape(spec)}`,
+          `(?:^|\\r?\\n)\\s+['"]?${escape(name)}['"]?:\\r?\\n\\s+specifier: ${escape(spec)}`,
         ),
         `${name} lockfile specifier must be ${spec}`,
       );

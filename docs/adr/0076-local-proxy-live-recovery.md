@@ -29,6 +29,12 @@ repeatedly" report from production `debug.log` (three
   client recovers it reuses `apply_user_rules` — the proven pin-edit path —
   to re-stage, validate, and hot-apply the Mihomo config so the recovered
   group rejoins routing without restarting the stack.
+- A live settings apply also runs one recovery pass before staging its new
+  generation. This covers the direct-to-client default-route transition: the
+  client may have been optional and unavailable when Connect first ran, but
+  ready by the time the operator selects it as the default. Recovery records
+  the exit IP for the recovered default client, so readiness does not reject
+  a valid live proxy as stale.
 - A `route_refresh_pending` flag survives a failed apply and retries on the
   next tick; it is cleared whenever the stack leaves Running/Degraded so a
   stale refresh never fires after a later connect.

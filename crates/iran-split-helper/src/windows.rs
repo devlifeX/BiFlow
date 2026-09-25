@@ -9,7 +9,7 @@ use std::{
     process::Command,
     sync::Arc,
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::net::windows::named_pipe::NamedPipeServer;
 use tracing::{info, warn};
@@ -26,6 +26,10 @@ const PIPE_READY_POLL: Duration = Duration::from_millis(100);
 /// A previous helper keeps its own `.exe` locked, so a reinstall waits this
 /// long for the ended task to exit before copying over it.
 const HELPER_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Defender and the previous helper can briefly retain the machine-wide
+/// configuration during a reinstall. Keep the elevated install bounded while
+/// allowing that transient sharing violation to clear.
+const CONFIG_WRITE_ATTEMPTS: usize = 12;
 /// `ERROR_FILE_NOT_FOUND`: the pipe object does not exist yet.
 const ERROR_FILE_NOT_FOUND: i32 = 2;
 /// `CREATE_NO_WINDOW`: the elevated installer is a GUI-subsystem binary
@@ -117,7 +121,7 @@ fn install_inner(
     let bin = root.join("bin");
     let helper_dest = bin.join("iran-split-helper.exe");
     let mihomo_dest = bin.join("mihomo.exe");
-    let config_dest = root.join("helper.toml");
+    let config_dest = install_config_path(&root);
     // NSIS perMachine `SetShellVarContext all` makes the local-appdata shell
     // variable expand to `C:\ProgramData`, and an elevated in-app Install can
     // record an admin profile. The helper always stages beside `runtime`, never
@@ -158,18 +162,16 @@ fn install_inner(
         tun_name: tun_name.to_owned(),
     };
     settings.validate()?;
-    fs::write(
-        &config_dest,
-        format!(
-            "authorized_uid = 0\nauthorized_gid = 0\nsocket_path = \"{}\"\nstaging_dir = \"{}\"\nruntime_dir = \"{}\"\nmihomo_binary = \"{}\"\nmihomo_sha256 = \"{}\"\ntun_name = \"{}\"\n",
-            escape_toml(&settings.socket_path),
-            escape_toml(&settings.staging_dir),
-            escape_toml(&settings.runtime_dir),
-            escape_toml(&settings.mihomo_binary),
-            settings.mihomo_sha256,
-            settings.tun_name
-        ),
-    )?;
+    let config = format!(
+        "authorized_uid = 0\nauthorized_gid = 0\nsocket_path = \"{}\"\nstaging_dir = \"{}\"\nruntime_dir = \"{}\"\nmihomo_binary = \"{}\"\nmihomo_sha256 = \"{}\"\ntun_name = \"{}\"\n",
+        escape_toml(&settings.socket_path),
+        escape_toml(&settings.staging_dir),
+        escape_toml(&settings.runtime_dir),
+        escape_toml(&settings.mihomo_binary),
+        settings.mihomo_sha256,
+        settings.tun_name
+    );
+    write_config_with_retry(&config_dest, &config)?;
     register_and_start_task(&helper_dest, &config_dest)?;
     info!(
         event = "helper.installed",
@@ -180,6 +182,46 @@ fn install_inner(
         "windows helper scheduled task installed"
     );
     Ok(())
+}
+
+fn write_config_with_retry(path: &Path, contents: &str) -> Result<(), HelperServiceError> {
+    let mut last_error = None;
+    for attempt in 0..CONFIG_WRITE_ATTEMPTS {
+        match fs::write(path, contents) {
+            Ok(()) => return Ok(()),
+            Err(error) if matches!(error.raw_os_error(), Some(5 | 32)) => {
+                last_error = Some(error);
+                if attempt + 1 >= CONFIG_WRITE_ATTEMPTS {
+                    break;
+                }
+                warn!(
+                    event = "helper.config_write_retry",
+                    section = "helper_install",
+                    initiator = "elevated_helper",
+                    cause = "windows_file_lock",
+                    trace_route = "elevated_helper->helper.toml",
+                    attempt = attempt + 1,
+                    "helper configuration is temporarily locked; retrying"
+                );
+                thread::sleep(Duration::from_millis(250));
+            }
+            Err(error) => return Err(HelperServiceError::Io(error)),
+        }
+    }
+    let error = last_error.expect("config write retry must retain the last error");
+    Err(HelperServiceError::Install(format!(
+        "helper configuration write failed for {}: {error}",
+        path.display()
+    )))
+}
+
+fn install_config_path(root: &Path) -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    root.join("runtime")
+        .join(format!("helper-{timestamp}-{}.toml", std::process::id()))
 }
 
 /// Lets the unelevated desktop write generation files that SYSTEM later copies
@@ -214,7 +256,10 @@ fn grant_users_modify(path: &Path) -> Result<(), HelperServiceError> {
 }
 
 fn register_and_start_task(helper: &Path, config: &Path) -> Result<(), HelperServiceError> {
-    let xml_path = PathBuf::from(INSTALL_ROOT).join("helper-task.xml");
+    // Keep the task manifest paired with the unique config. A previous NSIS
+    // install can leave the legacy helper-task.xml open while Defender scans
+    // the machine-wide directory.
+    let xml_path = config.with_extension("xml");
     write_utf16_le_bom(&xml_path, &super::scheduled_task_xml(helper, config))?;
     let xml = xml_path.to_string_lossy();
     run_schtasks(&["/Create", "/TN", TASK_NAME, "/XML", xml.as_ref(), "/F"])?;
@@ -423,5 +468,67 @@ async fn handle_connection(
             commands::execute_audited(&supervisor, request, "named_pipe").await,
         )
         .await?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_writer_creates_the_helper_configuration() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("helper.toml");
+
+        write_config_with_retry(&path, "tun_name = \"clash-iran\"\n")
+            .expect("configuration should be written");
+
+        assert_eq!(
+            fs::read_to_string(path).expect("configuration should be readable"),
+            "tun_name = \"clash-iran\"\n"
+        );
+    }
+
+    #[test]
+    fn config_writer_preserves_the_path_when_windows_shares_are_locked() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("locked-helper.toml");
+        let _lock = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .share_mode(0)
+            .open(&path)
+            .expect("locked configuration");
+
+        let error = write_config_with_retry(&path, "tun_name = \"clash-iran\"\n")
+            .expect_err("the locked file should fail after bounded retries");
+        let message = error.to_string();
+        assert!(message.contains("locked-helper.toml"));
+        assert!(message.contains("os error 32") || message.contains("os error 5"));
+    }
+
+    #[test]
+    fn install_config_path_does_not_reuse_the_locked_default_file() {
+        let root = Path::new(r"C:\ProgramData\iran-split");
+        let path = install_config_path(root);
+
+        assert_eq!(path.parent(), Some(root.join("runtime").as_path()));
+        assert_ne!(path, root.join("helper.toml"));
+        assert_eq!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("toml")
+        );
+    }
+
+    #[test]
+    fn task_manifest_follows_the_unique_config_path() {
+        let config = Path::new(r"C:\ProgramData\iran-split\runtime\helper-1-2.toml");
+        assert_eq!(
+            config.with_extension("xml"),
+            Path::new(r"C:\ProgramData\iran-split\runtime\helper-1-2.xml")
+        );
     }
 }

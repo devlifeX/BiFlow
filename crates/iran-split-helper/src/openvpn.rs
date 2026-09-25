@@ -6,7 +6,7 @@
 
 use super::{redact, HelperServiceError, Supervisor};
 use ipnet::IpNet;
-use iran_split_clients::{audit_openvpn_profile, openvpn_arguments};
+use iran_split_clients::{audit_openvpn_profile, openvpn_arguments, sanitize_openvpn_profile};
 use iran_split_ipc::SideTunnelStatus;
 use std::{
     collections::BTreeMap,
@@ -45,6 +45,15 @@ pub(crate) struct RunningSideTunnel {
     routing_table: u32,
     routes: Vec<IpNet>,
     policy_installed: bool,
+    /// Sanitized profile copy. Removed when this record is dropped, which is
+    /// after `OpenVPN` has been stopped.
+    sanitized_profile: PathBuf,
+}
+
+impl Drop for RunningSideTunnel {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.sanitized_profile);
+    }
 }
 
 impl Supervisor {
@@ -88,35 +97,20 @@ impl Supervisor {
             }
         }
         let auth = auth_file.map(PathBuf::from);
-        // Try the direct path first. A network that blocks the server by
-        // address makes OpenVPN exit immediately; only then fall back to the
-        // working client's SOCKS port, which costs a nested hop.
-        // Both attempts share the caller's budget, so a retry can never push
-        // the reply past the engine's IPC deadline.
-        let attempt_seconds = if socks_proxy.is_some() {
-            (timeout_seconds / 2).max(5)
-        } else {
-            timeout_seconds
-        };
-        let mut child = spawn_openvpn(
-            &binary,
-            &openvpn_arguments(profile, &device, auth.as_ref(), pinned_remote, None),
-        )?;
-        let mut outcome = wait_for_device(&mut child, &device, attempt_seconds).await;
-        if let (Err(_), Some(proxy)) = (&outcome, socks_proxy) {
-            self.push_log(
-                "info",
-                "side_tunnel_retry_via_proxy",
-                BTreeMap::from([("driver".into(), "openvpn".into())]),
-            )
-            .await;
-            let _ = child.start_kill();
-            let args =
-                openvpn_arguments(profile, &device, auth.as_ref(), pinned_remote, Some(proxy));
-            child = spawn_openvpn(&binary, &args)?;
-            outcome = wait_for_device(&mut child, &device, attempt_seconds).await;
-        }
-        outcome?;
+        let sanitized_profile =
+            sanitized_profile_copy(&self.settings.runtime_dir, client_id, profile)?;
+        let profile = sanitized_profile.as_path();
+        let mut child = self
+            .launch_openvpn(OpenVpnLaunch {
+                binary: &binary,
+                profile,
+                device: &device,
+                auth: auth.as_ref(),
+                pinned_remote,
+                socks_proxy,
+                timeout_seconds,
+            })
+            .await?;
 
         let mut routes = facts.server_networks;
         routes.retain(|network| network.prefix_len() > 0);
@@ -138,6 +132,7 @@ impl Supervisor {
                 routing_table: DEFAULT_TABLE,
                 routes,
                 policy_installed,
+                sanitized_profile,
             },
         );
         self.push_log(
@@ -229,6 +224,82 @@ async fn last_stderr_line(child: &mut Child) -> String {
     let line = redact(line);
     let line: String = line.chars().take(200).collect();
     format!(": {line}")
+}
+
+struct OpenVpnLaunch<'a> {
+    binary: &'a Path,
+    profile: &'a Path,
+    device: &'a str,
+    auth: Option<&'a PathBuf>,
+    pinned_remote: Option<(IpAddr, u16)>,
+    socks_proxy: Option<(&'a str, u16)>,
+    timeout_seconds: u64,
+}
+
+impl Supervisor {
+    /// Tries a direct connection, then the ready client's SOCKS port.
+    /// Both attempts share the caller's budget.
+    async fn launch_openvpn(&self, launch: OpenVpnLaunch<'_>) -> Result<Child, HelperServiceError> {
+        let OpenVpnLaunch {
+            binary,
+            profile,
+            device,
+            auth,
+            pinned_remote,
+            socks_proxy,
+            timeout_seconds,
+        } = launch;
+        let attempt_seconds = if socks_proxy.is_some() {
+            (timeout_seconds / 2).max(5)
+        } else {
+            timeout_seconds
+        };
+        let mut child = spawn_openvpn(
+            binary,
+            &openvpn_arguments(profile, device, auth, pinned_remote, None, cfg!(windows)),
+        )?;
+        let mut outcome = wait_for_device(&mut child, device, attempt_seconds).await;
+        if let (Err(_), Some(proxy)) = (&outcome, socks_proxy) {
+            self.push_log(
+                "info",
+                "side_tunnel_retry_via_proxy",
+                BTreeMap::from([("driver".into(), "openvpn".into())]),
+            )
+            .await;
+            let _ = child.start_kill();
+            child = spawn_openvpn(
+                binary,
+                &openvpn_arguments(
+                    profile,
+                    device,
+                    auth,
+                    pinned_remote,
+                    Some(proxy),
+                    cfg!(windows),
+                ),
+            )?;
+            outcome = wait_for_device(&mut child, device, attempt_seconds).await;
+        }
+        outcome?;
+        Ok(child)
+    }
+}
+
+fn sanitized_profile_copy(
+    runtime_dir: &Path,
+    client_id: Uuid,
+    profile: &Path,
+) -> Result<PathBuf, HelperServiceError> {
+    let text = std::fs::read_to_string(profile)
+        .map_err(|_| HelperServiceError::SideTunnel("profile is unreadable".into()))?;
+    std::fs::create_dir_all(runtime_dir).map_err(|error| {
+        HelperServiceError::SideTunnel(format!("could not stage a sanitized profile: {error}"))
+    })?;
+    let copy = runtime_dir.join(format!("openvpn-{client_id}.ovpn"));
+    std::fs::write(&copy, sanitize_openvpn_profile(&text)).map_err(|error| {
+        HelperServiceError::SideTunnel(format!("could not write the sanitized profile: {error}"))
+    })?;
+    Ok(copy)
 }
 
 fn spawn_openvpn(binary: &Path, args: &[String]) -> Result<Child, HelperServiceError> {

@@ -18,7 +18,8 @@ use tokio_util::sync::CancellationToken;
 pub use local_proxy::LocalProxyDriver;
 pub use openvpn::OpenVpnDriver;
 pub use profile_audit::{
-    audit_openvpn_profile, openvpn_arguments, OpenVpnProfileError, OpenVpnProfileFacts,
+    audit_openvpn_profile, openvpn_arguments, sanitize_openvpn_profile, OpenVpnProfileError,
+    OpenVpnProfileFacts,
 };
 pub use remote_resolver::{is_routable_public, resolve_through_proxy, RemoteResolveError};
 

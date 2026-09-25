@@ -218,6 +218,8 @@ pub struct LinuxBackend {
     client_failures: Mutex<std::collections::HashMap<iran_split_config::ClientId, String>>,
     /// Connect-time override for `StartSideTunnel` (progressive 15/30/60s UX).
     side_tunnel_connect_timeout: Mutex<Option<u64>>,
+    /// Config hash that already passed `mihomo -t` in this process.
+    validated_config_sha256: Mutex<Option<String>>,
 }
 
 impl LinuxBackend {
@@ -236,6 +238,7 @@ impl LinuxBackend {
             client_exit_ips: Mutex::new(std::collections::HashMap::new()),
             client_failures: Mutex::new(std::collections::HashMap::new()),
             side_tunnel_connect_timeout: Mutex::new(None),
+            validated_config_sha256: Mutex::new(None),
         }
     }
 
@@ -517,7 +520,6 @@ impl LinuxBackend {
     async fn ensure_enabled_clients(&self, cancel: CancellationToken) -> Result<(), CoreError> {
         let config = self.config.read().await.clone();
         *self.egress_exit_ip.lock().await = None;
-        self.client_exit_ips.lock().await.clear();
         let mut handles = Vec::new();
         for client in config.enabled_clients() {
             let required = config.default_route.client_id() == Some(client.id);
@@ -603,7 +605,15 @@ impl LinuxBackend {
                         client = client.spec().id,
                         "a local proxy egress became reachable after connect"
                     );
-                    self.client_exit_ips.lock().await.insert(client.id, exit_ip);
+                    let is_default = config.default_route.client_id() == Some(client.id);
+                    self.client_exit_ips
+                        .lock()
+                        .await
+                        .insert(client.id, exit_ip.clone());
+                    if is_default {
+                        *self.egress_exit_ip.lock().await = Some(exit_ip);
+                    }
+                    self.client_failures.lock().await.remove(&client.id);
                     self.egress_handles.lock().await.push(handle);
                     recovered = true;
                 }
@@ -636,6 +646,14 @@ impl LinuxBackend {
         cancel: &CancellationToken,
     ) -> Result<EgressHandle, CoreError> {
         let config = self.config.read().await.clone();
+        let (host, port) = config.hiddify_endpoint();
+        if let Some(exit_ip) = self.reuse_cached_egress(client.id, &host, port).await {
+            if required {
+                *self.egress_exit_ip.lock().await = Some(exit_ip);
+            }
+            return synthesized_local_handle(client)
+                .ok_or_else(|| CoreError::ConfigInvalid("hiddify handle is missing".into()));
+        }
         self.launch_hiddify_if_needed(&config, cancel).await?;
         let exit_ip = if required {
             self.probe_hiddify_until_ready(&config, cancel.clone())
@@ -675,6 +693,13 @@ impl LinuxBackend {
                 "local proxy handle is missing".into(),
             ));
         };
+        if let Some(exit_ip) = self.reuse_cached_egress(client.id, &host, port).await {
+            if required {
+                *self.egress_exit_ip.lock().await = Some(exit_ip);
+            }
+            return synthesized_local_handle(client)
+                .ok_or_else(|| CoreError::ConfigInvalid("local proxy handle is missing".into()));
+        }
         if !Self::tcp_listening(&host, port).await {
             if required {
                 self.launch_local_proxy_if_needed(client, &host, port, cancel)
@@ -1025,6 +1050,29 @@ impl LinuxBackend {
             .ok_or_else(|| CoreError::ConfigInvalid("runtime has not been prepared".into()))
     }
 
+    /// Skips another `generate_204` round-trip when this process already proved
+    /// the proxy and the port is still accepting connections.
+    async fn reuse_cached_egress(
+        &self,
+        client_id: iran_split_config::ClientId,
+        host: &str,
+        port: u16,
+    ) -> Option<String> {
+        let cached = self.client_exit_ips.lock().await.get(&client_id).cloned()?;
+        if !Self::tcp_listening(host, port).await {
+            return None;
+        }
+        info!(
+            event = "client.egress_reused",
+            section = "clients",
+            initiator = "linux_platform_backend",
+            cause = "cached_probe_port_open",
+            trace_route = "engine->linux_platform_backend->reuse_cached_egress",
+            "reused a successful egress probe because the client port is still open"
+        );
+        Some(cached)
+    }
+
     async fn launch_hiddify_if_needed(
         &self,
         config: &AppConfig,
@@ -1368,13 +1416,28 @@ impl PlatformBackend for LinuxBackend {
                 "generation differs from the latest prepared runtime".into(),
             ));
         }
+        if self.validated_config_sha256.lock().await.as_deref()
+            == Some(generation.config_sha256.as_str())
+        {
+            info!(
+                event = "runtime.validation_skipped",
+                section = "runtime_generation",
+                initiator = "linux_platform_backend",
+                cause = "unchanged_config",
+                trace_route = "desktop_engine->linux_platform_backend->validate_runtime",
+                "skipped mihomo -t because this config hash already validated"
+            );
+            return Ok(());
+        }
         validate_with_binary(
             &self.paths.mihomo_binary,
             &prepared.config_path,
             Duration::from_secs(10),
         )
         .await
-        .map_err(|error| CoreError::ConfigInvalid(error.to_string()))
+        .map_err(|error| CoreError::ConfigInvalid(error.to_string()))?;
+        *self.validated_config_sha256.lock().await = Some(generation.config_sha256.clone());
+        Ok(())
     }
 
     async fn start_core(&self, generation: &RuntimeGeneration) -> Result<(), CoreError> {
@@ -1589,10 +1652,27 @@ impl PlatformBackend for LinuxBackend {
         })
     }
 
-    async fn cleanup_owned_state(&self) -> Result<CleanupReport, CoreError> {
+    async fn forget_client_egress(&self) {
         self.egress_handles.lock().await.clear();
         *self.egress_exit_ip.lock().await = None;
         self.client_exit_ips.lock().await.clear();
+        self.side_tunnel_auth_files.lock().await.clear();
+        *self.validated_config_sha256.lock().await = None;
+        info!(
+            event = "client.egress_cache_cleared",
+            section = "clients",
+            initiator = "linux_platform_backend",
+            cause = "stack_stopped",
+            trace_route = "engine->linux_platform_backend->forget_client_egress",
+            "cleared cached egress probes after disconnect"
+        );
+    }
+
+    async fn cleanup_owned_state(&self) -> Result<CleanupReport, CoreError> {
+        self.egress_handles
+            .lock()
+            .await
+            .retain(|handle| handle.kind == EgressKind::LocalProxy);
         self.side_tunnel_auth_files.lock().await.clear();
         match self
             .helper_request(HelperCommand::CleanupOwnedNetworkState)

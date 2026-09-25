@@ -99,6 +99,29 @@ test.describe("primary BiFlow flows", () => {
     await expect(page.locator(".traffic-flow-route")).toHaveCount(0);
   });
 
+  test("shows why Mihomo or TUN stopped instead of a bare error", async ({
+    page,
+  }) => {
+    await openFresh(page);
+    const installButtons = page.getByRole("button", {
+      name: "Install",
+      exact: true,
+    });
+    await installButtons.nth(0).click();
+    await page.getByRole("button", { name: "Install", exact: true }).click();
+    const detail =
+      "platform operation failed: Mihomo exited immediately: wintun.dll was not found";
+    await page.evaluate((reason) => {
+      window.__BIFLOW_FAIL_NEXT_CONNECT?.(reason);
+    }, detail);
+    await connectButton(page).click();
+    const failure = page.getByTestId("stack-failure");
+    await expect(failure).toBeVisible();
+    await expect(failure).toContainText("A connection step failed.");
+    await expect(failure).toContainText("wintun.dll was not found");
+    await expect(failure).not.toHaveText(/^error$/i);
+  });
+
   test("disables lifecycle controls after the first Connect click", async ({
     page,
   }) => {

@@ -15,6 +15,13 @@ export default defineConfig({
     baseURL: "http://127.0.0.1:1420",
     trace: "on-first-retry",
     viewport: { width: 1120, height: 760 },
+    ...(process.env.BIFLOW_CHROMIUM_PATH
+      ? {
+          launchOptions: {
+            executablePath: process.env.BIFLOW_CHROMIUM_PATH,
+          },
+        }
+      : {}),
   },
   webServer: {
     command: "pnpm --dir apps/desktop dev --host 127.0.0.1",

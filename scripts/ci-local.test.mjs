@@ -12,9 +12,10 @@ import {
  * @param {string} job
  */
 function jobBlock(workflow, job) {
-  const start = workflow.indexOf(`\n  ${job}:\n`);
-  assert.notEqual(start, -1, `job ${job} is missing`);
-  const rest = workflow.slice(start + 1);
+  const normalized = workflow.replaceAll("\r\n", "\n");
+  const normalizedStart = normalized.indexOf(`\n  ${job}:\n`);
+  assert.notEqual(normalizedStart, -1, `job ${job} is missing`);
+  const rest = normalized.slice(normalizedStart + 1);
   const next = rest.slice(1).search(/\n {2}[a-z][a-z-]*:\n/);
   return next === -1 ? rest : rest.slice(0, next + 1);
 }

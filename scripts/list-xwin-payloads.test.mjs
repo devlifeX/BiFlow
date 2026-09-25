@@ -113,9 +113,15 @@ describe("list-xwin-payloads", () => {
     const dir = mkdtempSync(join(tmpdir(), "xwin-payloads-"));
     const vsman = join(dir, "pkg.vsman");
     writeFileSync(vsman, JSON.stringify(fixture));
-    const output = execFileSync("python3", [script, vsman, "x86_64"], {
-      encoding: "utf8",
-    });
+    const python = process.platform === "win32" ? "py" : "python3";
+    const pythonArgs = process.platform === "win32" ? ["-3"] : [];
+    const output = execFileSync(
+      python,
+      [...pythonArgs, script, vsman, "x86_64"],
+      {
+        encoding: "utf8",
+      },
+    );
     const files = output
       .trim()
       .split("\n")

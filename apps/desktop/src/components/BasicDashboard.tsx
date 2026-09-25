@@ -1,6 +1,7 @@
 import { Download, Pause, Play, Power, PowerOff, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { StackSnapshot } from "../api/models";
+import { failureReason } from "../lib/failureReason";
 import { controlsLocked, isOperating } from "../lib/lifecycle";
 import { useAppStore } from "../store/app";
 import { AppButton, BUTTON_ICON_PX } from "./AppButton";
@@ -27,7 +28,8 @@ export function BasicDashboard({ snapshot }: { snapshot: StackSnapshot }) {
   const missingId =
     snapshot.last_error?.code === "MIHOMO_NOT_FOUND" ? "mihomo" : "hiddify";
   const showError =
-    error ?? (snapshot.last_error ? t(snapshot.last_error.message_key) : null);
+    error ??
+    (snapshot.last_error ? failureReason(snapshot.last_error, t) : null);
 
   return (
     <section

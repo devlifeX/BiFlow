@@ -352,7 +352,7 @@ describe("Tauri frontend contract", () => {
     assert.ok(required.length > 8, "trait parse found too few methods");
 
     const impl = windows.match(
-      /impl PlatformBackend for WindowsBackend \{[\s\S]*?\n\}\n/,
+      /impl PlatformBackend for WindowsBackend \{[\s\S]*?\r?\n\}\r?\n/,
     );
     assert.ok(impl, "WindowsBackend does not implement PlatformBackend");
     const missing = required.filter(
@@ -381,7 +381,7 @@ describe("Tauri frontend contract", () => {
     assert.ok(trait, "PlatformBackend trait is missing");
     const required = requiredPlatformBackendMethods(trait[0]);
     const impl = cli.match(
-      /impl PlatformBackend for DemoBackend \{[\s\S]*?\n\}\n/,
+      /impl PlatformBackend for DemoBackend \{[\s\S]*?\r?\n\}\r?\n/,
     );
     assert.ok(impl, "DemoBackend does not implement PlatformBackend");
     const missing = required.filter(
@@ -430,7 +430,9 @@ describe("Tauri frontend contract", () => {
     );
     // The elevated helper writes install.log only when it reaches its own
     // error path, so a stale file must be cleared before each elevation.
-    const install = source.match(/async fn install_windows\([\s\S]*?\n\}\n/);
+    const install = source.match(
+      /async fn install_windows\([\s\S]*?\r?\n\}\r?\n/,
+    );
     assert.ok(install, "install_windows is missing");
     const cleared = install[0].indexOf("discard_stale_install_log()");
     const elevated = install[0].indexOf('Command::new("powershell")');
