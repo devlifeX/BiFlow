@@ -16,6 +16,8 @@ node and read as a label on the client above it.
 - A settings reload with no single-host rebind closes every Mihomo connection
   after the hot reload. New sockets follow the reloaded default. A pin move
   still closes only the moved host.
+- The reload `PUT` sends the absolute path of the overlaid `config.yaml`.
+  An empty `path` returns success and leaves the previous `MATCH` in memory.
 - The diagram drops a host's packet as soon as a newer poll places that host
   on another branch, and it clears its animation when the default client
   changes. The default caption is drawn under that node's own name.

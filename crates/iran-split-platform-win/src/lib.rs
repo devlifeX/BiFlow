@@ -372,7 +372,11 @@ impl WindowsBackend {
         }
     }
 
-    async fn hot_reload_running(&self, rebind_host: Option<&str>) -> Result<(), CoreError> {
+    async fn hot_reload_running(
+        &self,
+        rebind_host: Option<&str>,
+        config_path: &Path,
+    ) -> Result<(), CoreError> {
         let config = self.config.read().await.clone();
         let controller = ControllerClient::new(
             &config.mihomo.controller_host,
@@ -389,7 +393,7 @@ impl WindowsBackend {
             "reloading Mihomo config without restarting the process"
         );
         controller
-            .hot_reload()
+            .hot_reload(config_path)
             .await
             .map_err(|error| CoreError::MihomoStartFailed(error.to_string()))?;
         info!(
@@ -1648,7 +1652,19 @@ impl PlatformBackend for WindowsBackend {
             .await?
         {
             HelperReply::ProcessStatus(status) if status.running => {
-                self.hot_reload_running(rebind_host.as_deref()).await
+                let Some(generation_id) = status.generation_id else {
+                    return Err(CoreError::Platform(
+                        "running Mihomo has no generation to reload".into(),
+                    ));
+                };
+                let config_path = self
+                    .paths
+                    .system_runtime_dir
+                    .join("generations")
+                    .join(generation_id.to_string())
+                    .join("config.yaml");
+                self.hot_reload_running(rebind_host.as_deref(), &config_path)
+                    .await
             }
             HelperReply::ProcessStatus(_) => self.spawn_core(generation).await,
             _ => Err(CoreError::Platform(

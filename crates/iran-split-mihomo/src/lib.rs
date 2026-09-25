@@ -870,22 +870,22 @@ impl ControllerClient {
     /// Replaces the active Mihomo configuration without restarting the process.
     ///
     /// Overlay must already have copied the new generation into the running
-    /// `-d` workdir. Meta 1.19+ rejects a relative `path` on this endpoint
-    /// (`path is not a absolute path`) and also rejects a sibling directory,
-    /// so the body leaves `path` empty and reloads the process default file.
+    /// `-d` workdir. Meta 1.19+ rejects a relative `path`, and an empty
+    /// `path` returns 204 without replacing `MATCH`. Pass the absolute path
+    /// of the overlaid `config.yaml`.
     ///
     /// # Errors
     ///
     /// Returns an error when the controller request fails or does not return
     /// HTTP 204 No Content.
-    pub async fn hot_reload(&self) -> Result<(), MihomoError> {
+    pub async fn hot_reload(&self, config_path: &Path) -> Result<(), MihomoError> {
         let response = self
             .client
             .put(format!("{}/configs?force=true", self.base_url))
             .timeout(Duration::from_secs(20))
             .bearer_auth(&self.secret)
             .json(&serde_json::json!({
-                "path": "",
+                "path": config_path,
                 "payload": "",
             }))
             .send()
@@ -2135,9 +2135,8 @@ mod tests {
                 b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response).await;
             request.contains("PUT /configs?force=true")
-                && request.contains(r#""path":"""#)
+                && request.contains(r#""path":"C:\\ProgramData\\iran-split\\runtime\\generations\\11111111-1111-1111-1111-111111111111\\config.yaml""#)
                 && request.contains(r#""payload":"""#)
-                && !request.contains("config.yaml")
         });
         let client = ControllerClient::new(
             "127.0.0.1",
@@ -2145,7 +2144,12 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
         .expect("client");
-        client.hot_reload().await.expect("reload");
+        client
+            .hot_reload(Path::new(
+                r"C:\ProgramData\iran-split\runtime\generations\11111111-1111-1111-1111-111111111111\config.yaml",
+            ))
+            .await
+            .expect("reload");
         assert!(server.await.expect("server"));
     }
 
@@ -2172,7 +2176,10 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
         .expect("client");
-        let error = client.hot_reload().await.expect_err("400");
+        let error = client
+            .hot_reload(Path::new(r"C:\ProgramData\iran-split\runtime\config.yaml"))
+            .await
+            .expect_err("400");
         let text = error.to_string();
         assert!(text.contains("400"), "{text}");
         assert!(text.contains("path is not a absolute path"), "{text}");
