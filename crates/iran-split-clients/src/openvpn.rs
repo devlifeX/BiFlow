@@ -23,8 +23,15 @@ impl ClientDriver for OpenVpnDriver {
         EgressKind::OwnedSideTunnel
     }
 
-    fn process_bypass(&self, _platform: DriverPlatform) -> Vec<ProcessBypass> {
-        Vec::new()
+    fn process_bypass(&self, platform: DriverPlatform) -> Vec<ProcessBypass> {
+        let name = match platform {
+            DriverPlatform::Windows => "openvpn.exe",
+            DriverPlatform::Linux => "openvpn",
+        };
+        vec![ProcessBypass {
+            name: name.into(),
+            wildcard: false,
+        }]
     }
 
     fn transport_excludes(&self) -> Vec<IpNet> {

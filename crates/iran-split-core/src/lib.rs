@@ -517,6 +517,22 @@ pub trait PlatformBackend: Send + Sync + 'static {
     ) -> Result<bool, CoreError> {
         Ok(false)
     }
+    /// Starts one enabled side-tunnel client while the stack is already up.
+    async fn connect_side_tunnel(
+        &self,
+        _client_id: ClientId,
+        _cancel: CancellationToken,
+    ) -> Result<(), CoreError> {
+        Err(CoreError::Platform(
+            "this platform cannot start a side tunnel on its own".into(),
+        ))
+    }
+    /// Stops one side-tunnel process without tearing down Mihomo.
+    async fn disconnect_side_tunnel(&self, _client_id: ClientId) -> Result<(), CoreError> {
+        Err(CoreError::Platform(
+            "this platform cannot stop a side tunnel on its own".into(),
+        ))
+    }
     /// One end-to-end egress probe of the default-route local proxy.
     ///
     /// `None` when the default route is DIRECT, a side tunnel, or has no
@@ -952,6 +968,19 @@ impl<B: PlatformBackend> Engine<B> {
         self.backend
             .set_side_tunnel_connect_timeout(Some(timeout_seconds))
             .await;
+        // Install the OpenVPN process bypass before the helper spawns it.
+        // Otherwise the new process is captured by the live TUN and never
+        // reaches the server whose DNS name was filtered.
+        if let Err(cause) = self.apply_user_rules().await {
+            warn!(
+                event = "side_tunnel.pre_bypass_failed",
+                section = "clients",
+                initiator = "retry_side_tunnels",
+                cause = %cause,
+                trace_route = "engine->retry_side_tunnels->apply_user_rules",
+                "side tunnel retry continued without refreshing the process bypass"
+            );
+        }
         let cancel = CancellationToken::new();
         let recovered = self.backend.retry_failed_side_tunnels(cancel).await;
         self.backend.set_side_tunnel_connect_timeout(None).await;
@@ -964,6 +993,88 @@ impl<B: PlatformBackend> Engine<B> {
             snapshot.clients = health.clients;
         });
         Ok(recovered)
+    }
+
+    /// Starts one client while the stack is already running.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Platform`] when the stack is stopped, and
+    /// [`CoreError::OperationInProgress`] when another lifecycle action holds
+    /// the lock. A side-tunnel start failure is returned as-is.
+    pub async fn connect_client(
+        &self,
+        client_id: ClientId,
+        timeout_seconds: u64,
+    ) -> Result<(), CoreError> {
+        if !matches!(
+            self.snapshot().phase,
+            StackPhase::Running | StackPhase::Degraded
+        ) {
+            return Err(CoreError::Platform(
+                "connect the stack before starting a client".into(),
+            ));
+        }
+        if self.snapshot().busy.is_some() {
+            return Err(CoreError::OperationInProgress);
+        }
+        self.backend
+            .set_side_tunnel_connect_timeout(Some(timeout_seconds))
+            .await;
+        if let Err(cause) = self.apply_user_rules().await {
+            warn!(
+                event = "side_tunnel.pre_bypass_failed",
+                section = "clients",
+                initiator = "connect_client",
+                cause = %cause,
+                trace_route = "engine->connect_client->apply_user_rules",
+                "client connect continued without refreshing the process bypass"
+            );
+        }
+        let cancel = CancellationToken::new();
+        let result = self.backend.connect_side_tunnel(client_id, cancel).await;
+        self.backend.set_side_tunnel_connect_timeout(None).await;
+        result?;
+        self.apply_user_rules().await?;
+        let health = self.backend.runtime_health().await;
+        self.update(|snapshot| {
+            snapshot.clients = health.clients;
+        });
+        Ok(())
+    }
+
+    /// Stops one side tunnel without stopping Mihomo.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::OperationInProgress`] when another lifecycle action
+    /// holds the lock, and [`CoreError::Platform`] when the client is a local
+    /// proxy that stops only with the stack.
+    pub async fn disconnect_client(&self, client_id: ClientId) -> Result<(), CoreError> {
+        if self.snapshot().busy.is_some() {
+            return Err(CoreError::OperationInProgress);
+        }
+        self.backend.disconnect_side_tunnel(client_id).await?;
+        if matches!(
+            self.snapshot().phase,
+            StackPhase::Running | StackPhase::Degraded
+        ) {
+            if let Err(cause) = self.apply_user_rules().await {
+                warn!(
+                    event = "side_tunnel.post_disconnect_reload_failed",
+                    section = "clients",
+                    initiator = "disconnect_client",
+                    cause = %cause,
+                    trace_route = "engine->disconnect_client->apply_user_rules",
+                    "side tunnel stopped but the live rules were not reloaded"
+                );
+            }
+        }
+        let health = self.backend.runtime_health().await;
+        self.update(|snapshot| {
+            snapshot.clients = health.clients;
+        });
+        Ok(())
     }
 
     /// Cancels an in-progress start and queues a stack stop.

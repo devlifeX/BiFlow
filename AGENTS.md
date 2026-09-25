@@ -192,6 +192,13 @@ If a required command fails or emits a warning from project code, fix it in the 
 - Windscribe rides the OpenVPN driver. The missing-binary banner and
   catalog row must offer the OpenVPN installer page, not only the
   Windscribe config generator. Do not tell operators to run the Windscribe GUI.
+- A filtered DNS name such as `ber-449.whiskergalaxy.com` must be resolved
+  through the already-running Hiddify SOCKS port before OpenVPN starts, and
+  `openvpn.exe` must be a DIRECT process bypass before that spawn. Otherwise
+  the live TUN captures OpenVPN, the poisoned name never becomes a public
+  IP, and the helper only reports that the tunnel did not come up (ADR 0093).
+  On Windows the adapter is `--dev tun` plus `--dev-node tun-<id>`; `--dev`
+  set to the node name never shows up in `netsh`.
 - Backticks inside a double-quoted shell search pattern are command
   substitutions. Quote `rg` patterns with single quotes when they contain
   Markdown code spans so validation does not accidentally execute the text.
@@ -222,7 +229,8 @@ If a required command fails or emits a warning from project code, fix it in the 
 - `scripts/sync-version.mjs` must only sync manifests when it is the process entry point. Importing `readAppVersion` from tests or `build-plan.mjs` must not rewrite `package.json`.
 - After installing rustup, the same shell must prepend `$HOME/.cargo/bin` (or `source "$HOME/.cargo/env"`) or `cargo` is still missing. Both `./build.sh` and `./dev.sh` do this before every toolchain check, including clean/non-interactive shells.
 - Hiddify/Mihomo Install buttons must use PATH and `~/.local/bin`, not only `~/.local/share/biflow`. Mock UI reads the same locations at Vite startup; Playwright still forces missing deps via `sessionStorage` so e2e can test Install.
-- `zip` 2.6.1 is yanked on crates.io; pin `3.0.0` (2.4.2 also exists) or `cargo build` cannot resolve the crate.
+- `zip` 2.6.1 is yanked on crates.io. The desktop extractor and `tauri-plugin-updater` must share one major (`4.6.1`); pinning `3.0.0` makes `cargo deny` report a duplicate `zip`.
+- A filtered OpenVPN hostname is resolved once through Hiddify and stored in `side-tunnel-remotes.json`. The imported `.ovpn` is never rewritten. Later starts reuse that address when Hiddify is down (ADR 0094).
 - Edition 2021 + rustc 1.88 does not allow `if cond && let Some(...)` let-chains. Split into nested `if`.
 - `u32::from([100, 64, 0, 0])` does not compile; use `u32::from_be_bytes([100, 64, 0, 0])` for CGNAT `100.64.0.0/10`.
 - Workspace Clippy is `pedantic`, and warnings are errors. The Rust gate includes incremental `cargo clippy -p <changed crate> --all-targets -- -D warnings`; fix every diagnostic before completion.

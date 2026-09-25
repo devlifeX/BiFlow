@@ -386,61 +386,60 @@ impl LinuxBackend {
             .find_map(local_proxy_endpoint)
     }
 
-    /// Resolves the profile's server name over `DoH` through a client that is
-    /// already serving traffic, so a poisoned resolver cannot send `OpenVPN`
-    /// to an unroutable address. Returns `None` when nothing is serving yet
-    /// or the name already is an address; the profile is then used as-is.
+    /// Resolves the profile hostname once through a ready client and reuses the
+    /// stored address later. The imported `.ovpn` is never rewritten.
     async fn pin_side_tunnel_remote(
         &self,
         profile: &Path,
         proxy: Option<&(String, u16)>,
-    ) -> Option<(std::net::IpAddr, u16)> {
-        let facts = iran_split_clients::audit_openvpn_profile(profile).ok()?;
-        let host = facts.remote_hosts.first()?.clone();
-        let port = facts.remote_port?;
-        if host.parse::<std::net::IpAddr>().is_ok() {
-            return None;
-        }
-        let Some((proxy_host, proxy_port)) = proxy else {
-            info!(
-                event = "side_tunnel.remote_resolve_skipped",
-                section = "clients",
-                initiator = "start_openvpn_client",
-                cause = "no_ready_client_to_resolve_through",
-                trace_route = "engine->platform_backend->doh_resolver",
-                "no client is serving yet; using the profile's own server name"
-            );
-            return None;
-        };
-        match iran_split_clients::resolve_through_proxy(
-            &host,
-            (proxy_host.as_str(), *proxy_port),
-            Duration::from_secs(5),
-        )
-        .await
+    ) -> Result<Option<(std::net::IpAddr, u16)>, CoreError> {
+        let proxy = proxy.map(|(host, port)| (host.as_str(), *port));
+        match iran_split_clients::pin_profile_remote(profile, proxy, &self.paths.user_data_dir)
+            .await
         {
-            Ok(addresses) => {
-                let address = *addresses.first()?;
+            Ok(None) => {
+                info!(
+                    event = "side_tunnel.remote_resolve_skipped",
+                    section = "clients",
+                    initiator = "start_openvpn_client",
+                    cause = "no_stored_address",
+                    trace_route = "engine->platform_backend->doh_resolver",
+                    "no stored side-tunnel address; using the profile hostname"
+                );
+                Ok(None)
+            }
+            Ok(Some(pin)) => {
+                if !pin.persisted {
+                    warn!(
+                        event = "side_tunnel.remote_pin_not_stored",
+                        section = "clients",
+                        initiator = "start_openvpn_client",
+                        cause = "cache_write_failed",
+                        trace_route = "engine->platform_backend->doh_resolver",
+                        "side-tunnel address was resolved but not stored for the next start"
+                    );
+                }
                 info!(
                     event = "side_tunnel.remote_resolved",
                     section = "clients",
                     initiator = "start_openvpn_client",
-                    cause = "doh_through_ready_client",
+                    cause = "stored_or_fresh_pin",
                     trace_route = "engine->platform_backend->doh_resolver",
-                    "resolved the side-tunnel server over DoH without logging the address"
+                    "pinned the side-tunnel server without logging the address or editing the profile"
                 );
-                Some((address, port))
+                Ok(Some((pin.address, pin.port)))
             }
+            Err(error) if error.contains("openvpn profile") => Err(CoreError::ConfigInvalid(error)),
             Err(error) => {
-                warn!(
+                error!(
                     event = "side_tunnel.remote_resolve_failed",
                     section = "clients",
                     initiator = "start_openvpn_client",
                     cause = %error,
                     trace_route = "engine->platform_backend->doh_resolver",
-                    "could not pin the side-tunnel server address; using the profile as written"
+                    "refusing to start OpenVPN on a filtered DNS name"
                 );
-                None
+                Err(CoreError::Platform(error))
             }
         }
     }
@@ -480,7 +479,15 @@ impl LinuxBackend {
             password.as_deref(),
         )?;
         let proxy = self.ready_proxy_endpoint(ready).await;
-        let pinned_remote = self.pin_side_tunnel_remote(&profile, proxy.as_ref()).await;
+        let pinned_remote = self
+            .pin_side_tunnel_remote(&profile, proxy.as_ref())
+            .await?;
+        if let Some((address, _)) = pinned_remote {
+            handle.transport_excludes = vec![iran_split_clients::public_host_exclude(address)
+                .map_err(|error| {
+                    CoreError::Platform(format!("side-tunnel bypass prefix is invalid: {error}"))
+                })?];
+        }
         let timeout_seconds = self
             .effective_side_tunnel_timeout(*start_timeout_seconds)
             .await;
@@ -1302,6 +1309,75 @@ impl PlatformBackend for LinuxBackend {
             }
         }
         Ok(recovered)
+    }
+
+    async fn connect_side_tunnel(
+        &self,
+        client_id: iran_split_config::ClientId,
+        cancel: CancellationToken,
+    ) -> Result<(), CoreError> {
+        let config = self.config.read().await.clone();
+        let client = config
+            .clients
+            .iter()
+            .find(|client| client.id == client_id)
+            .cloned()
+            .ok_or_else(|| CoreError::ConfigInvalid("client was not found".into()))?;
+        if !client.enabled {
+            return Err(CoreError::Platform(
+                "enable the client before connecting it".into(),
+            ));
+        }
+        if client.spec().kind == EgressKind::LocalProxy {
+            self.recover_local_proxy_clients().await?;
+            return Ok(());
+        }
+        self.egress_handles
+            .lock()
+            .await
+            .retain(|handle| handle.client_id != client_id);
+        let ready = self.egress_handles.lock().await.clone();
+        match self.start_openvpn_client(&client, cancel, &ready).await {
+            Ok(handle) => {
+                self.client_failures.lock().await.remove(&client_id);
+                self.egress_handles.lock().await.push(handle);
+                Ok(())
+            }
+            Err(error) => {
+                self.client_failures
+                    .lock()
+                    .await
+                    .insert(client_id, error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    async fn disconnect_side_tunnel(
+        &self,
+        client_id: iran_split_config::ClientId,
+    ) -> Result<(), CoreError> {
+        let config = self.config.read().await.clone();
+        let client = config
+            .clients
+            .iter()
+            .find(|client| client.id == client_id)
+            .ok_or_else(|| CoreError::ConfigInvalid("client was not found".into()))?;
+        if client.spec().kind == EgressKind::LocalProxy {
+            return Err(CoreError::Platform(
+                "a local proxy stops when you disconnect the stack".into(),
+            ));
+        }
+        self.helper_request(HelperCommand::StopSideTunnel {
+            client_id: client_id.into(),
+        })
+        .await?;
+        self.egress_handles
+            .lock()
+            .await
+            .retain(|handle| handle.client_id != client_id);
+        self.client_failures.lock().await.remove(&client_id);
+        Ok(())
     }
 
     async fn set_side_tunnel_connect_timeout(&self, seconds: Option<u64>) {

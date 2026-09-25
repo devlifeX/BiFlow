@@ -13,6 +13,7 @@ use std::{
     net::IpAddr,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::Arc,
     time::Duration,
 };
 use tokio::process::{Child, Command};
@@ -254,11 +255,11 @@ impl Supervisor {
         } else {
             timeout_seconds
         };
-        let mut child = spawn_openvpn(
+        let (mut child, mut log) = spawn_openvpn(
             binary,
             &openvpn_arguments(profile, device, auth, pinned_remote, None, cfg!(windows)),
         )?;
-        let mut outcome = wait_for_device(&mut child, device, attempt_seconds).await;
+        let mut outcome = wait_for_device(&mut child, device, attempt_seconds, &log).await;
         if let (Err(_), Some(proxy)) = (&outcome, socks_proxy) {
             self.push_log(
                 "info",
@@ -267,7 +268,7 @@ impl Supervisor {
             )
             .await;
             let _ = child.start_kill();
-            child = spawn_openvpn(
+            (child, log) = spawn_openvpn(
                 binary,
                 &openvpn_arguments(
                     profile,
@@ -278,7 +279,7 @@ impl Supervisor {
                     cfg!(windows),
                 ),
             )?;
-            outcome = wait_for_device(&mut child, device, attempt_seconds).await;
+            outcome = wait_for_device(&mut child, device, attempt_seconds, &log).await;
         }
         outcome?;
         Ok(child)
@@ -302,22 +303,41 @@ fn sanitized_profile_copy(
     Ok(copy)
 }
 
-fn spawn_openvpn(binary: &Path, args: &[String]) -> Result<Child, HelperServiceError> {
+fn spawn_openvpn(
+    binary: &Path,
+    args: &[String],
+) -> Result<(Child, Arc<tokio::sync::Mutex<String>>), HelperServiceError> {
     let mut command = Command::new(binary);
     command
         .args(args)
         .env_clear()
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        // Captured, not discarded: an OpenVPN option or file error is the
-        // only place the real cause appears, and a bare "exit status: 1"
-        // sends operators hunting the network instead of the message.
+        // OpenVPN writes its session log to stdout. Keep the last line so a
+        // timeout can say why the adapter never appeared.
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     apply_openvpn_spawn(&mut command);
-    command
+    let mut child = command
         .spawn()
-        .map_err(|error| HelperServiceError::SideTunnel(redact(&error.to_string())))
+        .map_err(|error| HelperServiceError::SideTunnel(redact(&error.to_string())))?;
+    let log = Arc::new(tokio::sync::Mutex::new(String::new()));
+    if let Some(stdout) = child.stdout.take() {
+        let slot = Arc::clone(&log);
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let line: String = redact(line).chars().take(200).collect();
+                *slot.lock().await = line;
+            }
+        });
+    }
+    Ok((child, log))
 }
 
 /// Waits for `OpenVPN` to bring `device` up, failing fast when it exits.
@@ -325,6 +345,7 @@ async fn wait_for_device(
     child: &mut Child,
     device: &str,
     timeout_seconds: u64,
+    log: &Arc<tokio::sync::Mutex<String>>,
 ) -> Result<(), HelperServiceError> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds.max(1));
     loop {
@@ -338,10 +359,16 @@ async fn wait_for_device(
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
+            let detail = log.lock().await.clone();
             let _ = child.start_kill();
-            return Err(HelperServiceError::SideTunnel(
-                "openvpn did not bring the tunnel up in time".into(),
-            ));
+            let suffix = if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            };
+            return Err(HelperServiceError::SideTunnel(format!(
+                "openvpn did not bring the tunnel up in time{suffix}"
+            )));
         }
         tokio::time::sleep(DEVICE_POLL_INTERVAL).await;
     }

@@ -63,6 +63,19 @@ export const desktop = {
       ? invoke("retry_side_tunnels", { sideTunnelTimeoutSeconds })
       : mockApi.retrySideTunnels(sideTunnelTimeoutSeconds);
   },
+  connectClient(
+    clientId: string,
+    sideTunnelTimeoutSeconds: number,
+  ): Promise<void> {
+    return native
+      ? invoke("connect_client", { clientId, sideTunnelTimeoutSeconds })
+      : mockApi.connectClient(clientId, sideTunnelTimeoutSeconds);
+  },
+  disconnectClient(clientId: string): Promise<void> {
+    return native
+      ? invoke("disconnect_client", { clientId })
+      : mockApi.disconnectClient(clientId);
+  },
   stop(): Promise<OperationAccepted> {
     return native ? invoke("stop_stack") : mockApi.stop();
   },

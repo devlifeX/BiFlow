@@ -89,6 +89,8 @@ const resources = {
       clientPinPlaceholder: "example.com",
       pinToClient: "Pin",
       remove: "Remove",
+      connectClient: "Connect",
+      disconnectClient: "Disconnect",
       deleteClient: "Delete",
       deleteClientConfirm:
         "Delete {{name}}? This affects {{count}} pinned hosts.",
@@ -390,6 +392,8 @@ const resources = {
       clientPinPlaceholder: "example.com",
       pinToClient: "سنجاق",
       remove: "حذف",
+      connectClient: "اتصال",
+      disconnectClient: "قطع",
       deleteClient: "حذف کلاینت",
       deleteClientConfirm:
         "{{name}} حذف شود؟ این کار روی {{count}} میزبان سنجاق‌شده اثر می‌گذارد.",

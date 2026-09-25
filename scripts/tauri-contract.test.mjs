@@ -444,6 +444,26 @@ describe("Tauri frontend contract", () => {
     assert.match(source, /fn discard_stale_install_log\(/);
   });
 
+  it("fails NSIS install and uninstall when the privileged Helper command fails", () => {
+    const hooks = readFileSync(
+      join(root, "packaging/windows/installer-hooks.nsh"),
+      "utf8",
+    );
+    for (const [macro, command] of [
+      ["POSTINSTALL", "--install"],
+      ["PREUNINSTALL", "--uninstall"],
+    ]) {
+      const body = hooks.match(
+        new RegExp(`!macro NSIS_HOOK_${macro}([\\s\\S]*?)!macroend`),
+      )?.[1];
+      assert.ok(body, `${macro} hook is missing`);
+      assert.match(body, new RegExp(command));
+      assert.match(body, /nsExec::ExecToLog[\s\S]*?Pop \$R0/);
+      assert.match(body, /StrCmp \$R0 "0"/);
+      assert.match(body, /SetErrorLevel 1[\s\S]*?Abort/);
+    }
+  });
+
   it("gates Linux helper-install paths so Windows dead_code stays clean", () => {
     const source = readFileSync(
       join(root, "src-tauri/src/helper_install.rs"),

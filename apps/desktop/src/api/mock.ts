@@ -918,6 +918,41 @@ export const mockApi = {
     for (const listener of listeners) listener(structuredClone(snapshot));
     return sideTunnelTimeoutSeconds >= 30;
   },
+  async connectClient(
+    clientId: string,
+    _timeoutSeconds: number,
+  ): Promise<void> {
+    if (!["running", "degraded"].includes(snapshot.phase)) {
+      throw new Error("connect the stack before starting a client");
+    }
+    snapshot = {
+      ...snapshot,
+      revision: snapshot.revision + 1,
+      clients: snapshot.clients.map((client) =>
+        client.id === clientId
+          ? { ...client, status: component("running", "side tunnel is ready") }
+          : client,
+      ),
+      updated_at: now(),
+    };
+    for (const listener of listeners) listener(structuredClone(snapshot));
+  },
+  async disconnectClient(clientId: string): Promise<void> {
+    snapshot = {
+      ...snapshot,
+      revision: snapshot.revision + 1,
+      clients: snapshot.clients.map((client) =>
+        client.id === clientId
+          ? {
+              ...client,
+              status: component("stopped", "side tunnel stopped"),
+            }
+          : client,
+      ),
+      updated_at: now(),
+    };
+    for (const listener of listeners) listener(structuredClone(snapshot));
+  },
   async stop(): Promise<OperationAccepted> {
     if (lifecycleBusy && lifecycleBusy !== "disconnecting") {
       throw new Error("operation is already in progress");

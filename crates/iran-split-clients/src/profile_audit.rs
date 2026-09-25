@@ -214,11 +214,13 @@ pub fn openvpn_arguments(
         "0".into(),
         "--route-noexec".into(),
         "--dev".into(),
-        device.into(),
+        if windows { "tun".into() } else { device.into() },
         "--dev-type".into(),
         "tun".into(),
         "--route-nopull".into(),
         "--resolv-retry".into(),
+        "2".into(),
+        "--connect-retry-max".into(),
         "2".into(),
     ]);
     if windows {
@@ -387,7 +389,10 @@ not a real certificate
             window[0] == "--pull-filter" && window[1] == "ignore" && window[2] == "redirect-gateway"
         }));
         assert!(args.iter().any(|arg| arg == "--route-nopull"));
+        assert!(args.iter().any(|arg| arg == "--connect-retry-max"));
         assert!(args.iter().any(|arg| arg == "--windows-driver"));
+        let dev = args.iter().position(|arg| arg == "--dev").expect("dev");
+        assert_eq!(args[dev + 1], "tun");
         let node = args
             .iter()
             .position(|arg| arg == "--dev-node")

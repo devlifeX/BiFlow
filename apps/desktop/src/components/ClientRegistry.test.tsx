@@ -17,6 +17,8 @@ vi.mock("../api/desktop", () => ({
     pickProfileFile: vi.fn(),
     openUrl: vi.fn().mockResolvedValue(undefined),
     clientBinaryInstalled: vi.fn().mockResolvedValue(true),
+    connectClient: vi.fn().mockResolvedValue(undefined),
+    disconnectClient: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -53,6 +55,8 @@ beforeEach(() => {
     setDefaultRoute: vi.fn(),
     pinRoute: vi.fn(),
     removeRule: vi.fn(),
+    connectClient: vi.fn(),
+    disconnectClient: vi.fn(),
     routeFallbackNotice: null,
     clearRouteFallbackNotice: vi.fn(),
   });

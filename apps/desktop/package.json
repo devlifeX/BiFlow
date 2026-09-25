@@ -1,6 +1,6 @@
 {
   "name": "@iran-split/desktop",
-  "version": "6.2.24",
+  "version": "6.2.26",
   "private": true,
   "type": "module",
   "scripts": {

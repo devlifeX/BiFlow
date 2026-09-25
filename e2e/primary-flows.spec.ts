@@ -449,6 +449,12 @@ test.describe("primary BiFlow flows", () => {
     ).toBeVisible();
     await windscribeRow.getByRole("button", { name: /^Windscribe/ }).click();
     const windscribe = page.getByTestId("client-card-windscribe");
+    await expect(
+      windscribe.getByRole("button", { name: "Connect", exact: true }),
+    ).toBeVisible();
+    await expect(
+      windscribe.getByRole("button", { name: "Disconnect", exact: true }),
+    ).toBeVisible();
     await windscribe.getByText("Settings & pinned hosts").click();
     await expect(windscribe.getByText("No file chosen")).toBeVisible();
     await windscribe.getByRole("button", { name: "Choose file" }).click();

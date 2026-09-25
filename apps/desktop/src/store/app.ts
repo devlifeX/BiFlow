@@ -113,6 +113,8 @@ interface AppStore {
   clearInstallGuide: () => void;
   sideTunnelLastTimeout: SideTunnelConnectTimeout | null;
   retrySideTunnelConnect: () => Promise<void>;
+  connectClient: (id: string) => Promise<void>;
+  disconnectClient: (id: string) => Promise<void>;
 }
 
 function message(error: unknown): string {
@@ -759,6 +761,28 @@ export const useAppStore = create<AppStore>((set, get) => ({
     });
     try {
       await desktop.retrySideTunnels(nextTimeout);
+    } catch (error) {
+      set({ error: message(error) });
+    } finally {
+      set({ actionPending: false });
+    }
+  },
+  connectClient: async (id) => {
+    if (get().actionPending) return;
+    set({ actionPending: true, error: null });
+    try {
+      await desktop.connectClient(id, 60);
+    } catch (error) {
+      set({ error: message(error) });
+    } finally {
+      set({ actionPending: false });
+    }
+  },
+  disconnectClient: async (id) => {
+    if (get().actionPending) return;
+    set({ actionPending: true, error: null });
+    try {
+      await desktop.disconnectClient(id);
     } catch (error) {
       set({ error: message(error) });
     } finally {

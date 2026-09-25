@@ -935,6 +935,46 @@ async fn retry_side_tunnels(
     .await
 }
 
+#[tauri::command]
+async fn connect_client(
+    app: AppHandle,
+    client_id: String,
+    side_tunnel_timeout_seconds: u64,
+) -> Result<(), String> {
+    diagnostics::trace_action("clients", "tauri_command", "connect_client", async move {
+        let services = services(&app)?;
+        if side_tunnel_timeout_seconds == 0 || side_tunnel_timeout_seconds > 300 {
+            return Err("side tunnel timeout must be between 1 and 300 seconds".into());
+        }
+        let client_id = ClientId::parse(&client_id).map_err(|error| error.to_string())?;
+        services
+            .engine
+            .connect_client(client_id, side_tunnel_timeout_seconds)
+            .await
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn disconnect_client(app: AppHandle, client_id: String) -> Result<(), String> {
+    diagnostics::trace_action(
+        "clients",
+        "tauri_command",
+        "disconnect_client",
+        async move {
+            let services = services(&app)?;
+            let client_id = ClientId::parse(&client_id).map_err(|error| error.to_string())?;
+            services
+                .engine
+                .disconnect_client(client_id)
+                .await
+                .map_err(|error| error.to_string())
+        },
+    )
+    .await
+}
+
 async fn prepare_stack_start<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let services = services(app)?;
     let helper_ready = connect_prep::helper_is_ready(services.engine.snapshot().helper.phase);
@@ -3498,6 +3538,8 @@ pub fn run() {
             resume_stack,
             restart_stack,
             retry_side_tunnels,
+            connect_client,
+            disconnect_client,
             cancel_operation,
             get_settings,
             validate_settings,

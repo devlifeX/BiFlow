@@ -48,6 +48,8 @@ export function ClientRegistry() {
     boot,
     sideTunnelLastTimeout,
     retrySideTunnelConnect,
+    connectClient,
+    disconnectClient,
   } = useAppStore();
   const platform = boot?.platform ?? "linux";
   const [catalogOpen, setCatalogOpen] = useState(false);
@@ -264,6 +266,11 @@ export function ClientRegistry() {
             onRemovePin={(host) => void removeRule(host)}
             actionPending={actionPending}
             platform={platform}
+            stackReady={
+              snapshot?.phase === "running" || snapshot?.phase === "degraded"
+            }
+            onConnect={() => void connectClient(client.id)}
+            onDisconnect={() => void disconnectClient(client.id)}
           />
         ))}
       </div>
@@ -293,6 +300,9 @@ function ClientCard({
   onRemovePin,
   actionPending,
   platform,
+  stackReady,
+  onConnect,
+  onDisconnect,
 }: {
   client: ClientInstance;
   pins: PinnedRoute[];
@@ -315,6 +325,9 @@ function ClientCard({
   onRemovePin: (host: string) => void;
   actionPending: boolean;
   platform: string;
+  stackReady: boolean;
+  onConnect: () => void;
+  onDisconnect: () => void;
 }) {
   const { t } = useTranslation();
   const [host, setHost] = useState("");
@@ -395,7 +408,7 @@ function ClientCard({
   return (
     <article
       data-testid={`client-card-${client.preset}`}
-      className={`rounded-2xl border border-ink/10 bg-surface p-3.5 ${
+      className={`flex flex-col rounded-2xl border border-ink/10 bg-surface p-3.5 ${
         client.enabled ? "" : "opacity-70"
       }`}
     >
@@ -720,6 +733,34 @@ function ClientCard({
           )}
         </div>
       </details>
+
+      <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-ink/10 pt-3">
+        <button
+          type="button"
+          onClick={onConnect}
+          disabled={
+            actionPending ||
+            !client.enabled ||
+            !stackReady ||
+            phase === "running"
+          }
+          className="rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+        >
+          {t("connectClient")}
+        </button>
+        <button
+          type="button"
+          onClick={onDisconnect}
+          disabled={
+            actionPending ||
+            phase === "stopped" ||
+            client.config.kind === "local_proxy"
+          }
+          className="rounded-lg border border-ink/15 px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
+        >
+          {t("disconnectClient")}
+        </button>
+      </div>
     </article>
   );
 }

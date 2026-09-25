@@ -6,6 +6,7 @@
 mod local_proxy;
 mod openvpn;
 mod profile_audit;
+mod remote_pin;
 mod remote_resolver;
 
 use async_trait::async_trait;
@@ -21,7 +22,19 @@ pub use profile_audit::{
     audit_openvpn_profile, openvpn_arguments, sanitize_openvpn_profile, OpenVpnProfileError,
     OpenVpnProfileFacts,
 };
+pub use remote_pin::{
+    pin_profile_remote, recall_remote_pin, remember_remote_pin, select_remote_pin, PinnedRemote,
+};
 pub use remote_resolver::{is_routable_public, resolve_through_proxy, RemoteResolveError};
+
+/// A single-host DIRECT exclude for a side-tunnel server resolved through Hiddify.
+///
+/// # Errors
+///
+/// Returns a prefix-length error when `address` cannot form a host route.
+pub fn public_host_exclude(address: std::net::IpAddr) -> Result<IpNet, ipnet::PrefixLenError> {
+    IpNet::new(address, if address.is_ipv4() { 32 } else { 128 })
+}
 
 /// Process-name DIRECT rule so TUN cannot recurse into a local proxy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,7 +139,10 @@ pub fn process_bypass_union(
 ) -> Vec<ProcessBypass> {
     let mut rules = Vec::new();
     for client in clients.iter().filter(|client| client.enabled) {
-        if client.spec().kind != EgressKind::LocalProxy {
+        if !matches!(
+            client.spec().kind,
+            EgressKind::LocalProxy | EgressKind::OwnedSideTunnel
+        ) {
             continue;
         }
         if let Some(driver) = driver_for(client.preset) {
@@ -306,5 +322,16 @@ mod tests {
             synthesized_side_tunnel_handle(&ClientInstance::from_preset(PresetId::Hiddify))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn windscribe_process_leaves_the_tun_directly() {
+        let mut client = ClientInstance::from_preset(PresetId::Windscribe);
+        client.enabled = true;
+        let names: Vec<_> = process_bypass_union(&[client], DriverPlatform::Windows)
+            .into_iter()
+            .map(|rule| rule.name)
+            .collect();
+        assert!(names.iter().any(|name| name == "openvpn.exe"));
     }
 }

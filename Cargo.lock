@@ -2066,7 +2066,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-cli"
-version = "6.2.24"
+version = "6.2.26"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2083,7 +2083,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-clients"
-version = "6.2.24"
+version = "6.2.26"
 dependencies = [
  "async-trait",
  "ipnet",
@@ -2099,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-config"
-version = "6.2.24"
+version = "6.2.26"
 dependencies = [
  "hex",
  "rand 0.9.5",
@@ -2112,7 +2112,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-core"
-version = "6.2.24"
+version = "6.2.26"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2128,7 +2128,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-desktop"
-version = "6.2.24"
+version = "6.2.26"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -2161,12 +2161,12 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "zip 3.0.0",
+ "zip",
 ]
 
 [[package]]
 name = "iran-split-helper"
-version = "6.2.24"
+version = "6.2.26"
 dependencies = [
  "clap",
  "hex",
@@ -2190,7 +2190,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-helper-winacl"
-version = "6.2.24"
+version = "6.2.26"
 dependencies = [
  "tokio",
  "windows",
@@ -2198,7 +2198,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-ipc"
-version = "6.2.24"
+version = "6.2.26"
 dependencies = [
  "bytes",
  "chrono",
@@ -2211,7 +2211,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-mihomo"
-version = "6.2.24"
+version = "6.2.26"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2234,7 +2234,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-platform-linux"
-version = "6.2.24"
+version = "6.2.26"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2258,7 +2258,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-platform-win"
-version = "6.2.24"
+version = "6.2.26"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2281,7 +2281,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-rules"
-version = "6.2.24"
+version = "6.2.26"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3773,9 +3773,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.43"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "once_cell",
  "ring",
@@ -4755,7 +4755,7 @@ dependencies = [
  "tokio",
  "url",
  "windows-sys 0.60.2",
- "zip 4.6.1",
+ "zip",
 ]
 
 [[package]]
@@ -6655,9 +6655,9 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "3.0.0"
+version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12598812502ed0105f607f941c386f43d441e00148fce9dec3ca5ffb0bde9308"
+checksum = "caa8cd6af31c3b31c6631b8f483848b91589021b28fffe50adada48d4f4d2ed1"
 dependencies = [
  "arbitrary",
  "crc32fast",
@@ -6665,18 +6665,6 @@ dependencies = [
  "indexmap 2.14.0",
  "memchr",
  "zopfli",
-]
-
-[[package]]
-name = "zip"
-version = "4.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "caa8cd6af31c3b31c6631b8f483848b91589021b28fffe50adada48d4f4d2ed1"
-dependencies = [
- "arbitrary",
- "crc32fast",
- "indexmap 2.14.0",
- "memchr",
 ]
 
 [[package]]
