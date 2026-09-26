@@ -870,23 +870,32 @@ impl ControllerClient {
     /// Replaces the active Mihomo configuration without restarting the process.
     ///
     /// Overlay must already have copied the new generation into the running
-    /// `-d` workdir. Meta 1.19+ rejects a relative `path`, and an empty
-    /// `path` returns 204 without replacing `MATCH`. Pass the absolute path
-    /// of the overlaid `config.yaml`.
+    /// `-d` workdir. Meta 1.19+ rejects a relative `path`, an empty `path`
+    /// returns 204 without replacing `MATCH`, and on Windows a nested absolute
+    /// path under `SAFE_PATHS` is still rejected. Send the file bytes as
+    /// `payload` so the controller parses them without that path check.
+    /// Rule-provider names stay relative to the process home directory.
     ///
     /// # Errors
     ///
-    /// Returns an error when the controller request fails or does not return
-    /// HTTP 204 No Content.
+    /// Returns an error when the config file cannot be read, the controller
+    /// request fails, or it does not return HTTP 204 No Content.
     pub async fn hot_reload(&self, config_path: &Path) -> Result<(), MihomoError> {
+        let payload = tokio::fs::read_to_string(config_path)
+            .await
+            .map_err(|error| {
+                MihomoError::InvalidConfig(format!(
+                    "could not read the overlaid config for reload: {error}"
+                ))
+            })?;
         let response = self
             .client
             .put(format!("{}/configs?force=true", self.base_url))
             .timeout(Duration::from_secs(20))
             .bearer_auth(&self.secret)
             .json(&serde_json::json!({
-                "path": config_path,
-                "payload": "",
+                "path": "",
+                "payload": payload,
             }))
             .send()
             .await?;
@@ -2135,8 +2144,8 @@ mod tests {
                 b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response).await;
             request.contains("PUT /configs?force=true")
-                && request.contains(r#""path":"C:\\ProgramData\\iran-split\\runtime\\generations\\11111111-1111-1111-1111-111111111111\\config.yaml""#)
-                && request.contains(r#""payload":"""#)
+                && request.contains(r#""path":"""#)
+                && request.contains("mixed-port: 7890")
         });
         let client = ControllerClient::new(
             "127.0.0.1",
@@ -2144,12 +2153,9 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
         .expect("client");
-        client
-            .hot_reload(Path::new(
-                r"C:\ProgramData\iran-split\runtime\generations\11111111-1111-1111-1111-111111111111\config.yaml",
-            ))
-            .await
-            .expect("reload");
+        let config = std::env::temp_dir().join("biflow-hot-reload-config.yaml");
+        std::fs::write(&config, b"mixed-port: 7890\n").expect("config");
+        client.hot_reload(&config).await.expect("reload");
         assert!(server.await.expect("server"));
     }
 
@@ -2176,10 +2182,9 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
         .expect("client");
-        let error = client
-            .hot_reload(Path::new(r"C:\ProgramData\iran-split\runtime\config.yaml"))
-            .await
-            .expect_err("400");
+        let config = std::env::temp_dir().join("biflow-hot-reload-rejected.yaml");
+        std::fs::write(&config, b"mixed-port: 1\n").expect("config");
+        let error = client.hot_reload(&config).await.expect_err("400");
         let text = error.to_string();
         assert!(text.contains("400"), "{text}");
         assert!(text.contains("path is not a absolute path"), "{text}");

@@ -389,6 +389,10 @@ impl Supervisor {
                 "overlaid config hash does not match request".into(),
             ));
         }
+        // The live process home on Windows is the runtime root, not the
+        // generation directory. A nested absolute path is rejected, so the
+        // same files must also sit directly in that home for a payload reload.
+        overlay_generation_files(&source_root, &self.settings.runtime_dir)?;
         let status = process_status(Some(managed));
         drop(current);
         self.push_log("info", "runtime_generation_overlaid", BTreeMap::new())

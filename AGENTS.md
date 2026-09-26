@@ -105,9 +105,10 @@ If a required command fails or emits a warning from project code, fix it in the 
   stays “basic.” Close companion connections on apply. Chrome Secure DNS
   still bypasses Mihomo fake-ip.
 - Pin/list changes must overlay the new generation into the running Mihomo
-  workdir and `PUT /configs` with the absolute path of that overlaid
-  `config.yaml`. An empty `path` returns 204 and leaves the previous
-  `MATCH` loaded (ADR 0083, ADR 0100).
+  workdir and `PUT /configs` with that file's bytes in `payload`. An empty
+  `path` returns 204 and leaves the previous `MATCH` loaded. On Windows a
+  nested absolute path is rejected even when it sits under the runtime home,
+  so also copy the generation files onto that home (ADR 0083, ADR 0100).
   `StartMihomo` on a new generation id kills TUN, so Google (and every
   other tab) resolves over system DNS during the gap and comes back on
   MATCH/Hiddify instead of Windscribe. Close only connections for the
