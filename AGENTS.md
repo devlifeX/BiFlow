@@ -116,6 +116,11 @@ If a required command fails or emits a warning from project code, fix it in the 
   YAML rule-provider paths stay relative to `-d`. A PUT `path` of
   `config.yaml` is not absolute, so Meta 1.19+ answers HTTP 400
   (`path is not a absolute path`) and the pin never applies.
+  Log the generation id and the live `MATCH` proxy after every reload.
+  Clip the controller message at 4096 characters, not 200, or the
+  `SAFE_PATHS` home is cut off (ADR 0101). On Windows do not emit
+  `routing-mark`; give the side-tunnel adapter a high-metric default
+  route so bound traffic can leave without replacing the system route.
 - Enabled-client pins must keep the Mihomo group name even when that
   egress is missing from live handles. Rewriting them to `REJECT`/`DIRECT`
   made a Windscribe pin on `google.com` look like it never applied, and

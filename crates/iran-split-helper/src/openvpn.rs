@@ -101,7 +101,7 @@ impl Supervisor {
         let sanitized_profile =
             sanitized_profile_copy(&self.settings.runtime_dir, client_id, profile)?;
         let profile = sanitized_profile.as_path();
-        let (mut child, device) = self
+        let (mut child, opened) = self
             .launch_openvpn(OpenVpnLaunch {
                 binary: &binary,
                 profile,
@@ -112,6 +112,8 @@ impl Supervisor {
                 timeout_seconds,
             })
             .await?;
+        let device = opened.name;
+        let gateway = opened.gateway;
 
         let mut routes = facts.server_networks;
         routes.retain(|network| network.prefix_len() > 0);
@@ -123,7 +125,9 @@ impl Supervisor {
         }
         install_scoped_routes(&device, &routes).await?;
         revert_policy_routing(DEFAULT_MARK, DEFAULT_TABLE).await;
-        let policy_installed = install_policy_routing(&device, DEFAULT_MARK, DEFAULT_TABLE).await?;
+        let policy_installed =
+            install_policy_routing(&device, DEFAULT_MARK, DEFAULT_TABLE, gateway.as_deref())
+                .await?;
         self.side_tunnels.lock().await.insert(
             client_id,
             RunningSideTunnel {
@@ -243,7 +247,7 @@ impl Supervisor {
     async fn launch_openvpn(
         &self,
         launch: OpenVpnLaunch<'_>,
-    ) -> Result<(Child, String), HelperServiceError> {
+    ) -> Result<(Child, OpenedAdapter), HelperServiceError> {
         let OpenVpnLaunch {
             binary,
             profile,
@@ -306,15 +310,24 @@ fn sanitized_profile_copy(
     Ok(copy)
 }
 
+struct OpenedAdapter {
+    name: String,
+    gateway: Option<String>,
+}
+
 #[derive(Clone, Default)]
 struct OpenVpnSessionLog {
     last_line: String,
     failure: Option<String>,
     device: Option<String>,
+    gateway: Option<String>,
     ready: bool,
 }
 
 fn observe_openvpn_line(state: &mut OpenVpnSessionLog, line: &str) {
+    if let Some(gateway) = openvpn_route_gateway(line) {
+        state.gateway = Some(gateway);
+    }
     let line: String = redact(line).chars().take(200).collect();
     if let Some(name) = openvpn_adapter_name(&line) {
         state.device = Some(name);
@@ -333,6 +346,16 @@ fn observe_openvpn_line(state: &mut OpenVpnSessionLog, line: &str) {
 /// `OpenVPN` 2.7 opens an existing ovpn-dco adapter such as
 /// `OpenVPN Connect DCO Adapter` instead of the `tun-<id>` name older
 /// Wintun builds created.
+fn openvpn_route_gateway(line: &str) -> Option<String> {
+    let marker = "route-gateway ";
+    let start = line.find(marker)? + marker.len();
+    let token = line[start..].split([',', ' ', '\r', '\n']).next()?.trim();
+    token
+        .parse::<std::net::Ipv4Addr>()
+        .ok()
+        .map(|ip| ip.to_string())
+}
+
 fn openvpn_adapter_name(line: &str) -> Option<String> {
     let rest = line.split(" device ").nth(1)?.trim();
     let rest = rest.strip_suffix(" opened").unwrap_or(rest).trim();
@@ -393,7 +416,7 @@ async fn wait_for_device(
     device: &str,
     timeout_seconds: u64,
     log: &Arc<tokio::sync::Mutex<OpenVpnSessionLog>>,
-) -> Result<String, HelperServiceError> {
+) -> Result<OpenedAdapter, HelperServiceError> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds.max(1));
     loop {
         if let Ok(Some(status)) = child.try_wait() {
@@ -410,10 +433,16 @@ async fn wait_for_device(
         }
         let state = log.lock().await.clone();
         if state.ready {
-            return Ok(state.device.unwrap_or_else(|| device.to_owned()));
+            return Ok(OpenedAdapter {
+                name: state.device.unwrap_or_else(|| device.to_owned()),
+                gateway: state.gateway,
+            });
         }
         if !cfg!(windows) && device_is_up(device).await {
-            return Ok(device.to_owned());
+            return Ok(OpenedAdapter {
+                name: device.to_owned(),
+                gateway: state.gateway,
+            });
         }
         if tokio::time::Instant::now() >= deadline {
             let detail = state.failure.unwrap_or(state.last_line);
@@ -547,6 +576,7 @@ async fn install_policy_routing(
     device: &str,
     mark: u32,
     table: u32,
+    _gateway: Option<&str>,
 ) -> Result<bool, HelperServiceError> {
     let table = table.to_string();
     let mark = format!("{mark:#x}");
@@ -569,13 +599,48 @@ async fn install_policy_routing(
 }
 
 #[cfg(windows)]
-#[allow(clippy::unused_async)]
 async fn install_policy_routing(
-    _device: &str,
+    device: &str,
     _mark: u32,
     _table: u32,
+    gateway: Option<&str>,
 ) -> Result<bool, HelperServiceError> {
-    Ok(false)
+    // A high metric keeps this off the system default route. Sockets that
+    // Mihomo binds to this adapter can still use it, which is the Windows
+    // stand-in for the Linux fwmark table.
+    let interface = format!("interface={device}");
+    let mut attempts: Vec<Option<&str>> = Vec::new();
+    if gateway.is_some() {
+        attempts.push(gateway);
+    }
+    attempts.push(Some("0.0.0.0"));
+    attempts.push(None);
+    let mut last_detail = String::from("netsh add route failed");
+    for nexthop in attempts {
+        let mut args = vec![
+            "interface",
+            "ipv4",
+            "add",
+            "route",
+            "prefix=0.0.0.0/0",
+            interface.as_str(),
+        ];
+        let nexthop_arg = nexthop.map(|hop| format!("nexthop={hop}"));
+        if let Some(arg) = nexthop_arg.as_deref() {
+            args.push(arg);
+        }
+        args.extend_from_slice(&["metric=9000", "store=active"]);
+        let output = run_command("netsh", &args).await;
+        if interface_route_accepted(output.success, &output.stderr) {
+            return Ok(true);
+        }
+        if let Some(detail) = output.stderr.lines().find(|line| !line.trim().is_empty()) {
+            last_detail = detail.chars().take(180).collect();
+        }
+    }
+    Err(HelperServiceError::SideTunnel(format!(
+        "the side-tunnel interface route could not be installed: {last_detail}"
+    )))
 }
 
 #[cfg(unix)]
@@ -623,7 +688,10 @@ async fn revert_policy_routing(mark: u32, table: u32) {
 
 #[cfg(windows)]
 #[allow(clippy::unused_async)]
-async fn revert_policy_routing(_mark: u32, _table: u32) {}
+async fn revert_policy_routing(_mark: u32, _table: u32) {
+    // The interface name is not available here. The route is active-only
+    // (`store=active`) and disappears when the adapter closes.
+}
 
 #[cfg(unix)]
 async fn ip_command(args: &[&str]) -> Option<String> {
@@ -641,6 +709,46 @@ async fn ip_command(args: &[&str]) -> Option<String> {
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn interface_route_accepted(success: bool, text: &str) -> bool {
+    success || text.to_ascii_lowercase().contains("already exists")
+}
+
+#[cfg(windows)]
+struct CommandText {
+    success: bool,
+    stderr: String,
+}
+
+#[cfg(windows)]
+async fn run_command(binary: &str, args: &[&str]) -> CommandText {
+    let output = match Command::new(binary)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(error) => {
+            return CommandText {
+                success: false,
+                stderr: error.to_string(),
+            };
+        }
+    };
+    let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.trim().is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&stdout);
+    }
+    CommandText {
+        success: output.status.success(),
+        stderr: text,
+    }
 }
 
 #[cfg(windows)]
@@ -708,6 +816,19 @@ mod tests {
     }
 
     #[test]
+    fn interface_route_treats_an_existing_object_as_success() {
+        assert!(interface_route_accepted(true, ""));
+        assert!(interface_route_accepted(
+            false,
+            "The object already exists."
+        ));
+        assert!(!interface_route_accepted(
+            false,
+            "The requested operation requires elevation."
+        ));
+    }
+
+    #[test]
     fn openvpn_log_keeps_the_dco_adapter_and_the_last_line() {
         let mut state = OpenVpnSessionLog::default();
         observe_openvpn_line(
@@ -730,6 +851,15 @@ mod tests {
             .unwrap_or("")
             .contains("tcp-nodelay"));
         assert!(!state.ready);
+        observe_openvpn_line(
+            &mut state,
+            "PUSH_REPLY,redirect-gateway def1,route-gateway 10.146.28.1,ifconfig 10.146.28.212 255.255.252.0",
+        );
+        assert_eq!(state.gateway.as_deref(), Some("10.146.28.1"));
+        assert_eq!(
+            openvpn_route_gateway("route-gateway not-an-ip").as_deref(),
+            None
+        );
         observe_openvpn_line(&mut state, "Initialization Sequence Completed");
         assert!(state.ready);
         assert_eq!(

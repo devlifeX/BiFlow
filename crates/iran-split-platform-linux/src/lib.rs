@@ -338,11 +338,35 @@ impl LinuxBackend {
             .hot_reload(config_path)
             .await
             .map_err(|error| CoreError::MihomoStartFailed(error.to_string()))?;
+        let generation_id = config_path
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .map_or_else(
+                || "unknown".to_owned(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+        let match_proxy = match controller.live_match_proxy().await {
+            Ok(proxy) => proxy.unwrap_or_else(|| "missing".into()),
+            Err(cause) => {
+                warn!(
+                    event = "mihomo.live_match_failed",
+                    section = "rules",
+                    initiator = "linux_platform_backend",
+                    cause = %cause,
+                    generation_id = %generation_id,
+                    trace_route = "engine->linux_platform_backend->mihomo_controller",
+                    "could not read the live MATCH rule after reload"
+                );
+                "unavailable".into()
+            }
+        };
         info!(
             event = "mihomo.hot_reload_succeeded",
             section = "rules",
             initiator = "linux_platform_backend",
             cause = "controller_204",
+            generation_id = %generation_id,
+            match_proxy = %match_proxy,
             trace_route = "engine->linux_platform_backend->mihomo_controller",
             "live Mihomo config reloaded"
         );
@@ -552,22 +576,18 @@ impl LinuxBackend {
         let mut handles = Vec::new();
         for client in config.enabled_clients() {
             let required = config.default_route.client_id() == Some(client.id);
-            let started = if client.preset == PresetId::Hiddify {
-                self.start_hiddify_client(client, required, &cancel).await
-            } else {
-                match client.spec().kind {
-                    EgressKind::LocalProxy => {
-                        self.start_local_proxy_client(client, required, &cancel)
-                            .await
-                    }
-                    EgressKind::OwnedSideTunnel => {
-                        self.start_openvpn_client(client, cancel.clone(), &handles)
-                            .await
-                    }
-                    EgressKind::Unsupported => Err(CoreError::ConfigInvalid(
-                        "this catalog entry cannot be started".into(),
-                    )),
+            let started = match client.spec().kind {
+                EgressKind::LocalProxy => {
+                    self.start_local_proxy_client(client, required, &cancel)
+                        .await
                 }
+                EgressKind::OwnedSideTunnel => {
+                    self.start_openvpn_client(client, cancel.clone(), &handles)
+                        .await
+                }
+                EgressKind::Unsupported => Err(CoreError::ConfigInvalid(
+                    "this catalog entry cannot be started".into(),
+                )),
             };
             match started {
                 Ok(handle) => {
@@ -668,49 +688,6 @@ impl LinuxBackend {
         Ok(recovered)
     }
 
-    async fn start_hiddify_client(
-        &self,
-        client: &ClientInstance,
-        required: bool,
-        cancel: &CancellationToken,
-    ) -> Result<EgressHandle, CoreError> {
-        let config = self.config.read().await.clone();
-        let (host, port) = config.hiddify_endpoint();
-        if let Some(exit_ip) = self.reuse_cached_egress(client.id, &host, port).await {
-            if required {
-                *self.egress_exit_ip.lock().await = Some(exit_ip);
-            }
-            return synthesized_local_handle(client)
-                .ok_or_else(|| CoreError::ConfigInvalid("hiddify handle is missing".into()));
-        }
-        self.launch_hiddify_if_needed(&config, cancel).await?;
-        let exit_ip = if required {
-            self.probe_hiddify_until_ready(&config, cancel.clone())
-                .await?
-        } else {
-            // An optional Hiddify must not hold Connect for the 45s retry
-            // window (measured 21s stalls in production debug.log). One quick
-            // probe decides; ADR 0076 recovery attaches it once it serves.
-            let (host, port) = config.hiddify_endpoint();
-            probe_hiddify_egress(&host, port, Duration::from_secs(3))
-                .await
-                .map_err(|error| {
-                    CoreError::Platform(format!(
-                        "hiddify egress probe failed on {host}:{port}: {error}"
-                    ))
-                })?
-        };
-        self.client_exit_ips
-            .lock()
-            .await
-            .insert(client.id, exit_ip.clone());
-        if required {
-            *self.egress_exit_ip.lock().await = Some(exit_ip);
-        }
-        synthesized_local_handle(client)
-            .ok_or_else(|| CoreError::ConfigInvalid("hiddify handle is missing".into()))
-    }
-
     async fn start_local_proxy_client(
         &self,
         client: &ClientInstance,
@@ -747,7 +724,12 @@ impl LinuxBackend {
         }
         // ADR 0018: every local-proxy egress is verified before the TUN starts,
         // so pinned or MATCH traffic cannot blackhole into a dead proxy.
-        let exit_ip = probe_hiddify_egress(&host, port, Duration::from_secs(3))
+        let probe_for = if required {
+            client_start_timeout(client)
+        } else {
+            Duration::from_secs(3)
+        };
+        let exit_ip = probe_hiddify_egress(&host, port, probe_for)
             .await
             .map_err(|error| {
                 CoreError::Platform(format!(
@@ -776,6 +758,9 @@ impl LinuxBackend {
         };
         let resolved = match executable {
             ExecutableSetting::Path(path) => path.is_file().then(|| path.clone()),
+            ExecutableSetting::Auto if client.preset == PresetId::Hiddify => {
+                Self::discover_hiddify(&self.config.read().await.clone(), &self.paths.user_data_dir)
+            }
             ExecutableSetting::Auto => discover_local_proxy_binary(&client.spec()),
         };
         let Some(binary) = resolved else {
@@ -791,7 +776,11 @@ impl LinuxBackend {
             .kill_on_drop(false)
             .spawn()
             .map_err(|error| CoreError::Platform(error.to_string()))?;
-        self.launched_clients.lock().await.push(child);
+        if client.preset == PresetId::Hiddify {
+            *self.launched_hiddify.lock().await = Some(child);
+        } else {
+            self.launched_clients.lock().await.push(child);
+        }
         Ok(())
     }
 
@@ -1187,6 +1176,49 @@ impl LinuxBackend {
                 () = cancel.cancelled() => return Err(CoreError::Cancelled),
                 () = tokio::time::sleep(Duration::from_millis(500)) => {}
             }
+        }
+    }
+
+    async fn record_default_side_tunnel_exit(&self, config: &AppConfig) {
+        let Some(client_id) = config.default_route.client_id() else {
+            return;
+        };
+        let side_tunnel = config.enabled_clients().into_iter().any(|client| {
+            client.id == client_id && client.spec().kind == EgressKind::OwnedSideTunnel
+        });
+        if !side_tunnel {
+            return;
+        }
+        match probe_hiddify_egress(
+            &config.mihomo.controller_host,
+            config.mihomo.mixed_port,
+            Duration::from_secs(8),
+        )
+        .await
+        {
+            Ok(ip) => {
+                info!(
+                    event = "mihomo.exit_ip_probed",
+                    section = "runtime_health",
+                    initiator = "linux_platform_backend",
+                    cause = "default_side_tunnel",
+                    trace_route = "desktop_engine->linux_platform_backend->mihomo_mixed",
+                    "measured the default side-tunnel exit address through Mihomo"
+                );
+                self.client_exit_ips
+                    .lock()
+                    .await
+                    .insert(client_id, ip.clone());
+                *self.egress_exit_ip.lock().await = Some(ip);
+            }
+            Err(cause) => warn!(
+                event = "mihomo.exit_ip_probe_failed",
+                section = "runtime_health",
+                initiator = "linux_platform_backend",
+                cause = %cause,
+                trace_route = "desktop_engine->linux_platform_backend->mihomo_mixed",
+                "could not measure the default side-tunnel exit address"
+            ),
         }
     }
 }
@@ -1729,6 +1761,7 @@ impl PlatformBackend for LinuxBackend {
         if cancel.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
+        self.record_default_side_tunnel_exit(&config).await;
         let exit_ip = self.egress_exit_ip.lock().await.clone();
         // The pre-TUN egress probe is only mandatory when unmatched traffic
         // goes to a local proxy; a Direct or side-tunnel default has no
@@ -1811,6 +1844,17 @@ fn platform_error(error: &std::io::Error) -> CoreError {
 /// PATH lookup must ignore case and must also try those well-known paths,
 /// because a packaged Tauri PATH often omits `/usr/bin` or only has the
 /// lowercase symlink.
+fn client_start_timeout(client: &ClientInstance) -> Duration {
+    let ClientConfig::LocalProxy {
+        start_timeout_seconds,
+        ..
+    } = &client.config
+    else {
+        return Duration::from_secs(15);
+    };
+    Duration::from_secs((*start_timeout_seconds).max(3))
+}
+
 fn discover_local_proxy_binary(spec: &iran_split_config::PresetSpec) -> Option<PathBuf> {
     let directories = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())

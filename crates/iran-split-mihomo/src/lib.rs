@@ -375,7 +375,11 @@ pub fn generate_config_with_handles(
                 port: outbound.port,
                 udp: outbound.udp,
                 interface_name: outbound.interface_name.clone(),
-                routing_mark: outbound.routing_mark,
+                // `routing-mark` is a Linux fwmark. On Windows it does not
+                // steer the socket and can drop the dial.
+                routing_mark: (platform != Platform::Windows)
+                    .then_some(outbound.routing_mark)
+                    .flatten(),
             })
             .collect(),
         proxy_groups: routing
@@ -854,6 +858,19 @@ impl ControllerClient {
         )
     }
 
+    /// Returns the proxy name of the live `MATCH` rule.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the controller request fails or the rule list
+    /// cannot be decoded.
+    pub async fn live_match_proxy(&self) -> Result<Option<String>, MihomoError> {
+        let value = Self::require_controller_ok(self.get("/rules").send().await?)?
+            .json::<Value>()
+            .await?;
+        Ok(match_proxy_from_rules(&value))
+    }
+
     /// Summarizes the readiness and rule count of configured rule providers.
     ///
     /// # Errors
@@ -1083,6 +1100,21 @@ impl ControllerClient {
     }
 }
 
+fn match_proxy_from_rules(value: &Value) -> Option<String> {
+    let rules = value.get("rules")?.as_array()?;
+    rules.iter().rev().find_map(|rule| {
+        let kind = rule.get("type")?.as_str()?;
+        if !kind.eq_ignore_ascii_case("match") {
+            return None;
+        }
+        rule.get("proxy")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|proxy| !proxy.is_empty())
+            .map(str::to_owned)
+    })
+}
+
 fn controller_rejected_secret(error: &MihomoError) -> bool {
     match error {
         MihomoError::Unauthorized => true,
@@ -1103,7 +1135,7 @@ async fn controller_reload_error(response: reqwest::Response) -> MihomoError {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|message| !message.is_empty())
-            .map(|message| message.chars().take(200).collect::<String>())
+            .map(|message| message.chars().take(4_096).collect::<String>())
     });
     match detail {
         Some(detail) => MihomoError::ReloadRejected { status, detail },
@@ -1814,6 +1846,20 @@ mod tests {
     }
 
     #[test]
+    fn match_proxy_reads_the_live_match_rule() {
+        let value = serde_json::json!({
+            "rules": [
+                {"type": "DomainSuffix", "proxy": "DIRECT"},
+                {"type": "Match", "proxy": "client-5b836461-a4d9-40a4-ab7b-7cc71e830bee"}
+            ]
+        });
+        assert_eq!(
+            match_proxy_from_rules(&value).as_deref(),
+            Some("client-5b836461-a4d9-40a4-ab7b-7cc71e830bee")
+        );
+    }
+
+    #[test]
     fn windscribe_google_pin_covers_the_apex_and_keeps_the_client_group() {
         let mut app = AppConfig::default();
         let windscribe = ClientInstance::from_preset(PresetId::Windscribe);
@@ -1832,7 +1878,7 @@ mod tests {
             Platform::Linux,
             &paths(),
             &pinned,
-            &[hiddify_handle, windscribe_handle],
+            &[hiddify_handle.clone(), windscribe_handle.clone()],
         )
         .expect("config");
         assert!(generated
@@ -1841,6 +1887,19 @@ mod tests {
         assert!(!generated.yaml.contains("DOMAIN-SUFFIX,google.com,DIRECT"));
         assert!(!generated.yaml.contains("DOMAIN-SUFFIX,google.com,REJECT"));
         assert!(generated.yaml.contains("interface-name: tun-windscribe"));
+        let windows = generate_config_with_handles(
+            &app,
+            Platform::Windows,
+            &paths(),
+            &pinned,
+            &[hiddify_handle, windscribe_handle],
+        )
+        .expect("windows config");
+        assert!(windows.yaml.contains("interface-name: tun-windscribe"));
+        assert!(
+            !windows.yaml.contains("routing-mark:"),
+            "windows must not emit a linux fwmark"
+        );
         assert!(generated
             .yaml
             .contains(&format!("MATCH,{}", app.clients[0].group_name())));
