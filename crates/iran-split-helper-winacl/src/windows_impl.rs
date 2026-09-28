@@ -1,4 +1,4 @@
-use super::HELPER_PIPE_SDDL;
+use super::{HELPER_PIPE_SDDL, RUNTIME_PIPE_SDDL};
 use std::{ffi::c_void, io, mem::size_of, ptr};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use windows::{
@@ -35,8 +35,26 @@ impl Drop for OwnedSecurityDescriptor {
 /// Returns an I/O error when the security descriptor cannot be built or the
 /// pipe cannot be created.
 pub fn create_helper_server(pipe_name: &str, first_instance: bool) -> io::Result<NamedPipeServer> {
+    create_server(pipe_name, first_instance, HELPER_PIPE_SDDL)
+}
+
+/// Creates a local runtime named pipe accessible only to its owner and SYSTEM.
+///
+/// # Errors
+///
+/// Returns an I/O error when the security descriptor cannot be built or the
+/// pipe cannot be created.
+pub fn create_runtime_server(pipe_name: &str, first_instance: bool) -> io::Result<NamedPipeServer> {
+    create_server(pipe_name, first_instance, RUNTIME_PIPE_SDDL)
+}
+
+fn create_server(
+    pipe_name: &str,
+    first_instance: bool,
+    sddl_value: &str,
+) -> io::Result<NamedPipeServer> {
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
-    let sddl = HSTRING::from(HELPER_PIPE_SDDL);
+    let sddl = HSTRING::from(sddl_value);
     // SAFETY: `sddl` stays alive for the call; `descriptor` receives a
     // LocalAlloc pointer that `OwnedSecurityDescriptor` frees.
     unsafe {

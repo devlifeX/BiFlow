@@ -21,6 +21,13 @@ struct Arguments {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Reads the live stack snapshot from the GUI-owned runtime.
+    Status,
+    /// Requests Connect from the GUI-owned runtime.
+    Connect {
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+    },
     /// Runs a deterministic lifecycle vertical slice without privileged networking.
     Demo,
     /// Validates a configuration TOML file.
@@ -40,6 +47,13 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Arguments::parse().command {
+        Command::Status => runtime_command(iran_split_ipc::runtime::RuntimeCommand::Status).await?,
+        Command::Connect { timeout } => {
+            runtime_command(iran_split_ipc::runtime::RuntimeCommand::Connect {
+                timeout_seconds: timeout,
+            })
+            .await?;
+        }
         Command::Demo => demo().await?,
         Command::ValidateConfig { path } => {
             let source = std::fs::read_to_string(path)?;
@@ -87,6 +101,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &HashSet::new(),
             );
             println!("{}", serde_json::to_string_pretty(&rules.decide(&target)?)?);
+        }
+    }
+    Ok(())
+}
+
+async fn runtime_command(
+    command: iran_split_ipc::runtime::RuntimeCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response = iran_split_ipc::runtime::request(command).await?;
+    match response.result {
+        Ok(result) => println!("{}", serde_json::to_string(&result)?),
+        Err(message) => {
+            eprintln!("runtime request failed: {message}");
+            std::process::exit(1);
         }
     }
     Ok(())

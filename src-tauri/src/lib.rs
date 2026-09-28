@@ -3396,6 +3396,58 @@ fn initialize_diagnostics() {
         .unwrap_or_else(|error| panic!("BiFlow debug.log initialization failed: {error}"));
 }
 
+async fn handle_runtime_request<R: Runtime>(
+    app: AppHandle<R>,
+    request: iran_split_ipc::runtime::RuntimeRequest,
+) -> iran_split_ipc::runtime::RuntimeReply {
+    use iran_split_ipc::runtime::{reply, RuntimeCommand, RuntimeResult};
+
+    let result = match request.command {
+        RuntimeCommand::Status => services(&app).map(|services| {
+            let snapshot = services.engine.snapshot();
+            RuntimeResult::Status {
+                phase: format!("{:?}", snapshot.phase),
+                operation_id: snapshot.operation_id,
+            }
+        }),
+        RuntimeCommand::Connect { timeout_seconds } => {
+            if timeout_seconds == 0 || timeout_seconds > 300 {
+                Err("connect timeout must be between 1 and 300 seconds".to_owned())
+            } else {
+                diagnostics::trace_action("stack", "local_ipc", "connect", async {
+                    start_stack_inner(&app, Some(timeout_seconds)).await
+                })
+                .await
+                .map(|accepted| RuntimeResult::ConnectAccepted {
+                    operation_id: accepted.operation_id,
+                })
+            }
+        }
+    };
+    reply(&request, result)
+}
+
+fn start_runtime_ipc_server<R: Runtime>(handle: AppHandle<R>) {
+    tauri::async_runtime::spawn(async move {
+        let handler_app = handle.clone();
+        let result = iran_split_ipc::runtime::serve(move |request| {
+            let request_app = handler_app.clone();
+            async move { handle_runtime_request(request_app, request).await }
+        })
+        .await;
+        if let Err(cause) = result {
+            error!(
+                event = "runtime_ipc.stopped",
+                section = "runtime_ipc",
+                initiator = "application_startup",
+                cause = %cause,
+                trace_route = "application_process->runtime_ipc_server",
+                "local runtime IPC server stopped"
+            );
+        }
+    });
+}
+
 fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let services = create_services(app.handle()).map_err(|cause| {
         error!(
@@ -3414,6 +3466,7 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
     let data_dir = services.paths.data.clone();
     let handle = app.handle().clone();
     app.manage(services);
+    start_runtime_ipc_server(app.handle().clone());
     tauri::async_runtime::spawn(async move {
         while snapshots.changed().await.is_ok() {
             let snapshot = snapshots.borrow().clone();

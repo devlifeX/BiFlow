@@ -9,11 +9,16 @@ publish.workspace = true
 [dependencies]
 bytes.workspace = true
 chrono.workspace = true
+iran-split-helper-winacl = { path = "../iran-split-helper-winacl" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

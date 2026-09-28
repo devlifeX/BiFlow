@@ -429,3 +429,33 @@ already in progress"`. Cache the last `UpdateInfo` (never log asset URLs).
 - Cargo normalizes hyphens in target names to underscores when creating Windows
   PDB files. Give a package's binary and library distinct target names or Cargo
   emits an output-collision warning during every build (ADR 0107).
+- Tokio Windows named-pipe `ClientOptions::open` is synchronous; do not pass its
+  `Result` to `tokio::time::timeout` as though it were a future. Keep the
+  asynchronous timeout around framed reads and writes, and compile the Windows
+  IPC branch on Windows CI.
+- Starting a background IPC listener inside Tauri `setup_application` can push
+  that lifecycle function over Clippy's `too_many_lines` limit. Extract the
+  listener startup and its structured error event into a focused helper.
+- Test-only IPC endpoints are platform-specific; gate the Unix temporary
+  directory binding with `cfg(unix)` so Windows `-D warnings` does not report
+  the variable unused.
+- A sequential Tokio named-pipe server can briefly return Windows error 231
+  (`ERROR_PIPE_BUSY`) while the previous client disconnects. Retry that code
+  within a bounded deadline; treat missing pipe errors as runtime unavailable.
+- A WSL build can fail with `bash\r` when a nested shell entrypoint has CRLF,
+  even when `build.sh` itself is LF. Pin every `*.sh` file to LF in
+  `.gitattributes` and normalize tracked shell scripts before retrying.
+- Windows builds do not compile Unix-only branches such as stale Unix socket
+  cleanup. Import `FileTypeExt` alongside `MetadataExt` and require native Linux
+  tests/builds for runtime IPC changes.
+- Unix-only imports inside a `cfg(unix)` block must appear before statements in
+  that block; Clippy still enforces `items_after_statements` on Linux targets.
+- In WSL, non-interactive `sudo` may wait for a password during the Linux build;
+  install only the missing documented packages as the distro root user, then
+  build as the regular user. Use `--no-install-recommends` when an unrelated
+  recommended package download fails but required development packages remain
+  available.
+- A Windows `node_modules` tree may lack Tauri's Linux optional CLI package
+  when a build is invoked from WSL. Run `pnpm install --frozen-lockfile` in
+  that Linux environment before retrying; do not treat a completed Cargo link
+  as a completed Tauri build.
