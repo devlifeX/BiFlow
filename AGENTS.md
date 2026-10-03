@@ -71,6 +71,88 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- A source-contract scanner must consume a module's cfg attributes before
+  scanning its first test. `cfg(test)` is not a platform restriction, and
+  `cfg(any(windows, test))` runs on every test host. Keep an in-memory negative
+  regression that restores the original Windows-only assertion in the first
+  staging test, plus fixtures checking item scope and Windows-only exemptions
+  (ADR 0115).
+
+- A guard placed at the _caller_ of a privileged installer is not a guard on
+  it. The development refusal lived only in the `install_helper` Tauri command,
+  while `prepare_stack_start` calls `helper_install::install_helper` directly
+  for a missing helper and for a version-mismatch reinstall — and the Windows
+  placeholder pipe makes the helper read as unavailable, which steers Connect
+  straight into the production SYSTEM installer. Put the refusal in the
+  installer itself and pin it with a source contract that fails when a
+  per-platform elevation routine is called from anywhere else.
+- A test that asserts a predicate is not a test of the behavior. Checking
+  `is_development()` proves nothing about whether a _route_ is refused; assert
+  on the decision the installer actually consumes, and name the refused route in
+  the message so the log identifies the caller.
+- `cargo test` must pass **with `BIFLOW_DEV_PROFILE` set** as well as bare.
+  That variable is the normal way this project is developed, so a unit test
+  reading the process environment fails for exactly the developer most likely
+  to run it. Give every policy a pure `*_for` core taking explicit inputs and
+  assert on that; keep the `OnceLock` wrapper to one untested line.
+- "Never use the production X" needs an explicit fallback, not the production
+  default. Returning the installed Mihomo binary when no development override
+  exists runs production's binary against development configuration while the
+  dependency card claims everything is fine. Fall back inside the user's data
+  root so the dependency reads as missing and `./dev.sh` is the fix.
+- A reusable library must never substitute a relative path for a missing host
+  directory. `dirs::config_dir()` returning `None` became `"."`, which would
+  write the config document and the permanent `debug.log` beside the working
+  directory. Fail loudly instead; only a development run may ignore the host
+  directories, because it discards them anyway.
+- A reusable library crate must never read `BIFLOW_DEV_PROFILE` itself.
+  `ConfigStore::load` hid the environment read inside the one place that
+  actually changed behavior (the Mihomo port/TUN remap), so isolation was
+  untestable, uncontrollable by an embedder, and made `cargo test` depend on
+  the ambient environment of the machine running it. Resolve profile identity
+  once at an explicit process boundary into a `ResolvedProfile` and pass it
+  down (ADR 0115). Related: the port/TUN remap is persisted and one-way, so a
+  store that loads a document it previously isolated must not be expected to
+  restore production identity — assert that the reload stays isolated instead.
+- Profile identity was reconstructed independently in seven places, so
+  `debug.log` and the config file agreed by coincidence rather than by
+  construction. When two consumers must agree about a path, derive both from
+  one policy and assert the agreement; a test comparing two independently
+  computed paths proves nothing. `create_services` now also checks the open
+  log against the resolved profile and records
+  `profile.diagnostics_path_mismatch` (ADR 0115).
+- A "this must never be used in development" placeholder still has to sit
+  _outside_ the production tree. `C:\ProgramData\iran-split\runtime-dev-missing`
+  looked obviously unreachable but nested inside the privileged runtime the
+  installed app owns, so a later bug could have written there. Assert
+  non-inequality **and** non-containment of the placeholder against the
+  production location (ADR 0115).
+- A `BIFLOW_DEV_PROFILE` run on Windows had no development override at all, so
+  it isolated its config, ports, and TUN and then drove the installed SYSTEM
+  helper, staging generations into the machine-wide privileged
+  `C:\ProgramData\iran-split\staging`. `dev.sh` provisions a per-user
+  transient helper on Linux only, so Windows has no real alternative — but
+  "cannot isolate" must mean "report unavailable", never "inherit
+  production". Point the pipe at an unreachable name and stage under the
+  development profile instead (ADR 0115).
+- An item defined `#[cfg(any(windows, test))]` _compiles_ on Linux, so a test
+  asserting against a `WINDOWS_*` constant fails there on the value, not on the
+  type. No host compiler catches that. Compare against the platform's own
+  production constant, and keep a `WINDOWS_*` reference out of an
+  unconditional test — a source contract catches it before CI does (ADR 0115).
+- A discovery step upstream of a policy decision silently bypasses the policy.
+  `first_existing(mihomo_candidates(..))` includes `PATH`, so it ran before
+  the profile rule and returned a production `mihomo.exe`; testing the policy
+  function in isolation proved nothing because the call order was the bug.
+  Pass the _discovered_ result into the policy, and let only the profile
+  override decide the answer (ADR 0115).
+- A shell entrypoint that cannot share the Rust implementation is still a
+  contract. `dev.sh` and `iran-split-config::profile` must agree on the
+  variable names, the export ordering relative to `prepare_dev_helper`, and
+  the `config`/`data`/`cache` subdirectory layout, or the helper and the app
+  resolve different profiles. Pin all three in
+  `scripts/dev-profile-contract.test.mjs`; strip comments first, or a
+  documented variable satisfies the assertion.
 - A delete-pending Windows `debug.log` can still pass `Path::exists()` while
   its append handle is open. Close the flushed handle before testing the
   path, reopen only in append mode, and keep the recreation signal so the

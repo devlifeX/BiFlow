@@ -588,7 +588,7 @@ pub(super) async fn clock_info() -> ClockInfo {
 pub(super) fn install_info(kind: &'static str) -> InstallInfo {
     InstallInfo {
         kind,
-        dev_profile: std::env::var_os("BIFLOW_DEV_PROFILE").is_some_and(|value| !value.is_empty()),
+        dev_profile: crate::profile::is_development(),
         elevated: None,
         uptime_minutes: None,
         locale: std::env::var("LC_ALL")

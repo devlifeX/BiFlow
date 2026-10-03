@@ -7,6 +7,8 @@ mod github_update;
 mod helper_install;
 mod hiddify_reset;
 mod network;
+mod platform_paths;
+mod profile;
 mod profile_picker;
 mod reachability;
 mod traffic;
@@ -18,7 +20,8 @@ use chrono::Utc;
 #[cfg(target_os = "windows")]
 use iran_split_clients::{process_bypass_union, DriverPlatform};
 use iran_split_config::{
-    AppConfig, ClientId, ConfigStore, DefaultRoute, PresetId, ValidationIssue,
+    AppConfig, ClientId, ConfigStore, DefaultRoute, PresetId, RuntimeProfile, UserResources,
+    ValidationIssue,
 };
 use iran_split_core::{
     ComponentPhase, Engine, LifecycleBusy, OperationAccepted, PlatformBackend, StackPhase,
@@ -59,7 +62,7 @@ use iran_split_platform_linux::{LinuxBackend as NativeBackend, LinuxPaths};
 #[cfg(target_os = "macos")]
 use iran_split_platform_macos::{MacosBackend as NativeBackend, MacosPaths};
 #[cfg(target_os = "windows")]
-use iran_split_platform_win::{WindowsBackend as NativeBackend, WindowsPaths, HELPER_PIPE};
+use iran_split_platform_win::{WindowsBackend as NativeBackend, WindowsPaths};
 
 #[derive(Debug)]
 struct AppServices {
@@ -194,170 +197,9 @@ struct AppPaths {
     config: PathBuf,
     data: PathBuf,
     cache: PathBuf,
+    debug_log: PathBuf,
     resources: PathBuf,
     dependencies: PathBuf,
-}
-
-#[cfg(target_os = "linux")]
-const PRODUCTION_HELPER_SOCKET: &str = "/run/iran-split/helper.sock";
-#[cfg(target_os = "linux")]
-const PRODUCTION_SYSTEM_RUNTIME: &str = "/var/lib/iran-split";
-
-/// Written by the elevated installer in `iran-split-helper::install` (ADR 0029).
-#[cfg(target_os = "windows")]
-const WINDOWS_SYSTEM_RUNTIME: &str = r"C:\ProgramData\iran-split\runtime";
-#[cfg(target_os = "windows")]
-const WINDOWS_PROGRAMDATA_MIHOMO: &str = r"C:\ProgramData\iran-split\bin\mihomo.exe";
-
-/// The pipe and system runtime root are fixed by the SYSTEM scheduled task, so
-/// unlike Linux there is no development override to apply.
-#[cfg(target_os = "windows")]
-fn windows_helper_paths() -> (String, PathBuf) {
-    (
-        HELPER_PIPE.to_owned(),
-        PathBuf::from(WINDOWS_SYSTEM_RUNTIME),
-    )
-}
-
-/// The helper copies Mihomo next to itself, so that copy is the fallback when
-/// the user has not installed one under the app data directory.
-#[cfg(target_os = "windows")]
-fn windows_programdata_mihomo() -> PathBuf {
-    PathBuf::from(WINDOWS_PROGRAMDATA_MIHOMO)
-}
-
-#[cfg(target_os = "linux")]
-fn linux_helper_paths() -> (PathBuf, PathBuf) {
-    #[cfg(debug_assertions)]
-    {
-        linux_helper_paths_with_overrides(
-            std::env::var_os("BIFLOW_DEV_PROFILE"),
-            std::env::var_os("BIFLOW_DEV_HELPER_SOCKET"),
-            std::env::var_os("BIFLOW_DEV_SYSTEM_RUNTIME"),
-        )
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        (
-            PathBuf::from(PRODUCTION_HELPER_SOCKET),
-            PathBuf::from(PRODUCTION_SYSTEM_RUNTIME),
-        )
-    }
-}
-
-#[cfg(all(target_os = "linux", debug_assertions))]
-fn linux_helper_paths_with_overrides(
-    profile: Option<std::ffi::OsString>,
-    socket: Option<std::ffi::OsString>,
-    runtime: Option<std::ffi::OsString>,
-) -> (PathBuf, PathBuf) {
-    if profile.is_some_and(|value| !value.is_empty()) {
-        return (
-            socket.map_or_else(
-                || PathBuf::from("/run/biflow-dev/missing-helper.sock"),
-                PathBuf::from,
-            ),
-            runtime.map_or_else(
-                || PathBuf::from("/run/biflow-dev/missing-runtime"),
-                PathBuf::from,
-            ),
-        );
-    }
-    (
-        socket.map_or_else(|| PathBuf::from(PRODUCTION_HELPER_SOCKET), PathBuf::from),
-        runtime.map_or_else(|| PathBuf::from(PRODUCTION_SYSTEM_RUNTIME), PathBuf::from),
-    )
-}
-
-#[cfg(target_os = "linux")]
-fn linux_mihomo_binary(default: PathBuf) -> PathBuf {
-    #[cfg(debug_assertions)]
-    {
-        linux_mihomo_binary_with_override(default, std::env::var_os("BIFLOW_DEV_MIHOMO_BINARY"))
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        default
-    }
-}
-
-#[cfg(all(target_os = "linux", debug_assertions))]
-fn linux_mihomo_binary_with_override(
-    default: PathBuf,
-    override_path: Option<std::ffi::OsString>,
-) -> PathBuf {
-    override_path.map_or(default, PathBuf::from)
-}
-
-/// Helper socket and system runtime root on macOS. The privileged helper runs
-/// as a launchd daemon under `/Library/Application Support/BiFlow`; the socket
-/// lives next to it so only root and the authorized group can reach it.
-#[cfg(target_os = "macos")]
-const MACOS_HELPER_SOCKET: &str = "/Library/Application Support/BiFlow/helper.sock";
-#[cfg(target_os = "macos")]
-const MACOS_SYSTEM_RUNTIME: &str = "/Library/Application Support/BiFlow/runtime";
-
-#[cfg(target_os = "macos")]
-fn macos_helper_paths() -> (PathBuf, PathBuf) {
-    #[cfg(debug_assertions)]
-    {
-        macos_helper_paths_with_overrides(
-            std::env::var_os("BIFLOW_DEV_PROFILE"),
-            std::env::var_os("BIFLOW_DEV_HELPER_SOCKET"),
-            std::env::var_os("BIFLOW_DEV_SYSTEM_RUNTIME"),
-        )
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        (
-            PathBuf::from(MACOS_HELPER_SOCKET),
-            PathBuf::from(MACOS_SYSTEM_RUNTIME),
-        )
-    }
-}
-
-#[cfg(all(target_os = "macos", debug_assertions))]
-fn macos_helper_paths_with_overrides(
-    profile: Option<std::ffi::OsString>,
-    socket: Option<std::ffi::OsString>,
-    runtime: Option<std::ffi::OsString>,
-) -> (PathBuf, PathBuf) {
-    if profile.is_some_and(|value| !value.is_empty()) {
-        return (
-            socket.map_or_else(
-                || PathBuf::from("/tmp/biflow-dev-missing-helper.sock"),
-                PathBuf::from,
-            ),
-            runtime.map_or_else(
-                || PathBuf::from("/tmp/biflow-dev-missing-runtime"),
-                PathBuf::from,
-            ),
-        );
-    }
-    (
-        socket.map_or_else(|| PathBuf::from(MACOS_HELPER_SOCKET), PathBuf::from),
-        runtime.map_or_else(|| PathBuf::from(MACOS_SYSTEM_RUNTIME), PathBuf::from),
-    )
-}
-
-#[cfg(target_os = "macos")]
-fn macos_mihomo_binary(default: PathBuf) -> PathBuf {
-    #[cfg(debug_assertions)]
-    {
-        macos_mihomo_binary_with_override(default, std::env::var_os("BIFLOW_DEV_MIHOMO_BINARY"))
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        default
-    }
-}
-
-#[cfg(all(target_os = "macos", debug_assertions))]
-fn macos_mihomo_binary_with_override(
-    default: PathBuf,
-    override_path: Option<std::ffi::OsString>,
-) -> PathBuf {
-    override_path.map_or(default, PathBuf::from)
 }
 
 const BUNDLE_IDENTIFIER: &str = "app.biflow.desktop";
@@ -507,43 +349,30 @@ fn log_linux_webview_workarounds() {
 
 impl AppPaths {
     fn discover(app: &AppHandle) -> Result<Self, String> {
-        // A dev run must never open the production profile: schema migration
-        // is one-way, so `dev.sh` points config/data/cache at a sibling
-        // profile and the installed app keeps working.
-        let profile = std::env::var_os("BIFLOW_DEV_PROFILE")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from);
-        let (config_root, data_root, cache_root) = match &profile {
-            Some(root) => (root.join("config"), root.join("data"), root.join("cache")),
-            None => (
-                dirs::config_dir()
-                    .ok_or("configuration directory is unavailable")?
-                    .join("biflow"),
-                dirs::data_local_dir()
-                    .ok_or("local data directory is unavailable")?
-                    .join("biflow"),
-                dirs::cache_dir()
-                    .ok_or("cache directory is unavailable")?
-                    .join("biflow"),
-            ),
-        };
-        let config = config_root.join("config.toml");
-        let data = data_root;
-        let cache = cache_root;
         let resource_root = app
             .path()
             .resource_dir()
             .map_err(|error| error.to_string())?;
-        let resources = packaged_rule_snapshot_dir(&resource_root);
-        let dependencies = resource_root.join("dependencies");
-        fs::create_dir_all(&data).map_err(|error| error.to_string())?;
-        fs::create_dir_all(&cache).map_err(|error| error.to_string())?;
+        // Config, data, cache, and debug.log all come from the one resolved
+        // profile, so a development run can never open the installed app's
+        // documents and no consumer can disagree with another about them.
+        Self::from_resolved_profile(profile::resolved().user(), &resource_root)
+    }
+
+    /// Build the path set from an already-resolved user resource policy.
+    ///
+    /// Separated from [`Self::discover`] so the profile policy can be tested
+    /// on every host without a Tauri `AppHandle`.
+    fn from_resolved_profile(user: &UserResources, resource_root: &Path) -> Result<Self, String> {
+        fs::create_dir_all(&user.data_root).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&user.cache_root).map_err(|error| error.to_string())?;
         Ok(Self {
-            config,
-            data,
-            cache,
-            resources,
-            dependencies,
+            config: user.config_file.clone(),
+            data: user.data_root.clone(),
+            cache: user.cache_root.clone(),
+            debug_log: user.debug_log.clone(),
+            resources: packaged_rule_snapshot_dir(resource_root),
+            dependencies: resource_root.join("dependencies"),
         })
     }
 }
@@ -2071,16 +1900,11 @@ async fn sync_cloud_rules(app: AppHandle) -> Result<CloudRulesStatus, String> {
 #[tauri::command]
 async fn install_helper(app: AppHandle) -> Result<helper_install::InstallHelperResult, String> {
     diagnostics::trace_action("helper", "tauri_command", "install_helper", async move {
-        // A dev run gets its transient helper from dev.sh. Running the
-        // production installer here would reconfigure the system helper
-        // with dev-profile paths and break the installed app.
-        if std::env::var_os("BIFLOW_DEV_PROFILE").is_some_and(|value| !value.is_empty()) {
-            return Err(
-                "development run: restart ./dev.sh to provision the transient helper; \
-                 the production helper installer is disabled in dev"
-                    .into(),
-            );
-        }
+        // The development-profile refusal lives inside
+        // `helper_install::install_helper`, which is the only privileged
+        // provisioning entry point. Repeating the check here would let the two
+        // drift, and it was exactly this duplication that left the Connect
+        // path able to reach the production installer.
         helper_install::install_helper(&app).await
     })
     .await
@@ -2325,7 +2149,7 @@ fn spawn_environment_snapshot<R: Runtime>(app: &AppHandle<R>, trigger: &'static 
 
 /// The host looks different once TUN is up or after a failure; capture it
 /// on those transitions (ADR 0106). The first observed phase is not a
-/// transition — startup already logged a snapshot.
+/// transition ط·آ£ط¢آ¢ط£آ¢أ¢â‚¬ع‘ط¢آ¬ط£آ¢أ¢â€ڑآ¬أ¢â‚¬إ’ startup already logged a snapshot.
 fn environment_trigger(previous: Option<StackPhase>, current: StackPhase) -> Option<&'static str> {
     if previous? == current {
         return None;
@@ -3328,7 +3152,7 @@ async fn install_update(app: AppHandle) -> Result<OperationAccepted, String> {
 /// The UI only ever sees `redacted()` configs, so a settings save echoes the
 /// redaction markers back: the password as "[REDACTED]", and profile/executable
 /// paths truncated to their bare file names. Every marker must be swapped back
-/// for the stored value or a save destroys it — a username edit used to
+/// for the stored value or a save destroys it ط·آ£ط¢آ¢ط£آ¢أ¢â‚¬ع‘ط¢آ¬ط£آ¢أ¢â€ڑآ¬أ¢â‚¬إ’ a username edit used to
 /// overwrite the full profile path with its basename, leaving the side tunnel
 /// dead with "profile is unreadable" at the next connect.
 fn restore_redacted_secrets(current: &AppConfig, draft: &mut AppConfig) {
@@ -3442,6 +3266,27 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
+/// The open `debug.log` must be the one this run's profile owns.
+///
+/// Both now come from the same resolved policy, so this can only disagree if
+/// a future change re-introduces an independent path decision. Record it as a
+/// `findings` input rather than trusting it silently (ADR 0115).
+fn verify_diagnostics_path(paths: &AppPaths) {
+    let opened = diagnostics::default_log_path();
+    if opened == paths.debug_log {
+        return;
+    }
+    error!(
+        event = "profile.diagnostics_path_mismatch",
+        section = "startup",
+        initiator = "create_services",
+        cause = "independent_path_resolution",
+        trace_route = "application_process->create_services->profile",
+        development = profile::is_development(),
+        "the open debug.log is outside this run's resolved profile"
+    );
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "Linux and Windows backend construction stay in one startup path"
@@ -3456,7 +3301,8 @@ fn create_services(app: &AppHandle) -> Result<AppServices, String> {
         "application services initializing"
     );
     let paths = AppPaths::discover(app)?;
-    let config_store = ConfigStore::new(&paths.config);
+    verify_diagnostics_path(&paths);
+    let config_store = ConfigStore::new(&paths.config, RuntimeProfile::clone(profile::runtime()));
     let config = config_store
         .load_or_create()
         .map_err(|error| error.to_string())?;
@@ -3472,13 +3318,14 @@ fn create_services(app: &AppHandle) -> Result<AppServices, String> {
     fs::create_dir_all(&rules_cache).map_err(|error| error.to_string())?;
     let bundled_rules = open_bundled_rules_dir(&paths)?;
     #[cfg(target_os = "linux")]
-    let mihomo_binary = linux_mihomo_binary(
-        deps::first_existing(&deps::mihomo_candidates(&paths.data))
-            .unwrap_or_else(|| paths.data.join("bin/mihomo")),
+    let mihomo_binary = platform_paths::mihomo_binary(
+        &deps::mihomo_candidates(&paths.data),
+        &paths.data,
+        paths.data.join("bin/mihomo"),
     );
     #[cfg(target_os = "linux")]
     let backend = {
-        let (socket_path, system_runtime_dir) = linux_helper_paths();
+        let (socket_path, system_runtime_dir) = platform_paths::linux_helper_paths();
         info!(
             event = "helper.paths_selected",
             section = "startup",
@@ -3505,12 +3352,16 @@ fn create_services(app: &AppHandle) -> Result<AppServices, String> {
     };
     #[cfg(target_os = "windows")]
     let backend = {
-        let (pipe_name, system_runtime_dir) = windows_helper_paths();
+        let (pipe_name, system_runtime_dir) = platform_paths::windows_helper_paths();
         // Packaged Connect stages here, and the elevated installer records the
-        // same root in helper.toml, so SYSTEM can publish the generation.
-        let generation_staging_dir = PathBuf::from(helper_install::WINDOWS_HELPER_STAGING);
-        let mihomo_binary = deps::first_existing(&deps::mihomo_candidates(&paths.data))
-            .unwrap_or_else(windows_programdata_mihomo);
+        // same root in helper.toml, so SYSTEM can publish the generation. A
+        // development run stages under its own profile instead.
+        let generation_staging_dir = platform_paths::windows_generation_staging(&paths.data);
+        let mihomo_binary = platform_paths::mihomo_binary(
+            &deps::mihomo_candidates(&paths.data),
+            &paths.data,
+            platform_paths::windows_programdata_mihomo(),
+        );
         info!(
             event = "helper.paths_selected",
             section = "startup",
@@ -3538,10 +3389,11 @@ fn create_services(app: &AppHandle) -> Result<AppServices, String> {
     };
     #[cfg(target_os = "macos")]
     let backend = {
-        let (socket_path, system_runtime_dir) = macos_helper_paths();
-        let mihomo_binary = macos_mihomo_binary(
-            deps::first_existing(&deps::mihomo_candidates(&paths.data))
-                .unwrap_or_else(|| paths.data.join("bin/mihomo")),
+        let (socket_path, system_runtime_dir) = platform_paths::macos_helper_paths();
+        let mihomo_binary = platform_paths::mihomo_binary(
+            &deps::mihomo_candidates(&paths.data),
+            &paths.data,
+            paths.data.join("bin/mihomo"),
         );
         info!(
             event = "helper.paths_selected",
@@ -3904,7 +3756,7 @@ fn open_dashboard_from_tray<R: Runtime>(app: &AppHandle<R>) {
 }
 
 fn initialize_diagnostics() {
-    let path = diagnostics::default_log_path().expect("debug.log directory is unavailable");
+    let path = diagnostics::default_log_path();
     diagnostics::initialize(&path, version::app_version())
         .unwrap_or_else(|error| panic!("BiFlow debug.log initialization failed: {error}"));
 }
@@ -4277,6 +4129,150 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use iran_split_config::{
+        BaseDirs, ProfileEnv, ResolvedProfile, DEV_HELPER_ENDPOINT_VAR, DEV_MIHOMO_BINARY_VAR,
+        DEV_PROFILE_VAR, DEV_SYSTEM_RUNTIME_VAR,
+    };
+
+    /// Regression (ADR 0115): the application's data roots and the
+    /// diagnostics log came from two independent reconstructions of
+    /// `BIFLOW_DEV_PROFILE`. Assert they are now one policy, and that a
+    /// development run keeps every writable path under its own root.
+    #[test]
+    fn app_paths_and_diagnostics_share_one_profile_policy() {
+        let cases = [
+            ProfileEnv::default(),
+            ProfileEnv {
+                dev_profile: Some(std::ffi::OsString::from("/tmp/biflow-dev-profile")),
+                dev_helper_endpoint: Some(std::ffi::OsString::from(
+                    "/run/biflow-dev-1000/helper.sock",
+                )),
+                dev_system_runtime: Some(std::ffi::OsString::from("/var/lib/biflow-dev-1000")),
+                dev_mihomo_binary: Some(std::ffi::OsString::from(
+                    "/var/lib/biflow-dev-1000/bin/mihomo",
+                )),
+            },
+        ];
+        for env in cases {
+            let base = BaseDirs {
+                config: std::path::PathBuf::from("/host/config/biflow"),
+                data: std::path::PathBuf::from("/host/data/biflow"),
+                cache: std::path::PathBuf::from("/host/cache/biflow"),
+            };
+            let resolved = ResolvedProfile::resolve(&env, base);
+            let paths = AppPaths::from_resolved_profile(resolved.user(), Path::new("/res"))
+                .expect("path set");
+
+            // Diagnostics must report the same file the app would open.
+            assert_eq!(paths.debug_log, *resolved.debug_log());
+            // ...and it must live under this profile's data root, never the
+            // installed app's.
+            assert_eq!(paths.debug_log.parent(), Some(paths.data.as_path()));
+            assert_eq!(paths.config, *resolved.config_file());
+            assert_eq!(paths.data, resolved.user().data_root);
+            assert_eq!(paths.cache, resolved.user().cache_root);
+        }
+    }
+
+    /// A development run must not share a single writable path with the
+    /// installed application, whichever of them is this process.
+    #[test]
+    fn development_paths_never_overlap_production_paths() {
+        let base = BaseDirs {
+            config: std::path::PathBuf::from("/host/config/biflow"),
+            data: std::path::PathBuf::from("/host/data/biflow"),
+            cache: std::path::PathBuf::from("/host/cache/biflow"),
+        };
+        let production = ResolvedProfile::resolve(&ProfileEnv::default(), base.clone());
+        let development = ResolvedProfile::resolve(
+            &ProfileEnv {
+                dev_profile: Some(std::ffi::OsString::from("/tmp/biflow-dev-profile")),
+                ..ProfileEnv::default()
+            },
+            base,
+        );
+        let production_paths =
+            AppPaths::from_resolved_profile(production.user(), Path::new("/res")).expect("prod");
+        let development_paths =
+            AppPaths::from_resolved_profile(development.user(), Path::new("/res")).expect("dev");
+
+        for (label, left, right) in [
+            (
+                "config",
+                &production_paths.config,
+                &development_paths.config,
+            ),
+            ("data", &production_paths.data, &development_paths.data),
+            ("cache", &production_paths.cache, &development_paths.cache),
+            (
+                "debug.log",
+                &production_paths.debug_log,
+                &development_paths.debug_log,
+            ),
+        ] {
+            assert!(
+                !left.starts_with(right),
+                "{label} is shared between profiles"
+            );
+        }
+    }
+
+    /// The elevated installer rewrites machine-wide helper configuration, so a
+    /// development run must never be able to trigger it.
+    #[test]
+    fn development_refuses_production_provisioning() {
+        // The guard is `profile::is_development()`; assert the predicate the
+        // command uses agrees with the resolved profile for every input.
+        for (raw, expected) in [
+            (None, false),
+            (Some(std::ffi::OsString::new()), false),
+            (Some(std::ffi::OsString::from("/tmp/dev")), true),
+        ] {
+            let env = ProfileEnv {
+                dev_profile: raw,
+                ..ProfileEnv::default()
+            };
+            assert_eq!(env.profile().is_development(), expected);
+        }
+    }
+
+    /// `dev.sh` and the Rust side must agree on the variable names, or the
+    /// transient helper and the desktop point at different profiles.
+    #[test]
+    fn development_overrides_use_the_documented_variables() {
+        assert_eq!(DEV_PROFILE_VAR, "BIFLOW_DEV_PROFILE");
+        assert_eq!(DEV_HELPER_ENDPOINT_VAR, "BIFLOW_DEV_HELPER_SOCKET");
+        assert_eq!(DEV_SYSTEM_RUNTIME_VAR, "BIFLOW_DEV_SYSTEM_RUNTIME");
+        assert_eq!(DEV_MIHOMO_BINARY_VAR, "BIFLOW_DEV_MIHOMO_BINARY");
+    }
+
+    /// Controller port, TUN name, and generation identity are three separate
+    /// axes of isolation. Remapping the ports must not disturb the TUN name or
+    /// leave the production identity partially applied.
+    #[test]
+    fn development_remaps_ports_and_tun_without_partial_state() {
+        let mut mihomo = iran_split_config::MihomoConfig::default();
+        let production = RuntimeProfile::Production;
+        let development = RuntimeProfile::Development {
+            root: std::path::PathBuf::from("/tmp/dev"),
+        };
+        assert!(!mihomo.isolate_from_installed_app(&production));
+        assert_eq!(
+            mihomo.controller_port,
+            iran_split_config::PRODUCTION_CONTROLLER_PORT
+        );
+        assert!(mihomo.isolate_from_installed_app(&development));
+        assert_ne!(
+            mihomo.controller_port,
+            iran_split_config::PRODUCTION_CONTROLLER_PORT
+        );
+        assert_ne!(mihomo.mixed_port, iran_split_config::PRODUCTION_MIXED_PORT);
+        assert_ne!(mihomo.dns_port, iran_split_config::PRODUCTION_DNS_PORT);
+        assert_ne!(mihomo.tun_name, iran_split_config::PRODUCTION_TUN_NAME);
+        // Idempotent: a second application must not keep "fixing" the file.
+        assert!(!mihomo.isolate_from_installed_app(&development));
+    }
     #[test]
     fn environment_snapshot_fires_only_on_real_phase_transitions() {
         use super::{environment_trigger, StackPhase};
@@ -4729,25 +4725,100 @@ mod tests {
         assert_eq!(paths, (PathBuf::from(SOCKET), PathBuf::from(RUNTIME)));
     }
 
-    #[cfg(all(target_os = "linux", debug_assertions))]
+    /// A development run must never receive the production helper endpoint or
+    /// runtime, even when no `dev.sh` override was exported. Ported to the pure
+    /// core so it does not read the process environment: the original version
+    /// only passed for whoever was not running the suite with
+    /// `BIFLOW_DEV_PROFILE` set.
     #[test]
-    fn debug_linux_helper_paths_do_not_fall_back_to_production_under_dev_profile() {
-        let paths =
-            linux_helper_paths_with_overrides(Some("/tmp/biflow-dev-profile".into()), None, None);
-        assert_ne!(paths.0, PathBuf::from(PRODUCTION_HELPER_SOCKET));
-        assert_ne!(paths.1, PathBuf::from(PRODUCTION_SYSTEM_RUNTIME));
-        assert!(paths.0.ends_with("missing-helper.sock"));
+    fn development_helper_paths_never_fall_back_to_production() {
+        let (endpoint, runtime) = crate::profile::helper_paths_for(
+            true,
+            None,
+            None,
+            "/run/iran-split/helper.sock",
+            "/var/lib/iran-split",
+            "/run/biflow-dev/missing-helper.sock",
+            "/run/biflow-dev/missing-runtime",
+        );
+        assert_ne!(endpoint, PathBuf::from("/run/iran-split/helper.sock"));
+        assert_ne!(runtime, PathBuf::from("/var/lib/iran-split"));
+        assert!(endpoint.ends_with("missing-helper.sock"));
     }
 
-    #[cfg(all(target_os = "linux", debug_assertions))]
+    /// ...and a production run must still get exactly the production locations.
     #[test]
-    fn debug_linux_mihomo_path_accepts_development_override() {
-        const MIHOMO: &str = "/run/biflow-dev-test/mihomo";
-        let path = linux_mihomo_binary_with_override(
-            PathBuf::from("/default/mihomo"),
-            Some(MIHOMO.into()),
+    fn production_helper_paths_are_the_production_locations() {
+        let (endpoint, runtime) = crate::profile::helper_paths_for(
+            false,
+            Some(Path::new("/run/biflow-dev/helper.sock")),
+            Some(Path::new("/var/lib/biflow-dev")),
+            "/run/iran-split/helper.sock",
+            "/var/lib/iran-split",
+            "/run/biflow-dev/missing-helper.sock",
+            "/run/biflow-dev/missing-runtime",
         );
+        assert_eq!(endpoint, PathBuf::from("/run/iran-split/helper.sock"));
+        assert_eq!(runtime, PathBuf::from("/var/lib/iran-split"));
+    }
 
-        assert_eq!(path, PathBuf::from(MIHOMO));
+    /// The development Mihomo override must win over every default.
+    #[test]
+    fn mihomo_binary_prefers_the_development_override() {
+        let path = platform_paths::mihomo_binary_for(
+            true,
+            Some(Path::new("/run/biflow-dev-test/mihomo")),
+            None,
+            Path::new("/profile/data"),
+            PathBuf::from("/default/mihomo"),
+        );
+        assert_eq!(path, PathBuf::from("/run/biflow-dev-test/mihomo"));
+    }
+
+    /// Behavioral test for the refusal that matters most: a development run
+    /// must not be able to provision the production helper, through *any*
+    /// route. The predicate alone proves nothing ط£آ¢أ¢â€ڑآ¬أ¢â‚¬â€Œ the defect this covers was a
+    /// caller that reached the installer without passing the gate ط£آ¢أ¢â€ڑآ¬أ¢â‚¬â€Œ so assert
+    /// on the decision the installer actually consumes, and on the message an
+    /// operator would actually see.
+    #[test]
+    fn a_development_run_is_refused_production_provisioning() {
+        assert_eq!(
+            profile::provisioning_gate(true),
+            profile::ProvisioningGate::RefusedDevelopmentProfile
+        );
+        assert_eq!(
+            profile::provisioning_gate(false),
+            profile::ProvisioningGate::Allowed
+        );
+    }
+
+    /// The refusal message must point the operator at the supported path, and
+    /// name the routes that are refused so the log identifies the caller.
+    #[test]
+    fn the_provisioning_refusal_explains_the_supported_path() {
+        let refusal = profile::ensure_provisioning_allowed_for(true, "connect", &[])
+            .expect_err("a development run must be refused");
+        assert!(refusal.contains("./dev.sh"), "{refusal}");
+        assert!(refusal.contains("connect"), "{refusal}");
+    }
+    /// A development run that never provisioned its helper reports exactly
+    /// which `dev.sh` variables are missing, so the operator can fix the
+    /// launch instead of guessing.
+    #[test]
+    fn the_provisioning_refusal_names_missing_overrides() {
+        let refusal = profile::ensure_provisioning_allowed_for(
+            true,
+            "connect",
+            &[iran_split_config::DEV_HELPER_ENDPOINT_VAR],
+        )
+        .expect_err("a development run must be refused");
+        assert!(refusal.contains("BIFLOW_DEV_HELPER_SOCKET"), "{refusal}");
+    }
+
+    /// A production run is never refused, even with no overrides present.
+    #[test]
+    fn a_production_run_may_provision() {
+        assert!(profile::ensure_provisioning_allowed_for(false, "connect", &[]).is_ok());
     }
 }

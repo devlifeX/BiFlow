@@ -1,4 +1,5 @@
 mod clients;
+mod profile;
 
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,10 @@ use thiserror::Error;
 pub use clients::{
     is_custom_client_generation_file, ClientConfig, ClientId, ClientInstance, DefaultRoute,
     EgressKind, PresetId, PresetSpec, PresetStatus,
+};
+pub use profile::{
+    BaseDirs, PrivilegedOverrides, ProfileEnv, ResolvedProfile, RuntimeProfile, UserResources,
+    DEV_HELPER_ENDPOINT_VAR, DEV_MIHOMO_BINARY_VAR, DEV_PROFILE_VAR, DEV_SYSTEM_RUNTIME_VAR,
 };
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 3;
@@ -186,9 +191,11 @@ pub const MACOS_TUN_NAME: &str = "utun9";
 
 impl MihomoConfig {
     /// Move off the installed app's loopback ports and TUN when this process
-    /// uses `BIFLOW_DEV_PROFILE`. Returns whether any field changed.
-    pub fn isolate_from_installed_app(&mut self) -> bool {
-        self.isolate_from_installed_app_if(dev_profile_active())
+    /// runs a development profile. The profile is supplied by the caller so
+    /// this crate never reads process-global environment (ADR 0115). Returns
+    /// whether any field changed.
+    pub fn isolate_from_installed_app(&mut self, profile: &RuntimeProfile) -> bool {
+        self.isolate_from_installed_app_if(profile.is_development())
     }
 
     /// On macOS the TUN device name must match the kernel `utunN` convention;
@@ -242,10 +249,6 @@ impl MihomoConfig {
         }
         changed
     }
-}
-
-fn dev_profile_active() -> bool {
-    std::env::var_os("BIFLOW_DEV_PROFILE").is_some_and(|value| !value.is_empty())
 }
 
 /// A macOS `utun` device name must be `utun` followed by 1-3 decimal digits
@@ -566,12 +569,22 @@ pub enum ConfigError {
 #[derive(Debug, Clone)]
 pub struct ConfigStore {
     path: PathBuf,
+    profile: RuntimeProfile,
 }
 
 impl ConfigStore {
     #[must_use]
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+    pub fn new(path: impl Into<PathBuf>, profile: RuntimeProfile) -> Self {
+        Self {
+            path: path.into(),
+            profile,
+        }
+    }
+
+    /// Profile this store isolates itself against.
+    #[must_use]
+    pub fn profile(&self) -> &RuntimeProfile {
+        &self.profile
     }
 
     /// Loads the stored configuration, creating a validated default when absent.
@@ -583,7 +596,7 @@ impl ConfigStore {
     pub fn load_or_create(&self) -> Result<AppConfig, ConfigError> {
         if !self.path.exists() {
             let mut config = AppConfig::default();
-            config.mihomo.isolate_from_installed_app();
+            config.mihomo.isolate_from_installed_app(&self.profile);
             self.write_atomic(&config)?;
             return Ok(config);
         }
@@ -612,7 +625,7 @@ impl ConfigStore {
             migrate(&mut value, schema)?;
         }
         let mut config: AppConfig = value.try_into()?;
-        let isolated = config.mihomo.isolate_from_installed_app();
+        let isolated = config.mihomo.isolate_from_installed_app(&self.profile);
         let tun_normalized = config.mihomo.normalize_tun_name_for_platform();
         let dns_normalized = config.mihomo.normalize_dns_port_for_platform();
         let issues = config.validate();
@@ -881,6 +894,13 @@ fn sync_directory(_path: &Path) {}
 mod tests {
     use super::*;
 
+    /// Production store for tests that are not about profile isolation. The
+    /// profile is explicit, so these tests no longer depend on the ambient
+    /// `BIFLOW_DEV_PROFILE` of the machine running them.
+    fn store(path: impl Into<PathBuf>) -> ConfigStore {
+        ConfigStore::new(path, RuntimeProfile::Production)
+    }
+
     #[test]
     fn defaults_are_valid_and_secret_is_random() {
         let first = AppConfig::default();
@@ -897,7 +917,72 @@ mod tests {
     }
 
     #[test]
-    fn isolate_from_installed_app_moves_default_ports_and_tun() {
+    fn isolate_from_installed_app_follows_the_supplied_profile() {
+        let production = RuntimeProfile::Production;
+        let development = RuntimeProfile::Development {
+            root: PathBuf::from("/tmp/dev-profile"),
+        };
+
+        let mut mihomo = MihomoConfig::default();
+        assert!(!mihomo.isolate_from_installed_app(&production));
+        assert_eq!(mihomo.controller_port, PRODUCTION_CONTROLLER_PORT);
+        assert_eq!(mihomo.tun_name, PRODUCTION_TUN_NAME);
+
+        assert!(mihomo.isolate_from_installed_app(&development));
+        assert_eq!(mihomo.controller_port, DEV_PROFILE_CONTROLLER_PORT);
+        assert_eq!(mihomo.mixed_port, DEV_PROFILE_MIXED_PORT);
+        assert_eq!(mihomo.dns_port, DEV_PROFILE_DNS_PORT);
+        assert_eq!(mihomo.tun_name, DEV_PROFILE_TUN_NAME);
+        assert!(!mihomo.isolate_from_installed_app(&development));
+    }
+
+    #[test]
+    fn a_development_store_isolates_a_freshly_created_config() {
+        // Regression: the store used to read `BIFLOW_DEV_PROFILE` itself, so
+        // isolation silently depended on the ambient environment of whatever
+        // process loaded the config. It is now an explicit input.
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("config.toml");
+        let store = ConfigStore::new(
+            &path,
+            RuntimeProfile::Development {
+                root: directory.path().to_path_buf(),
+            },
+        );
+        let created = store.load_or_create().expect("create config");
+        assert_eq!(created.mihomo.controller_port, DEV_PROFILE_CONTROLLER_PORT);
+        assert_eq!(created.mihomo.tun_name, DEV_PROFILE_TUN_NAME);
+
+        // The remap is persisted, so a restart of the same development run
+        // keeps the isolated identity instead of drifting back onto the
+        // installed app's ports and TUN.
+        let reloaded = store.load().expect("reload as development");
+        assert_eq!(reloaded.mihomo.controller_port, DEV_PROFILE_CONTROLLER_PORT);
+        assert_eq!(reloaded.mihomo.mixed_port, DEV_PROFILE_MIXED_PORT);
+        assert_eq!(reloaded.mihomo.tun_name, DEV_PROFILE_TUN_NAME);
+        let persisted = toml::from_str::<toml::Value>(&fs::read_to_string(&path).expect("read"))
+            .expect("parse")
+            .get("mihomo")
+            .and_then(|mihomo| mihomo.get("controller_port"))
+            .and_then(toml::Value::as_integer)
+            .unwrap_or_default();
+        assert_eq!(
+            u32::try_from(persisted).unwrap_or(u32::MAX),
+            u32::from(DEV_PROFILE_CONTROLLER_PORT)
+        );
+    }
+
+    #[test]
+    fn a_production_store_keeps_production_identity() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("config.toml");
+        let created = store(&path).load_or_create().expect("create config");
+        assert_eq!(created.mihomo.controller_port, PRODUCTION_CONTROLLER_PORT);
+        assert_eq!(created.mihomo.tun_name, PRODUCTION_TUN_NAME);
+    }
+
+    #[test]
+    fn isolate_from_installed_app_if_moves_default_ports_and_tun() {
         let mut mihomo = MihomoConfig::default();
         assert!(!mihomo.isolate_from_installed_app_if(false));
         assert_eq!(mihomo.controller_port, PRODUCTION_CONTROLLER_PORT);
@@ -1023,7 +1108,7 @@ mod tests {
         };
         config.mihomo.direct_dns_preset = DirectDnsPreset::Shecan;
         fs::write(&path, toml::to_string(&config).expect("toml")).expect("write");
-        let loaded = ConfigStore::new(&path).load().expect("load");
+        let loaded = store(&path).load().expect("load");
         assert_eq!(loaded.schema_version, 3);
         assert_eq!(loaded.mihomo.direct_dns_preset, DirectDnsPreset::FakeIp);
         assert_eq!(loaded.clients.len(), 1);
@@ -1041,7 +1126,7 @@ mod tests {
         };
         config.mihomo.direct_dns_preset = DirectDnsPreset::Mokhaberat;
         fs::write(&path, toml::to_string(&config).expect("toml")).expect("write");
-        let loaded = ConfigStore::new(&path).load().expect("load");
+        let loaded = store(&path).load().expect("load");
         assert_eq!(loaded.schema_version, 3);
         assert_eq!(loaded.mihomo.direct_dns_preset, DirectDnsPreset::Mokhaberat);
     }
@@ -1060,13 +1145,19 @@ mod tests {
     fn persists_atomically_and_checks_revision() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("config.toml");
-        let store = ConfigStore::new(&path);
-        let mut config = store.load_or_create().expect("create config");
+        let config_store = store(&path);
+        let mut config = config_store.load_or_create().expect("create config");
         config.behavior.connect_at_launch = true;
-        let saved = store.save(config.clone(), 0).expect("save config");
+        let saved = config_store.save(config.clone(), 0).expect("save config");
         assert_eq!(saved.revision, 1);
-        assert!(store.save(config, 0).is_err());
-        assert!(store.load().expect("reload").behavior.connect_at_launch);
+        assert!(config_store.save(config, 0).is_err());
+        assert!(
+            config_store
+                .load()
+                .expect("reload")
+                .behavior
+                .connect_at_launch
+        );
     }
 
     #[test]
@@ -1131,7 +1222,7 @@ connect_at_launch = false
 close_to_tray = true
 "#;
         fs::write(&path, contents).expect("write");
-        let loaded = ConfigStore::new(&path).load().expect("load");
+        let loaded = store(&path).load().expect("load");
         assert_eq!(loaded.schema_version, 3);
         assert_eq!(loaded.clients.len(), 1);
         assert_eq!(loaded.clients[0].preset, PresetId::Hiddify);
@@ -1178,7 +1269,7 @@ upstream_refresh_hours = 24
 close_to_tray = true
 "#;
         fs::write(&path, contents).expect("write");
-        let loaded = ConfigStore::new(&path).load().expect("load");
+        let loaded = store(&path).load().expect("load");
         assert_eq!(loaded.clients.len(), 2);
         assert!(loaded
             .clients

@@ -351,16 +351,14 @@ fn subscriber(log: DebugLog) -> impl Subscriber + Send + Sync {
         .finish()
 }
 
-pub fn default_log_path() -> Result<PathBuf, String> {
-    // A dev run logs inside its own profile; it must never write into (or
-    // reveal) the installed app's data directory.
-    if let Some(profile) = std::env::var_os("BIFLOW_DEV_PROFILE").filter(|value| !value.is_empty())
-    {
-        return Ok(PathBuf::from(profile).join("data").join("debug.log"));
-    }
-    dirs::data_local_dir()
-        .map(|path| path.join("biflow").join("debug.log"))
-        .ok_or_else(|| "local data directory is unavailable for debug.log".into())
+/// Permanent `debug.log` for this run.
+///
+/// Derived from the resolved runtime profile, so the log the application
+/// writes, the Diagnostics card reports, and a development run's own profile
+/// can never drift apart (ADR 0115).
+#[must_use]
+pub fn default_log_path() -> PathBuf {
+    crate::profile::resolved().debug_log().to_path_buf()
 }
 
 pub fn initialize(path: &Path, app_version: &str) -> Result<(), String> {
@@ -826,7 +824,7 @@ mod tests {
 
     #[test]
     fn default_log_path_uses_native_separators() {
-        let path = default_log_path().expect("local data directory");
+        let path = default_log_path();
         let display = path.to_string_lossy();
         assert!(display.ends_with("debug.log"));
         if display.as_bytes().get(1) == Some(&b':') {

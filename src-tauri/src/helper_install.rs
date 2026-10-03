@@ -49,11 +49,24 @@ pub struct InstallHelperResult {
 
 /// Installs and starts the privileged helper for the current packaged app.
 ///
+/// This is the **only** privileged provisioning entry point. Every route that
+/// can rewrite the installed helper — the Install button, the Connect flow's
+/// missing-helper branch, and its version-mismatch reinstall — goes through
+/// here, so the development-profile refusal lives here rather than in any
+/// single caller (ADR 0115).
+///
 /// # Errors
 ///
-/// Returns an error when bundled files are missing, elevation fails, or the
-/// helper does not become reachable.
+/// Returns an error when this is a development run, when bundled files are
+/// missing, when elevation fails, or when the helper does not become
+/// reachable.
 pub async fn install_helper<R: Runtime>(app: &AppHandle<R>) -> Result<InstallHelperResult, String> {
+    // A development run gets its transient helper from `dev.sh`. Running the
+    // production installer would reconfigure the machine-wide system helper
+    // with development paths and break the installed app. This check is
+    // deliberately inside the installer, not at the call sites: guarding only
+    // the Tauri command left the Connect path free to reach it.
+    crate::profile::ensure_provisioning_allowed("helper_install::install_helper")?;
     let services = services(app)?;
     let resource_root = app
         .path()
@@ -94,7 +107,11 @@ pub async fn install_helper<R: Runtime>(app: &AppHandle<R>) -> Result<InstallHel
     }
     #[cfg(target_os = "windows")]
     {
-        let staging_dir = PathBuf::from(WINDOWS_HELPER_STAGING);
+        // The elevated installer records this same root in `helper.toml`, so
+        // SYSTEM can publish the generation. A development run never gets this
+        // far, but resolve it through the same policy as the backend rather
+        // than hardcoding it, so the two cannot diverge.
+        let staging_dir = crate::platform_paths::windows_generation_staging(&services.paths.data);
         install_windows(&resource_root, &exe_dir, &staging_dir, &tun_name).await?;
     }
     #[cfg(target_os = "macos")]

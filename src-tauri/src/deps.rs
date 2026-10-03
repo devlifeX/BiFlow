@@ -152,9 +152,9 @@ pub fn mihomo_candidates(data: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     // A dev session vendors its own Mihomo; without this the dependency
     // card claims Mihomo is missing and offers a pointless install.
-    if let Some(dev) = std::env::var_os("BIFLOW_DEV_MIHOMO_BINARY") {
-        candidates.push(PathBuf::from(dev));
-    }
+    // The override comes from the resolved profile, never from a second
+    // environment read (ADR 0115).
+    candidates.extend(crate::profile::dev_mihomo_binary().map(PathBuf::from));
     candidates.extend([
         mihomo_install_path(data),
         data.join("bin").join("clash-meta"),
