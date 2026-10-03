@@ -3,14 +3,16 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { About } from "./About";
 import { useAppStore } from "../store/app";
+import i18n from "../i18n/config";
 
 vi.mock("../version", () => ({
   APP_VERSION: "1.2.0",
 }));
 
 describe("About", () => {
-  afterEach(() => {
+  afterEach(async () => {
     cleanup();
+    await i18n.changeLanguage("en");
   });
 
   beforeEach(() => {
@@ -24,14 +26,22 @@ describe("About", () => {
     });
   });
 
-  it("shows author, repository, and root-sourced version", () => {
-    render(<About />);
-    expect(screen.getByText("Dariush Vesal")).toBeInTheDocument();
-    expect(screen.getByText("1.2.0")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /devlifeX\/BiFlow/i }),
-    ).toBeInTheDocument();
-  });
+  it.each([
+    ["en", "Developers", "Dariush Vesal · Omis Asgari · Reza Mahdavi"],
+    ["fa", "توسعه‌دهندگان", "داریوش وصال · امید عسگری · رضا مهدوی"],
+  ])(
+    "shows ordered developers, repository, and version in %s",
+    async (language, label, names) => {
+      await i18n.changeLanguage(language);
+      render(<About />);
+      expect(screen.getByText(label)).toBeInTheDocument();
+      expect(screen.getByText(names)).toBeInTheDocument();
+      expect(screen.getByText("1.2.0")).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /devlifeX\/BiFlow/i }),
+      ).toBeInTheDocument();
+    },
+  );
 
   it("renders update progress and retry when the store reports failure", () => {
     useAppStore.setState({

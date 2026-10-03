@@ -67,7 +67,9 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Settings" })).toBeVisible();
     await userEvent.click(screen.getByRole("tab", { name: "About" }));
     expect(screen.getByText(APP_VERSION)).toBeVisible();
-    expect(screen.getByText("Dariush Vesal")).toBeVisible();
+    expect(
+      screen.getByText("Dariush Vesal · Omis Asgari · Reza Mahdavi"),
+    ).toBeVisible();
 
     // Coming back to Routing keeps the tab the user left it on.
     await userEvent.click(screen.getByRole("button", { name: "Routing" }));

@@ -815,10 +815,17 @@ test.describe("primary BiFlow flows", () => {
     expect(prevented).toBe(true);
   });
 
-  test("shows About author, version, and update check", async ({ page }) => {
+  test("shows About developers, version, and update check", async ({
+    page,
+  }) => {
     await openFresh(page);
     await goTo(page, "Settings", "About");
-    await expect(page.getByText("Dariush Vesal")).toBeVisible();
+    await expect(page.getByText("Developers", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Dariush Vesal · Omis Asgari · Reza Mahdavi", {
+        exact: true,
+      }),
+    ).toBeVisible();
     await expect(page.getByText(/Version \d+\.\d+\.\d+/)).toBeVisible();
     await page.getByRole("button", { name: "Check for updates" }).click();
     await expect(page.getByText(/latest published version/i)).toBeVisible();

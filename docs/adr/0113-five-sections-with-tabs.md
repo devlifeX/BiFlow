@@ -25,6 +25,9 @@ Direct) was not on the first screen.
   `diagnostics`, and `settings`; `clients` is new, and `about` maps to the
   Settings About tab, so the tray and stored navigation keep working.
 - The store remembers the last tab per page.
+- Settings About labels the credits as developers in both languages. List
+  Dariush Vesal first, then Omis Asgari (امید عسگری), then Reza Mahdavi
+  (رضا مهدوی) (6.2.59).
 - Home shows:
   - the connection hero, with the default-route select;
   - an add-site bar that pins a pasted host to Direct or a client;
