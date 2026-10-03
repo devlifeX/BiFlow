@@ -130,6 +130,21 @@ Two isolation defects followed from the drift:
   assertion in the first staging test in memory and requires its detection;
   additional fixtures protect attribute scope and explicit Windows-only tests.
 
+## Linux CI follow-up (6.2.61)
+
+The extraction left two Linux-only tests calling removed root-module symbols
+and a duplicate glob import. Production-path assertions now live beside the
+Linux constants in `platform_paths`; explicit development overrides exercise
+`profile::helper_paths_for` on every host. A source contract scans the complete
+desktop source, including inactive cfg branches, for the retired identifiers.
+Linux validation uses native Ubuntu 22.04 Rust inside WSL in addition to the
+Windows commit gate.
+
+Path-policy fixtures that construct `AppPaths` create directories. They now
+use separate roots inside disposable temporary directories rather than fake
+absolute `/host` paths, so Linux tests run as an ordinary user and leave no
+shared profile state behind.
+
 ## Consequences
 
 - Development and production isolation is now testable without touching

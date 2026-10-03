@@ -267,6 +267,22 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
 
+    #[test]
+    fn development_helper_paths_accept_explicit_overrides() {
+        let endpoint = Path::new("/run/biflow-dev-test/helper.sock");
+        let runtime = Path::new("/var/lib/biflow-dev-test/runtime");
+        let paths = helper_paths_for(
+            true,
+            Some(endpoint),
+            Some(runtime),
+            "/run/iran-split/helper.sock",
+            "/var/lib/iran-split",
+            "/run/biflow-dev/missing-helper.sock",
+            "/run/biflow-dev/missing-runtime",
+        );
+        assert_eq!(paths, (endpoint.to_path_buf(), runtime.to_path_buf()));
+    }
+
     /// The policy for explicit inputs, without touching the process-wide
     /// `OnceLock` or the ambient environment.
     fn resolve(env: &ProfileEnv) -> ResolvedProfile {

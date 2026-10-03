@@ -269,6 +269,26 @@ describe("profile resolution contract", () => {
     );
   });
 
+  it("keeps extracted helper-path names out of every desktop cfg branch", () => {
+    const source = readFileSync(
+      join(root, "src-tauri", "src", "lib.rs"),
+      "utf8",
+    );
+    const retired =
+      /\b(?:PRODUCTION_HELPER_SOCKET|PRODUCTION_SYSTEM_RUNTIME|linux_helper_paths_with_overrides)\b/g;
+    assert.deepEqual(source.match(retired) ?? [], []);
+    // Reproduce the CI failure in memory, including its Linux-only cfg. Scan
+    // the entire source, rather than dropping tests the host cannot compile.
+    const regressed = `${source}
+#[cfg(target_os = "linux")]
+fn stale_helper_test() {
+    assert_eq!(PRODUCTION_HELPER_SOCKET, PRODUCTION_SYSTEM_RUNTIME);
+    linux_helper_paths_with_overrides(None, None, None);
+}`;
+    assert.equal((regressed.match(retired) ?? []).length, 3);
+    assert.equal((source.match(/^\s*use super::\*;/gm) ?? []).length, 1);
+  });
+
   it("keeps platform-named constants out of platform-independent tests", () => {
     // The staging test once asserted against `WINDOWS_HELPER_STAGING` while
     // comparing `generation_staging_for(false, ..)`. That constant is defined

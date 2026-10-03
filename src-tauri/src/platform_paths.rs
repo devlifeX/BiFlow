@@ -191,6 +191,13 @@ pub fn generation_staging_for(is_development: bool, data: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn production_linux_helper_paths_are_fixed() {
+        assert_eq!(PRODUCTION_ENDPOINT, "/run/iran-split/helper.sock");
+        assert_eq!(PRODUCTION_RUNTIME, "/var/lib/iran-split");
+    }
+
     /// A development run must never be handed a privileged, machine-wide
     /// staging root. `WindowsPaths.generation_staging_dir` goes straight to the
     /// helper, so this is the assertion that keeps a development Connect from

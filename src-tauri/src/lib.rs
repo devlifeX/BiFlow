@@ -4141,10 +4141,11 @@ mod tests {
     /// development run keeps every writable path under its own root.
     #[test]
     fn app_paths_and_diagnostics_share_one_profile_policy() {
+        let directory = tempfile::tempdir().expect("temporary profiles");
         let cases = [
             ProfileEnv::default(),
             ProfileEnv {
-                dev_profile: Some(std::ffi::OsString::from("/tmp/biflow-dev-profile")),
+                dev_profile: Some(directory.path().join("development").into_os_string()),
                 dev_helper_endpoint: Some(std::ffi::OsString::from(
                     "/run/biflow-dev-1000/helper.sock",
                 )),
@@ -4156,9 +4157,9 @@ mod tests {
         ];
         for env in cases {
             let base = BaseDirs {
-                config: std::path::PathBuf::from("/host/config/biflow"),
-                data: std::path::PathBuf::from("/host/data/biflow"),
-                cache: std::path::PathBuf::from("/host/cache/biflow"),
+                config: directory.path().join("production/config"),
+                data: directory.path().join("production/data"),
+                cache: directory.path().join("production/cache"),
             };
             let resolved = ResolvedProfile::resolve(&env, base);
             let paths = AppPaths::from_resolved_profile(resolved.user(), Path::new("/res"))
@@ -4179,15 +4180,16 @@ mod tests {
     /// installed application, whichever of them is this process.
     #[test]
     fn development_paths_never_overlap_production_paths() {
+        let directory = tempfile::tempdir().expect("temporary profiles");
         let base = BaseDirs {
-            config: std::path::PathBuf::from("/host/config/biflow"),
-            data: std::path::PathBuf::from("/host/data/biflow"),
-            cache: std::path::PathBuf::from("/host/cache/biflow"),
+            config: directory.path().join("production/config"),
+            data: directory.path().join("production/data"),
+            cache: directory.path().join("production/cache"),
         };
         let production = ResolvedProfile::resolve(&ProfileEnv::default(), base.clone());
         let development = ResolvedProfile::resolve(
             &ProfileEnv {
-                dev_profile: Some(std::ffi::OsString::from("/tmp/biflow-dev-profile")),
+                dev_profile: Some(directory.path().join("development").into_os_string()),
                 ..ProfileEnv::default()
             },
             base,
@@ -4549,9 +4551,6 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    use super::*;
-
-    #[cfg(target_os = "linux")]
     #[test]
     fn linux_dmi_detects_vmware_and_ignores_bare_metal() {
         assert!(linux_dmi_is_virtual(Some("VMware, Inc.\n")));
@@ -4705,24 +4704,6 @@ mod tests {
         assert_eq!(pending.latest_version, "3.6.0");
         coordinator.remember_package(None);
         assert!(coordinator.pending_package().is_none());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn production_linux_helper_paths_are_fixed() {
-        assert_eq!(PRODUCTION_HELPER_SOCKET, "/run/iran-split/helper.sock");
-        assert_eq!(PRODUCTION_SYSTEM_RUNTIME, "/var/lib/iran-split");
-    }
-
-    #[cfg(all(target_os = "linux", debug_assertions))]
-    #[test]
-    fn debug_linux_helper_paths_accept_development_overrides() {
-        const SOCKET: &str = "/run/biflow-dev-test/helper.sock";
-        const RUNTIME: &str = "/run/biflow-dev-test/runtime";
-        let paths =
-            linux_helper_paths_with_overrides(None, Some(SOCKET.into()), Some(RUNTIME.into()));
-
-        assert_eq!(paths, (PathBuf::from(SOCKET), PathBuf::from(RUNTIME)));
     }
 
     /// A development run must never receive the production helper endpoint or

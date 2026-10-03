@@ -71,6 +71,29 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- A WSL target cache on a nearly full Windows system drive can expand the
+  distro VHD and, together with WSL swap, exhaust C: during GTK compilation.
+  Concurrent Vitest workers then fail allocation and WSL can return I/O errors.
+  Put the Linux `CARGO_TARGET_DIR` on a drive with free space, keep Rust jobs
+  bounded, and run frontend checks separately with `VITEST_MAX_FORKS` and
+  `VITEST_MAX_THREADS` bounded on memory-constrained hosts. Re-run every failed
+  gate after recovering the environment; do not call resource errors a pass.
+
+- A path-policy test that calls `AppPaths::from_resolved_profile` creates data
+  and cache directories. Fake absolute `/host/...` paths need root privileges
+  on Linux and leak test state across runs. Use distinct production and
+  development roots inside `tempfile::tempdir()` for every filesystem-writing
+  fixture, even when only asserting path resolution (ADR 0115, 6.2.61).
+
+- Moving platform helper paths left Linux-only tests in `lib.rs` referring to
+  removed constants and `linux_helper_paths_with_overrides`, plus a duplicate
+  `use super::*` that Windows never compiled. Keep constant assertions beside
+  the constants in `platform_paths`, test explicit development overrides via
+  the shared pure resolver on every host, and scan all cfg branches for the
+  retired names. Run Linux tests and Clippy in WSL before committing Linux
+  changes from Windows; a Windows workspace gate cannot validate Linux cfg
+  (ADR 0115, 6.2.61).
+
 - A source-contract scanner must consume a module's cfg attributes before
   scanning its first test. `cfg(test)` is not a platform restriction, and
   `cfg(any(windows, test))` runs on every test host. Keep an in-memory negative
