@@ -17,9 +17,6 @@ use tracing::{error, info};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use sha2::{Digest, Sha256};
 #[cfg(target_os = "linux")]
-use std::os::unix::fs::PermissionsExt;
-
-#[cfg(target_os = "linux")]
 const LINUX_HELPER_ROOT: &str = "/usr/lib/biflow";
 #[cfg(target_os = "linux")]
 const PKEXEC: &str = "/usr/bin/pkexec";
@@ -665,23 +662,28 @@ async fn install_macos(
     let script = format!(
         "set -e\n\
          mkdir -p '{MACOS_HELPER_ROOT}' '{MACOS_HELPER_ROOT}/runtime'\n\
-         cp -f '{helper}' '{MACOS_HELPER_ROOT}/iran-split-helper'\n\
-         cp -f '{mihomo}' '{MACOS_HELPER_ROOT}/mihomo'\n\
-         cp -f '{toml}' '{MACOS_HELPER_ROOT}/helper.toml'\n\
+         cp -f {helper} '{MACOS_HELPER_ROOT}/iran-split-helper'\n\
+         cp -f {mihomo} '{MACOS_HELPER_ROOT}/mihomo'\n\
+         config_tmp=$(mktemp '{MACOS_HELPER_ROOT}/helper.toml.XXXXXX')\n\
+         trap 'rm -f \"$config_tmp\"' EXIT\n\
+         cp -f {toml} \"$config_tmp\"\n\
+         chmod 600 \"$config_tmp\"\n\
+         chown root:wheel \"$config_tmp\"\n\
+         mv -f \"$config_tmp\" '{MACOS_HELPER_ROOT}/helper.toml'\n\
          chmod 755 '{MACOS_HELPER_ROOT}/iran-split-helper' \
          '{MACOS_HELPER_ROOT}/mihomo'\n\
          chown root:wheel '{MACOS_HELPER_ROOT}/iran-split-helper' \
          '{MACOS_HELPER_ROOT}/mihomo' '{MACOS_HELPER_ROOT}/helper.toml'\n\
-         cp -f '{plist}' '{MACOS_PLIST_PATH}'\n\
+         cp -f {plist} '{MACOS_PLIST_PATH}'\n\
          chown root:wheel '{MACOS_PLIST_PATH}'\n\
          chmod 644 '{MACOS_PLIST_PATH}'\n\
          launchctl bootout system/{MACOS_HELPER_LABEL} 2>/dev/null || true\n\
          launchctl bootstrap system '{MACOS_PLIST_PATH}'\n\
          launchctl enable system/{MACOS_HELPER_LABEL}\n",
-        helper = helper_stage.display(),
-        mihomo = mihomo_stage.display(),
-        toml = helper_toml_stage.display(),
-        plist = plist_stage.display(),
+        helper = macos_shell_quote(&helper_stage.to_string_lossy()),
+        mihomo = macos_shell_quote(&mihomo_stage.to_string_lossy()),
+        toml = macos_shell_quote(&helper_toml_stage.to_string_lossy()),
+        plist = macos_shell_quote(&plist_stage.to_string_lossy()),
     );
     fs::write(&install_script, script).map_err(|error| error.to_string())?;
     fs::set_permissions(&install_script, fs::Permissions::from_mode(0o755))
@@ -698,7 +700,12 @@ async fn install_macos(
         .await
         .map_err(|error| error.to_string())?;
     // Discard the staged payload regardless of outcome.
-    let _ = fs::remove_dir_all(payload_dir);
+    if let Err(error) = fs::remove_dir_all(payload_dir) {
+        tracing::warn!(event = "helper.payload_cleanup_failed", section = "helper_install",
+            initiator = "tauri_command", cause = ?error.kind(),
+            trace_route = "ui->install_helper->install_macos->payload_cleanup",
+            "helper payload cleanup failed after installation");
+    }
     if output.status.success() {
         return Ok(());
     }
@@ -714,7 +721,6 @@ async fn install_macos(
         cause = "install_script_failed",
         trace_route = "ui->tauri_command->install_helper->install_macos",
         exit_code = output.status.code().unwrap_or(-1),
-        detail = %detail,
         "privileged helper installation failed"
     );
     if detail.is_empty() {
@@ -729,12 +735,16 @@ async fn install_macos(
 /// `~/Library/Application Support/biflow/...`, which contains a space, so the
 /// path must be single-quoted or sh splits it at the space and tries to
 /// execute `/Users/.../Library/Application` (which does not exist).
-#[cfg(target_os = "macos")]
-fn macos_admin_applescript(script_path: &Path) -> String {
-    format!(
-        "do shell script \"sh '{script_path}'\" with administrator privileges",
-        script_path = script_path.display(),
-    )
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn macos_admin_applescript(script_path: &Path) -> String {
+    let command = format!("sh {}", macos_shell_quote(&script_path.to_string_lossy()));
+    let literal = serde_json::to_string(&command).expect("serializing a string cannot fail");
+    format!("do shell script {literal} with administrator privileges")
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn macos_shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(target_os = "macos")]
@@ -1113,7 +1123,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn macos_admin_applescript_quotes_spaced_paths() {
         // The payload path lives under `~/Library/Application Support/biflow/...`
@@ -1128,6 +1137,23 @@ mod tests {
             "spaced payload path must be single-quoted inside `do shell script`: {script}"
         );
         assert!(script.contains("with administrator privileges"));
+    }
+
+    #[test]
+    fn macos_elevation_escapes_shell_and_applescript_metacharacters() {
+        let path =
+            std::path::Path::new("/Users/owner's profile/quoted\"name/back\\slash/install.sh");
+        let script = super::macos_admin_applescript(path);
+        let literal = script
+            .strip_prefix("do shell script ")
+            .expect("command")
+            .strip_suffix(" with administrator privileges")
+            .expect("elevation");
+        let shell: String = serde_json::from_str(literal).expect("escaped AppleScript string");
+        assert_eq!(
+            shell,
+            "sh '/Users/owner'\\''s profile/quoted\"name/back\\slash/install.sh'"
+        );
     }
 
     #[cfg(target_os = "macos")]

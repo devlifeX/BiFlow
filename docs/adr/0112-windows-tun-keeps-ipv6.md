@@ -73,10 +73,14 @@ port and the TUN adapter. The new Mihomo then fails to bind
 the new `inet6-address` config is never applied — `GET /configs` keeps
 reporting the old `inet4`-only TUN.
 
-The helper now calls `kill_orphaned_mihomo` before every spawn. It runs
-`taskkill /F /IM mihomo.exe` (Windows) or `pkill -x mihomo` (Linux) and
-swallows the non-zero exit when no orphan exists. This reclaims the
-port and the adapter so the fresh Mihomo binds cleanly.
+Before every spawn the helper reclaims only processes whose command uses
+its exact executable and `-d` / `-f` generation paths below its own runtime.
+On Windows it also verifies `Win32_Process.ExecutablePath` before stopping
+the matching PID. Unix `pkill -f` uses an anchored, escaped command pattern;
+exit 1 means no owned process exists. Other failures stop Connect and emit
+an audit event. Name-only `taskkill /IM` and `pkill -x` are forbidden because
+they also kill the other dev/production profile and unrelated VPN clients
+(ADR 0114).
 
 ### Sniffer override-destination and kubectl EOF (6.2.56)
 

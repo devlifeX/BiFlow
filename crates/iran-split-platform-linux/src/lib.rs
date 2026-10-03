@@ -1289,6 +1289,10 @@ impl PlatformBackend for LinuxBackend {
             Self::tcp_listening(&config.mihomo.controller_host, config.mihomo.dns_port),
         );
 
+        let helper_version = helper_result
+            .as_ref()
+            .ok()
+            .and_then(|status| status.version.clone());
         let helper = Self::helper_component(helper_result);
         let hiddify = Self::hiddify_component(&config, hiddify_listening, hiddify_path.as_deref());
         let (mihomo, providers) =
@@ -1316,10 +1320,6 @@ impl PlatformBackend for LinuxBackend {
         }
 
         let live_route = self.observe_live_route(&config, &handles).await;
-        let helper_version = match &helper_result {
-            Ok(status) => status.version.clone(),
-            Err(_) => None,
-        };
         RuntimeHealth {
             helper,
             helper_version,

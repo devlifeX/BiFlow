@@ -2,130 +2,13 @@ use super::{commands, HelperServiceError, HelperSettings, Supervisor};
 use iran_split_ipc::{HelloReply, HelperCommand, HelperError, HelperReply, PROTOCOL_VERSION};
 use nix::unistd::{chown, Gid, Uid};
 use std::{
-    collections::HashMap,
     fs,
     os::unix::fs::{FileTypeExt, PermissionsExt},
     path::Path,
-    process::Command,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{info, warn};
-
-/// Snapshot of per-service DNS servers captured before `BiFlow` took over the
-/// system resolver, restored on disconnect so the user gets the router DNS
-/// back when the TUN is down.
-static DNS_SNAPSHOT: Mutex<Option<HashMap<String, Vec<String>>>> = Mutex::new(None);
-
-/// The absolute path to `networksetup`. The helper runs as a launchd daemon
-/// with a minimal environment; relying on `PATH` lookup can fail silently and
-/// leave the system DNS on the LAN router (which bypasses the TUN).
-const NETWORKSETUP: &str = "/usr/sbin/networksetup";
-
-/// Lists every network service `networksetup` reports (skipping the header
-/// line and the asterisk-prefixed disabled-service annotation).
-fn list_network_services() -> Vec<String> {
-    let output = Command::new(NETWORKSETUP)
-        .arg("-listallnetworkservices")
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let name = line.trim_start_matches('*').trim();
-            if name.is_empty() {
-                None
-            } else {
-                Some(name.to_owned())
-            }
-        })
-        .collect()
-}
-
-fn get_dnsservers(service: &str) -> Vec<String> {
-    let output = Command::new(NETWORKSETUP)
-        .args(["-getdnsservers", service])
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with("There aren't"))
-        .map(str::to_owned)
-        .collect()
-}
-
-fn set_dnsservers(service: &str, servers: &[String]) {
-    let mut args: Vec<String> = vec!["-setdnsservers".into(), service.into()];
-    args.extend(servers.iter().cloned());
-    let _ = Command::new(NETWORKSETUP).args(args).status();
-}
-
-/// Snapshots the current per-service DNS configuration and points every
-/// network service at `127.0.0.1` so the system resolver queries Mihomo
-/// (which listens on `127.0.0.1:53`). The LAN/router resolver bypasses the
-/// TUN and cannot resolve blocked domains.
-pub fn apply_system_dns() {
-    let mut snapshot = HashMap::new();
-    for service in list_network_services() {
-        snapshot.insert(service.clone(), get_dnsservers(&service));
-        set_dnsservers(&service, &["127.0.0.1".to_owned()]);
-    }
-    if snapshot.is_empty() {
-        warn!(
-            event = "helper.dns_apply_empty",
-            section = "helper_dns",
-            initiator = "helper_process",
-            cause = "no_network_services",
-            trace_route = "helper_process->networksetup->system_dns",
-            "could not enumerate network services; system DNS left unchanged"
-        );
-    } else {
-        info!(
-            event = "helper.dns_applied",
-            section = "helper_dns",
-            initiator = "helper_process",
-            cause = "stack_start",
-            trace_route = "helper_process->networksetup->system_dns",
-            services = snapshot.len(),
-            "redirected the macOS system DNS to Mihomo"
-        );
-    }
-    if let Ok(mut guard) = DNS_SNAPSHOT.lock() {
-        *guard = Some(snapshot);
-    }
-}
-
-/// Restores the DNS servers captured by [`apply_system_dns`] for every
-/// service, clearing the override when the original had none.
-pub fn restore_system_dns() {
-    let snapshot = {
-        let Ok(mut guard) = DNS_SNAPSHOT.lock() else {
-            return;
-        };
-        guard.take()
-    };
-    let Some(snapshot) = snapshot else {
-        return;
-    };
-    for (service, servers) in &snapshot {
-        set_dnsservers(service, servers);
-    }
-    info!(
-        event = "helper.dns_restored",
-        section = "helper_dns",
-        initiator = "helper_process",
-        cause = "stack_cleanup",
-        trace_route = "helper_process->networksetup->system_dns",
-        services = snapshot.len(),
-        "restored the macOS system DNS"
-    );
-}
 
 /// Runs the macOS helper service and accepts authenticated local IPC clients.
 ///
@@ -135,6 +18,16 @@ pub fn restore_system_dns() {
 /// fails.
 pub async fn run_macos(config_path: &Path) -> Result<(), HelperServiceError> {
     let settings = HelperSettings::load(config_path)?;
+    if super::macos_dns::restore(&settings.runtime_dir).is_err() {
+        warn!(
+            event = "helper.dns_startup_recovery_failed",
+            section = "helper_dns",
+            initiator = "helper_process",
+            cause = "dns_recovery_pending",
+            trace_route = "helper_process->startup->macos_dns",
+            "DNS recovery failed at startup; the recovery file is retained for retry"
+        );
+    }
     let socket_path = settings.socket_path.clone();
     let socket_parent = socket_path
         .parent()
@@ -199,23 +92,15 @@ fn chown_root_group(path: &Path, gid: u32) -> Result<(), HelperServiceError> {
         .map_err(|error| HelperServiceError::Io(std::io::Error::other(error.to_string())))
 }
 
-/// Returns the peer's effective UID for audit logging.
-///
-/// The workspace forbids `unsafe`, so the helper cannot call `getpeereid(2)`
-/// directly. Access control is enforced by the socket itself — it is owned by
-/// `root:authorized_gid` with mode `0o660`, so only members of the authorized
-/// group can connect. The audit identity is therefore the configured
-/// authorized UID, which on a single-user macOS install is the desktop user
-/// that owns the `BiFlow` profile.
-fn peer_uid(supervisor: &Supervisor) -> u32 {
-    supervisor.settings().authorized_uid
-}
-
 async fn handle_connection(
     mut stream: UnixStream,
     supervisor: Arc<Supervisor>,
 ) -> Result<(), HelperServiceError> {
-    let peer_uid = peer_uid(&supervisor);
+    let Some(peer_uid) =
+        super::unix_peer::authenticated_uid(&stream, supervisor.settings().authorized_uid)?
+    else {
+        return Ok(());
+    };
 
     let hello = commands::read_request(&mut stream).await?;
     let HelperCommand::Hello {

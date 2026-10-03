@@ -1441,6 +1441,10 @@ impl PlatformBackend for WindowsBackend {
             Self::tcp_listening(&config.mihomo.controller_host, config.mihomo.dns_port),
         );
 
+        let helper_version = helper_result
+            .as_ref()
+            .ok()
+            .and_then(|status| status.version.clone());
         let helper = Self::helper_component(helper_result);
         *self.helper_cache.lock().await = helper.clone();
         let hiddify = Self::hiddify_component(&config, hiddify_listening, hiddify_path.as_deref());
@@ -1472,10 +1476,6 @@ impl PlatformBackend for WindowsBackend {
         }
 
         let live_route = self.observe_live_route(&config, &handles).await;
-        let helper_version = match &helper_result {
-            Ok(status) => status.version.clone(),
-            Err(_) => None,
-        };
         RuntimeHealth {
             helper,
             helper_version,
@@ -1503,7 +1503,10 @@ impl PlatformBackend for WindowsBackend {
             Err(error) => Err(CoreError::Platform(error.to_string())),
         };
         *self.helper_cache.lock().await = Self::helper_component(status.clone());
-        *self.helper_version_cache.lock().await = status.version.clone();
+        *self.helper_version_cache.lock().await = status
+            .as_ref()
+            .ok()
+            .and_then(|status| status.version.clone());
         status
     }
 
@@ -2551,8 +2554,8 @@ mod tests {
         assert!(config.contains("path: private.txt"));
         // Mihomo Meta 1.19+ rejects provider paths outside the process workdir.
         assert!(!config.contains(r"C:\ProgramData"));
-        // strict_route is the Windows-only half of the shared generator.
-        assert!(config.contains("strict-route: true"));
+        // Mihomo 1.19.29 must leave strict-route off to preserve ::1 (ADR 0112).
+        assert!(config.contains("strict-route: false"));
         assert!(config.contains("find-process-mode: always"));
         assert!(config.contains("auto-redirect: false"));
         // Top-level `ipv6: true` (strict-route must not block `::1`, ADR

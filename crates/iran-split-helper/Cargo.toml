@@ -16,6 +16,7 @@ iran-split-ipc = { path = "../iran-split-ipc" }
 regex.workspace = true
 serde.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
@@ -29,9 +30,6 @@ libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 iran-split-helper-winacl = { path = "../iran-split-helper-winacl" }
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -68,16 +68,26 @@ impl DebugLog {
             .lock()
             .map_err(|_| io::Error::other("debug log lock is poisoned"))?;
         let incoming = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        // Windows can keep an externally deleted path visible until the last
+        // handle closes. Close our flushed append handle before checking the
+        // path, then reopen in append mode; otherwise events keep going to a
+        // delete-pending file and the recreation signal never fires.
+        #[cfg(windows)]
+        drop(state.file.take());
         // An append handle keeps writing into an unlinked inode on Linux and
         // into a delete-pending file on Windows, so a log deleted outside the
         // app would silently swallow every later event. Recreate it instead.
-        if !state.path.exists() {
+        let missing = !state.path.exists();
+        if missing || state.file.is_none() {
             if let Some(parent) = state.path.parent() {
                 fs::create_dir_all(parent)?;
             }
+            drop(state.file.take());
             state.file = Some(open_append_log(&state.path)?);
-            state.bytes_written = 0;
-            LOG_RECREATED.store(true, Ordering::SeqCst);
+            if missing {
+                state.bytes_written = 0;
+                LOG_RECREATED.store(true, Ordering::SeqCst);
+            }
         }
         {
             let file = log_file(&mut state)?;

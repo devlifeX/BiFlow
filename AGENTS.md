@@ -71,6 +71,31 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- A delete-pending Windows `debug.log` can still pass `Path::exists()` while
+  its append handle is open. Close the flushed handle before testing the
+  path, reopen only in append mode, and keep the recreation signal so the
+  environment snapshot is emitted again. Run the existing delete/recreate
+  regression on Windows/Wine as well as Linux (ADR 0114).
+- macOS users can share a primary group; socket mode 0660 does not authenticate
+  one desktop UID. Use Tokio `UnixStream::peer_cred()` on both Unix backends,
+  and accept only the configured UID or root (ADR 0114).
+- `networksetup -setdnsservers` requires `Empty` to restore DHCP DNS. A bare
+  service argument fails and leaves 127.0.0.1 configured after Mihomo stops.
+  Persist the original DNS privately before changing it, retain it across
+  helper restarts and failed restores, and propagate command failures.
+  Regression-test partial rollback and retry on every host (ADR 0114).
+- Read the helper version before passing its health Result by value; reading
+  it after `helper_component(helper_result)` fails E0382 on both Linux and
+  Windows. `helper_status` also returns a Result, so inspect its successful
+  value before reading `version`. Keep ownership order identical in every
+  platform backend and update cfg-Windows assertions when shared YAML changes.
+- macOS install paths can contain quotes as well as spaces. Quote shell
+  arguments first and encode the enclosing AppleScript string separately;
+  replace helper.toml atomically with root ownership and mode 0600. DMG
+  updates must copy the exact BiFlow.app before deleting the installed app,
+  detach even after install failure, and never recursively delete a mount
+  directory after failed detach (ADR 0114).
+
 - `RuleManager` must publish a candidate rule document before replacing its
   in-memory copy. Mutating memory first leaves an unpublished revision visible
   after a failed atomic rename; a restart then silently loses the change.
@@ -282,7 +307,7 @@ If a required command fails or emits a warning from project code, fix it in the 
 - A Windows diagnostic PowerShell run with `-File <temp .ps1>` can exit 1 in milliseconds with no stdout (execution policy set by GPO, or temp-file access), and a stdout-only runner then logs a bare exit code. Run scripts with `-EncodedCommand` (UTF-16LE Base64), force UTF-8 output, and keep the first stderr line in the error (ADR 0110).
 
 - On Windows, top-level `ipv6: false` makes Mihomo drop the TUN inet6 address. sing-tun `strict-route` then installs an unconditional WFP "block ipv6" connect filter that only exempts Mihomo, so `localhost` -> `::1` fails instantly while connected. A route exclusion cannot fix a WFP block. Keep top-level `ipv6: true` on Windows and restrict AAAA through `dns.ipv6: false` instead (ADR 0112). Mihomo v1.19.29 does **not** apply `inet6-address` to the Wintun adapter even when it is in the config (`GET /configs` reports `inet4-address` but no `inet6-address`, adapter only gets link-local `fe80::`), so `strict-route: true` still installs the block filter and `::1` stays refused. Windows must use `strict-route: false` until a Mihomo build that actually sets the inet6 address is available; `dns.ipv6: false` keeps the IPv6 leak surface minimal (ADR 0112).
-- `spawn_mihomo` uses `kill_on_drop(false)` so connectivity survives a helper crash, but when the helper restarts (reboot, reinstall, new session) `self.child` is empty and the previous Mihomo is an orphan still holding the controller port and TUN adapter. The new Mihomo cannot bind `127.0.0.1:19090`, the desktop silently talks to the stale process, and a new config (e.g. `inet6-address`) is never applied. The helper must `kill_orphaned_mihomo` (`taskkill /F /IM mihomo.exe` / `pkill -x mihomo`) before every spawn to reclaim the port and adapter (ADR 0112).
+- `spawn_mihomo` uses `kill_on_drop(false)` so connectivity survives a helper crash, but when the helper restarts (reboot, reinstall, new session) `self.child` is empty and the previous Mihomo is an orphan still holding the controller port and TUN adapter. The new Mihomo cannot bind `127.0.0.1:19090`, the desktop silently talks to the stale process, and a new config (e.g. `inet6-address`) is never applied. Before spawning, reclaim only a process whose exact executable and generation arguments belong to this helper runtime. Never use name-only `taskkill /IM` or `pkill -x`: those also terminate the installed/dev profile and unrelated clients. Treat only Unix pkill exit 1 as an intentional no-match; audit and propagate other failures (ADRs 0112, 0114).
 - Sniffer `override-destination: true` with fake-ip DNS breaks IP-based TLS connections that carry an SNI. kubectl connecting to a cluster API IP (78.109.203.123:443) with a `tls-server-name` SNI has its destination overridden to the SNI's fake-ip (198.18.x.x), so even a `PROCESS-NAME,kubectl.exe,DIRECT` rule connects to the fake-ip and the TLS handshake fails with EOF. Generate `override-destination: false` so the connection keeps its original IP; domain-based rules still use the sniffed SNI (ADR 0112).
 - `ipv6: true` alone is not enough on Mihomo v1.19.29: `GET /configs`
   reported `inet4-address` but no `inet6-address`, so the TUN had no inet6

@@ -1,6 +1,5 @@
 use super::{commands, HelperServiceError, HelperSettings, Supervisor};
 use iran_split_ipc::{HelloReply, HelperCommand, HelperError, HelperReply, PROTOCOL_VERSION};
-use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use nix::unistd::{chown, Gid, Uid};
 use std::{
     fs,
@@ -87,21 +86,11 @@ async fn handle_connection(
     mut stream: UnixStream,
     supervisor: Arc<Supervisor>,
 ) -> Result<(), HelperServiceError> {
-    let credentials = getsockopt(&stream, PeerCredentials)
-        .map_err(|error| HelperServiceError::Io(std::io::Error::from_raw_os_error(error as i32)))?;
-    let peer_uid = credentials.uid();
-    if peer_uid != supervisor.settings().authorized_uid && peer_uid != 0 {
-        warn!(
-            event = "helper.peer_rejected",
-            section = "helper_security",
-            initiator = "ipc_peer",
-            cause = "unauthorized_uid",
-            trace_route = "ipc_peer->credential_check->reject",
-            peer_uid,
-            "rejected unauthorized helper peer"
-        );
+    let Some(peer_uid) =
+        super::unix_peer::authenticated_uid(&stream, supervisor.settings().authorized_uid)?
+    else {
         return Ok(());
-    }
+    };
 
     let hello = commands::read_request(&mut stream).await?;
     let HelperCommand::Hello {
