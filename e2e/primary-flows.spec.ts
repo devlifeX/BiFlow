@@ -836,11 +836,47 @@ test.describe("primary BiFlow flows", () => {
     );
     await page.getByRole("button", { name: "Check for updates" }).click();
     await expect(page.getByText(/Version 9\.9\.9 is available/i)).toBeVisible();
-    await page.getByRole("button", { name: /Install update 9\.9\.9/i }).click();
+    await page
+      .getByRole("button", { name: /(?:Install update|Download) 9\.9\.9/i })
+      .click();
     await expect(page.getByRole("progressbar")).toBeVisible();
     await expect(
       page.getByText("an update is already in progress"),
     ).toHaveCount(0);
+  });
+
+  test("downloads the macOS update and preserves a paused connection", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "platform", { get: () => "MacIntel" });
+    });
+    await openFresh(page);
+    await connectButton(page).click();
+    const pause = page.locator("[data-connection-action='pause']");
+    await expect(pause).toBeEnabled();
+    await pause.click();
+    await expect(
+      page.getByRole("heading", { name: "Paused", exact: true }),
+    ).toBeVisible();
+    await goTo(page, "Settings", "About");
+    await page.evaluate(() =>
+      sessionStorage.setItem("biflow-mock-update-available", "1"),
+    );
+    await page.getByRole("button", { name: "Check for updates" }).click();
+    await page.getByRole("button", { name: "Download 9.9.9" }).click();
+    await expect(
+      page
+        .getByRole("region", { name: "About", exact: true })
+        .getByRole("status"),
+    ).toContainText("Drag BiFlow onto Applications");
+    await expect(
+      page.getByRole("button", { name: "Check for updates" }),
+    ).toBeEnabled();
+    await goTo(page, "Home");
+    await expect(
+      page.getByRole("heading", { name: "Paused", exact: true }),
+    ).toBeVisible();
   });
 
   test("keeps a subdomain pin exact while connected", async ({ page }) => {

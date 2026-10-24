@@ -265,12 +265,15 @@ const resources = {
       updateAvailable: "Version {{version}} is available.",
       updateFailed: "Could not check for updates.",
       updateInstall: "Install update {{version}}",
+      updateDownload: "Download {{version}}",
       updateRetry: "Retry update",
       updateDownloading: "Downloading version {{version}}…",
       updateInstalling: "Installing update…",
       updateRestarting: "Restarting BiFlow…",
       updateInstalled:
         "BiFlow was updated. Quit and open the app again to use the new version.",
+      updateDownloaded:
+        "Version {{version}} is downloaded. The disk image is open. Drag BiFlow onto Applications, quit this BiFlow from the menu bar, then open the copy in Applications.",
       updateDownloadProgress: "Download progress",
       updateIdle: "Check GitHub Releases when you are ready to update.",
       cloudRules: "Iran cloud rules",
@@ -685,12 +688,15 @@ const resources = {
       updateAvailable: "نسخه {{version}} در دسترس است.",
       updateFailed: "بررسی به‌روزرسانی انجام نشد.",
       updateInstall: "نصب به‌روزرسانی {{version}}",
+      updateDownload: "دانلود {{version}}",
       updateRetry: "تلاش دوباره",
       updateDownloading: "در حال دانلود نسخه {{version}}…",
       updateInstalling: "در حال نصب به‌روزرسانی…",
       updateRestarting: "در حال راه‌اندازی مجدد BiFlow…",
       updateInstalled:
         "BiFlow به‌روزرسانی شد. برنامه را ببندید و دوباره باز کنید تا نسخه جدید دیده شود.",
+      updateDownloaded:
+        "نسخه {{version}} دانلود شد. تصویر دیسک باز است. BiFlow را روی Applications بکشید، این برنامه را از نوار منو ببندید، سپس نسخه داخل Applications را باز کنید.",
       updateDownloadProgress: "پیشرفت دانلود",
       updateIdle:
         "وقتی آماده بودید، به‌روزرسانی GitHub Releases را بررسی کنید.",

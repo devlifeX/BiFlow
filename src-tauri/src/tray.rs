@@ -29,6 +29,27 @@ pub const fn actions_enabled(busy: Option<LifecycleBusy>) -> bool {
     busy.is_none()
 }
 
+/// Phase and in-flight action that the tray menu already describes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrayMenuKey {
+    pub phase: StackPhase,
+    pub busy: Option<LifecycleBusy>,
+}
+
+#[must_use]
+pub const fn menu_key(phase: StackPhase, busy: Option<LifecycleBusy>) -> TrayMenuKey {
+    TrayMenuKey { phase, busy }
+}
+
+/// A snapshot that still describes the menu on screen does not need a rebuild.
+#[must_use]
+pub fn menu_changed(previous: Option<TrayMenuKey>, next: TrayMenuKey) -> bool {
+    match previous {
+        Some(previous) => previous.phase != next.phase || previous.busy != next.busy,
+        None => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,6 +77,18 @@ mod tests {
         assert_eq!(labels.connection_label, "Disconnect");
         assert_eq!(labels.pause_id, "resume");
         assert_eq!(labels.pause_label, "Resume");
+    }
+
+    #[test]
+    fn menu_rebuilds_only_when_the_phase_or_busy_flag_changes() {
+        let running = menu_key(StackPhase::Running, None);
+        assert!(menu_changed(None, running));
+        assert!(!menu_changed(Some(running), running));
+        let connecting = menu_key(StackPhase::Running, Some(LifecycleBusy::Connecting));
+        assert!(menu_changed(Some(running), connecting));
+        assert!(!menu_changed(Some(connecting), connecting));
+        let paused = menu_key(StackPhase::Paused, None);
+        assert!(menu_changed(Some(running), paused));
     }
 
     #[test]

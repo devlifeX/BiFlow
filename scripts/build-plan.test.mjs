@@ -201,6 +201,38 @@ describe("release artifact names", () => {
     assert.match(source, /^#!\[cfg\(target_os = "linux"\)\]/);
   });
 
+  it("keeps the Applications alias when the macOS disk image skips Finder layout", () => {
+    const source = readFileSync(join(root, "build.sh"), "utf8");
+    const dragArgs = source.match(/macos_dmg_drag_args\(\) \{([\s\S]*?)\n\}/);
+    assert.ok(dragArgs);
+    assert.match(dragArgs[1], /--app-drop-link/);
+    assert.match(dragArgs[1], /480/);
+    assert.match(dragArgs[1], /170/);
+    assert.match(dragArgs[1], /dmg-background\.png/);
+    const fallback = source.match(
+      /bash "\$\{dmg_script\}" --skip-jenkins([\s\S]*?)macos_dmg_name/,
+    );
+    assert.ok(fallback);
+    assert.match(fallback[1], /drag_args/);
+    const macos = JSON.parse(
+      readFileSync(join(root, "src-tauri/tauri.macos.conf.json"), "utf8"),
+    );
+    assert.equal(macos.bundle.macOS.dmg.appPosition.x, 180);
+    assert.equal(macos.bundle.macOS.dmg.appPosition.y, 170);
+    assert.equal(macos.bundle.macOS.dmg.applicationFolderPosition.x, 480);
+    assert.equal(macos.bundle.macOS.dmg.applicationFolderPosition.y, 170);
+    assert.equal(macos.bundle.macOS.dmg.windowSize.width, 660);
+    assert.equal(macos.bundle.macOS.dmg.windowSize.height, 400);
+    assert.equal(
+      macos.bundle.macOS.dmg.background,
+      "packaging/macos/dmg-background.png",
+    );
+    assert.equal(
+      existsSync(join(root, macos.bundle.macOS.dmg.background)),
+      true,
+    );
+  });
+
   it("pins one build version and validates exact package metadata", () => {
     const source = readFileSync(join(root, "build.sh"), "utf8");
     assert.match(source, /BUILD_VERSION="\$\(plan version\)"/);

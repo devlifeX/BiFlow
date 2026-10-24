@@ -9,6 +9,7 @@ const REPOSITORY_URL = "https://github.com/devlifeX/BiFlow";
 export function About() {
   const { t } = useTranslation();
   const update = useAppStore((state) => state.update);
+  const platform = useAppStore((state) => state.boot?.platform);
   const checkForUpdate = useAppStore((state) => state.checkForUpdate);
   const installUpdate = useAppStore((state) => state.installUpdate);
   const retryUpdate = useAppStore((state) => state.retryUpdate);
@@ -120,7 +121,9 @@ export function About() {
               disabled={busy}
               onClick={() => void installUpdate()}
             >
-              {t("updateInstall", { version: update.version ?? "" })}
+              {platform === "macos"
+                ? t("updateDownload", { version: update.version ?? "" })
+                : t("updateInstall", { version: update.version ?? "" })}
             </AppButton>
           ) : null}
           {showRetry ? (
@@ -171,6 +174,8 @@ function updateMessage(
       return t("updateRestarting");
     case "installed":
       return t("updateInstalled");
+    case "downloaded":
+      return t("updateDownloaded", { version: update.version ?? "" });
     case "failed":
       return t("updateFailed");
     default:

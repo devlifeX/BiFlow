@@ -64,6 +64,26 @@ macos_app_name() {
   command printf 'BiFlow.app\n'
 }
 
+# Positions match `src-tauri/tauri.macos.conf.json`. `--skip-jenkins` skips
+# Finder layout, but `--app-drop-link` still creates the Applications alias.
+macos_dmg_drag_args() {
+  local app
+  app="$(macos_app_name)"
+  command printf '%s\n' \
+    --volname BiFlow \
+    --icon "${app}" \
+    180 \
+    170 \
+    --app-drop-link \
+    480 \
+    170 \
+    --window-size \
+    660 \
+    400 \
+    --hide-extension "${app}" \
+    --background "${PROJECT_DIR}/packaging/macos/dmg-background.png"
+}
+
 usage() {
   command cat <<'EOF'
 BiFlow release builder
@@ -879,7 +899,15 @@ build_macos() {
         "${app_dir}"/rw.*.dmg \
         "${dmg_dir}"/rw.*.dmg \
         "${dmg_dir}/$(macos_dmg_name)"
+      [[ -f "${PROJECT_DIR}/packaging/macos/dmg-background.png" ]] || \
+        die "dmg background is missing"
+      local drag_args=()
+      local drag_arg
+      while IFS= read -r drag_arg; do
+        drag_args+=("${drag_arg}")
+      done < <(macos_dmg_drag_args)
       ( cd -- "${dmg_dir}" && bash "${dmg_script}" --skip-jenkins \
+          ${drag_args[@]+"${drag_args[@]}"} \
           "$(macos_dmg_name)" "${app_dir}" ) \
         || die "bundle_dmg.sh --skip-jenkins failed"
     fi

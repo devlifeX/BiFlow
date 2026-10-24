@@ -71,6 +71,12 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- A failed macOS disk-image open must not resume a user-paused stack. Only
+  package kinds that pause the stack for installation may restore it after
+  failure; pass the install kind into the recovery decision (ADR 0129).
+- Scope About update assertions to its region: the network footer also has
+  a `status` role, so a page-wide status locator matches two elements.
+
 - macOS ships Bash 3.2, where expanding an empty array under `set -u` fails
   even after `array=()`. Guard optional build arguments with
   `${array[@]+"${array[@]}"}` and test signed/unsigned argument forwarding
@@ -752,6 +758,16 @@ SHA-256")`); launchd `KeepAlive` then restarts it in a crash loop and the
   default gateway, and delete `netstat` routes that still name the TUN. Kill
   a scoped Mihomo orphan on stop when the child handle is already empty
   (ADR 0121).
+- Calling `sizeToFit` and `setFrame` on the macOS status button every second
+  enters `NSStatusItemScene updateSettings`, which `performAsyncAndWait`s.
+  On macOS 26 that wait can sit on the main thread until force quit (73
+  minutes on 23 October 2026) while `MenuItem::with_id` from a worker blocks
+  forever on the same thread. Change only the attributed title when the
+  column width is unchanged, and rebuild the tray menu on the main thread
+  only when phase or busy changes (ADR 0122).
+- A `--skip-jenkins` DMG retry that drops `--app-drop-link` ships a disk
+  image with no Applications alias. Keep the same positions and background
+  as `tauri.macos.conf.json` on that retry (ADR 0128).
 - macOS `NET_RT_IFLIST2` `if_data64.ifi_ibytes` does not match `netstat -ib`
   on current Darwin. Menu bar speeds must read `IFMIB_IFDATA` /
   `IFDATA_GENERAL`. Wi-Fi reports `IFT_ETHER`, so classify with
@@ -772,3 +788,20 @@ SHA-256")`); launchd `KeepAlive` then restarts it in a crash loop and the
   `BiFlow_*_aarch64.dmg`. Sign that disk image in the release job and publish
   it as the `macos-aarch64` entry. The platform key must stay identical to
   `signed_target` for `InstallKind::Dmg` on `aarch64` (ADR 0126).
+- A macOS-only update outcome must be `#[cfg(target_os = "macos")]` on the
+  enum variant and on every match arm. Linux and Windows Clippy compile
+  that variant as dead code when only the macOS installer constructs it
+  (ADR 0129).
+- `cargo deny check` fails a pull request when `rustls-webpki`, `tokio`,
+  `webpki-roots`, or `webpki-root-certs` fall inside a new RustSec range.
+  Update them with `cargo update -p`. `webpki-roots` has two majors, so
+  name `webpki-roots@1` (RUSTSEC-2026-0381, 0382, 0383, 0386).
+- macOS in-app update must not replace `/Applications/BiFlow.app` or quit.
+  Closing the window only hides the menu-bar process, so an automatic swap
+  and relaunch was easy to miss and left the operator on the old version
+  when the helper never ran. Download the signed disk image, open it with
+  `/usr/bin/open`, and leave the tunnel up. The new version starts only
+  after the operator drags BiFlow onto Applications, quits the menu-bar
+  process, and opens that Applications copy (ADR 0129). Linux `.deb` still
+  waits for a manual restart. AppImage and NSIS still use their replace
+  helpers.

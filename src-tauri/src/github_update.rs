@@ -2,7 +2,9 @@
 //!
 //! Check uses the public Releases API. Install downloads the platform package
 //! and applies it with `pkexec apt-get` (`.deb`), a replace helper (`AppImage`),
-//! or an elevated NSIS installer (Windows). Do not log asset URLs.
+//! or an elevated NSIS installer (Windows). On macOS the verified disk image
+//! is opened for a drag install and the running app is left in place. Do not
+//! log asset URLs.
 
 use serde::Deserialize;
 use std::{
@@ -52,6 +54,12 @@ pub enum ApplyOutcome {
     ManualRestart,
     /// A helper script will replace this process after exit.
     HelperRestart,
+    /// The signed macOS disk image is open. Nothing was replaced or restarted.
+    ///
+    /// Only macOS constructs this variant. Leaving it in the Linux and Windows
+    /// builds makes Clippy reject it as dead code.
+    #[cfg(target_os = "macos")]
+    DiskImageOpened,
 }
 
 #[must_use]
@@ -325,12 +333,15 @@ async fn fetch_latest(
     parse_release(&bytes)
 }
 
-/// Applies a downloaded package. The caller must pause the stack first.
+/// Applies a downloaded package.
+///
+/// Linux and Windows callers pause the stack first. A macOS disk image is
+/// only opened, so that caller must leave the stack and this process running.
 ///
 /// # Errors
 ///
-/// Returns a platform error when `pkexec`, the helper script, or NSIS cannot
-/// start.
+/// Returns a platform error when `pkexec`, the helper script, NSIS, or
+/// `open` cannot start.
 pub async fn apply_package(
     kind: InstallKind,
     package: &Path,
@@ -353,11 +364,12 @@ pub async fn apply_package(
         InstallKind::Dmg => {
             #[cfg(target_os = "macos")]
             {
-                install_dmg(package).await?;
-                Ok(ApplyOutcome::ManualRestart)
+                open_downloaded_dmg(package).await?;
+                Ok(ApplyOutcome::DiskImageOpened)
             }
             #[cfg(not(target_os = "macos"))]
             {
+                let _ = (package, expected_version);
                 Err("macOS packages cannot be installed on this platform".into())
             }
         }
@@ -435,119 +447,31 @@ async fn install_appimage(package: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Installs a downloaded `.dmg` on macOS. Mounts the image, copies the bundled
-/// `.app` into `/Applications` with administrator privileges, then unmounts.
-/// The operator must restart `BiFlow` from `/Applications` afterwards.
+/// Opens the verified disk image in Finder.
+///
+/// The user drags `BiFlow` onto Applications. This process stays running, so
+/// the menu-bar copy keeps the old version until they quit it and open the
+/// Applications bundle.
 #[cfg(target_os = "macos")]
-async fn install_dmg(package: &Path) -> Result<(), String> {
+async fn open_downloaded_dmg(package: &Path) -> Result<(), String> {
     info!(
-        event = "update.dmg_install_started",
+        event = "update.dmg_opened",
         section = "updater",
         initiator = "tauri_command",
         cause = "verified_package",
-        trace_route = "ui->apply_app_update->install_dmg",
-        "installing the verified macOS update"
+        trace_route = "ui->apply_app_update->open_downloaded_dmg",
+        "opening the verified disk image for drag install"
     );
-    let mountpoint = std::env::temp_dir().join("biflow-update").join("dmg-mount");
-    tokio::fs::create_dir_all(&mountpoint)
-        .await
-        .map_err(|error| error.to_string())?;
-    let attach = tokio::process::Command::new("hdiutil")
-        .args(["attach", "-nobrowse", "-mountpoint"])
-        .arg(&mountpoint)
+    let status = tokio::process::Command::new("/usr/bin/open")
         .arg(package)
-        .output()
-        .await
-        .map_err(|error| error.to_string())?;
-    if !attach.status.success() {
-        return Err("could not mount the update image".into());
-    }
-    let result = install_mounted_dmg(&mountpoint).await;
-    let detach = tokio::process::Command::new("hdiutil")
-        .args(["detach", "-force"])
-        .arg(&mountpoint)
         .status()
-        .await;
-    if !detach.is_ok_and(|status| status.success()) {
-        warn!(
-            event = "update.dmg_detach_failed",
-            section = "updater",
-            initiator = "tauri_command",
-            cause = "image_detach_failed",
-            trace_route = "ui->apply_app_update->install_dmg->cleanup",
-            "could not detach the update image"
-        );
-    } else if tokio::fs::remove_dir(&mountpoint).await.is_err() {
-        warn!(
-            event = "update.dmg_mount_cleanup_failed",
-            section = "updater",
-            initiator = "tauri_command",
-            cause = "mount_directory_removal_failed",
-            trace_route = "ui->apply_app_update->install_dmg->cleanup",
-            "could not remove the empty update mount directory"
-        );
-    }
-    info!(
-        event = "update.dmg_install_finished",
-        section = "updater",
-        initiator = "tauri_command",
-        cause = "installer_returned",
-        success = result.is_ok(),
-        trace_route = "ui->apply_app_update->install_dmg",
-        "macOS update installer finished"
-    );
-    result
-}
-
-#[cfg(target_os = "macos")]
-async fn install_mounted_dmg(mountpoint: &Path) -> Result<(), String> {
-    if !mountpoint.join("BiFlow.app").is_dir() {
-        return Err("the update image has no BiFlow.app bundle".into());
-    }
-    let script_path = std::env::temp_dir()
-        .join("biflow-update")
-        .join("apply-dmg.sh");
-    tokio::fs::write(&script_path, dmg_install_script(mountpoint))
         .await
         .map_err(|error| error.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = tokio::fs::metadata(&script_path)
-            .await
-            .map_err(|error| error.to_string())?
-            .permissions();
-        permissions.set_mode(0o700);
-        tokio::fs::set_permissions(&script_path, permissions)
-            .await
-            .map_err(|error| error.to_string())?;
-    }
-    let apple_script = crate::helper_install::macos_admin_applescript(&script_path);
-    let install = tokio::process::Command::new("osascript")
-        .args(["-e", &apple_script])
-        .output()
-        .await
-        .map_err(|error| error.to_string())?;
-    if install.status.success() {
+    if status.success() {
         Ok(())
-    } else if install.status.code() == Some(-128) {
-        Err("package install was cancelled".into())
     } else {
-        Err("package install failed".into())
+        Err("could not open the update disk image".into())
     }
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn dmg_install_script(mountpoint: &Path) -> String {
-    format!(
-        "set -e\n\
-         staging=$(mktemp -d '/Applications/.biflow-update.XXXXXX')\n\
-         trap 'rm -rf \"$staging\"' EXIT\n\
-         cp -R {source} \"$staging/BiFlow.app\"\n\
-         rm -rf '/Applications/BiFlow.app'\n\
-         mv \"$staging/BiFlow.app\" '/Applications/BiFlow.app'\n",
-        source = sh_single_quote(&mountpoint.join("BiFlow.app").to_string_lossy()),
-    )
 }
 
 async fn install_nsis(
@@ -821,23 +745,16 @@ mod tests {
     }
 
     #[test]
-    fn dmg_update_quotes_the_source_and_copies_before_replacing_the_installed_app() {
-        let script = dmg_install_script(Path::new("/tmp/owner's update image"));
-        let source = sh_single_quote(
-            &Path::new("/tmp/owner's update image")
-                .join("BiFlow.app")
-                .to_string_lossy(),
-        );
-        assert!(script.contains(&format!("cp -R {source} \"$staging/BiFlow.app\"")));
-        let copy = script.find("cp -R ").expect("copy");
-        let remove = script
-            .find("rm -rf '/Applications/BiFlow.app'")
-            .expect("replace");
-        assert!(
-            copy < remove,
-            "a failed copy must preserve the installed app"
-        );
-        assert!(script.contains("mv \"$staging/BiFlow.app\" '/Applications/BiFlow.app'"));
+    fn macos_update_opens_the_disk_image_without_replacing_the_app() {
+        let source = include_str!("github_update.rs");
+        let production = source.split("mod tests").next().expect("production half");
+        assert!(production.contains("async fn open_downloaded_dmg"));
+        assert!(production.contains("ApplyOutcome::DiskImageOpened"));
+        assert!(production.contains("/usr/bin/open"));
+        assert!(!production.contains("fn install_dmg"));
+        assert!(!production.contains("fn dmg_relaunch_script"));
+        assert!(!production.contains("with administrator privileges"));
+        assert!(!production.contains("/Applications/BiFlow.app"));
     }
 
     #[test]

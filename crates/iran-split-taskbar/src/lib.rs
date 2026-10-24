@@ -96,6 +96,56 @@ pub fn format_rate_in(rate: Option<f64>, unit: SpeedUnit) -> String {
 /// is the longest automatic rate, so normal updates do not resize the item.
 const MENU_BAR_COLUMNS: usize = 11;
 
+/// What the menu bar already shows, if this process has drawn it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuBarRecord<'a> {
+    /// No title has been applied in this process.
+    Unknown,
+    /// The status icon is visible and the speed title is clear.
+    Hidden,
+    /// The stacked speed title currently on the status item.
+    Shown(&'a str),
+}
+
+/// How the next menu-bar sample may touch `AppKit`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuBarUpdate {
+    /// The visible title already matches. Do not call `AppKit`.
+    Unchanged,
+    /// Replace the attributed title. The item width stays the same.
+    Title,
+    /// Show or hide the speeds, or change the line width.
+    Layout,
+}
+
+/// Digit changes inside the fixed column width must not resize the status item.
+///
+/// Resizing enters the status-item scene update, which can block the main
+/// thread until the process is force-quit.
+#[must_use]
+pub fn menu_bar_update(previous: MenuBarRecord<'_>, next: Option<&str>) -> MenuBarUpdate {
+    match (previous, next) {
+        (MenuBarRecord::Unknown | MenuBarRecord::Hidden, None) => MenuBarUpdate::Unchanged,
+        (MenuBarRecord::Shown(previous), Some(next)) if previous == next => {
+            MenuBarUpdate::Unchanged
+        }
+        (MenuBarRecord::Shown(previous), Some(next))
+            if menu_bar_line_width(previous) == menu_bar_line_width(next) =>
+        {
+            MenuBarUpdate::Title
+        }
+        _ => MenuBarUpdate::Layout,
+    }
+}
+
+fn menu_bar_line_width(label: &str) -> usize {
+    label
+        .lines()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
 /// Upload above download, each line the same width, arrows aligned.
 #[must_use]
 pub fn menu_bar_label(upload: Option<f64>, download: Option<f64>, unit: SpeedUnit) -> String {
@@ -192,6 +242,41 @@ mod tests {
         let wide: Vec<_> = wide.lines().collect();
         assert_eq!(wide[0].chars().count(), wide[1].chars().count());
         assert!(wide[0].chars().count() > MENU_BAR_COLUMNS);
+    }
+
+    #[test]
+    fn digit_changes_do_not_resize_the_menu_bar_item() {
+        let idle = menu_bar_label(None, Some(0.0), SpeedUnit::AutoBits);
+        let live = menu_bar_label(Some(14_000.0), Some(450_000.0), SpeedUnit::AutoBits);
+        assert_eq!(
+            menu_bar_update(MenuBarRecord::Shown(&idle), Some(&live)),
+            MenuBarUpdate::Title
+        );
+        assert_eq!(
+            menu_bar_update(MenuBarRecord::Shown(&live), Some(&live)),
+            MenuBarUpdate::Unchanged
+        );
+        assert_eq!(
+            menu_bar_update(MenuBarRecord::Unknown, Some(&live)),
+            MenuBarUpdate::Layout
+        );
+        assert_eq!(
+            menu_bar_update(MenuBarRecord::Shown(&live), None),
+            MenuBarUpdate::Layout
+        );
+        assert_eq!(
+            menu_bar_update(MenuBarRecord::Hidden, None),
+            MenuBarUpdate::Unchanged
+        );
+        assert_eq!(
+            menu_bar_update(MenuBarRecord::Unknown, None),
+            MenuBarUpdate::Unchanged
+        );
+        let wide = menu_bar_label(Some(2_000_000_000.0), Some(1.0), SpeedUnit::Bits);
+        assert_eq!(
+            menu_bar_update(MenuBarRecord::Shown(&live), Some(&wide)),
+            MenuBarUpdate::Layout
+        );
     }
 
     #[test]

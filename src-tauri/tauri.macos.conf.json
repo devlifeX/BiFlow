@@ -3,7 +3,22 @@
     "macOS": {
       "minimumSystemVersion": "11.0",
       "signingIdentity": null,
-      "hardenedRuntime": true
+      "hardenedRuntime": true,
+      "dmg": {
+        "background": "packaging/macos/dmg-background.png",
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        },
+        "appPosition": {
+          "x": 180,
+          "y": 170
+        },
+        "applicationFolderPosition": {
+          "x": 480,
+          "y": 170
+        }
+      }
     },
     "resources": {
       "../vendor/mihomo/darwin/mihomo": "dependencies/mihomo",

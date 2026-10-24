@@ -42,3 +42,16 @@ BiFlow's status button was found and the stacked title was applied.
 Coverage includes virtual-name and media classification, default-route
 selection, a host read without elevation, equal-width menu bar lines, macOS
 settings unit tests, and the English/Persian speed-save flow.
+
+Amendment (6.2.77): the one-second sampler used to call `sizeToFit`, move the
+click overlay, and clear the status image on every tick, including while the
+speeds were hidden. On macOS 26 that enters `NSStatusItemScene updateSettings`,
+which waits with `performAsyncAndWait`. A hang on 23 October 2026 left the
+main thread there for 73 minutes (`blocked by queue in a transient state`).
+A tray-menu rebuild on a worker called `MenuItem::with_id`, which waits for
+that same thread, so the menu never returned and the window had to be force
+quit. Digit changes that keep the fixed column width now replace only the
+attributed title. `sizeToFit`, the overlay frame, and the icon change only
+when speeds are shown or hidden, when a line gets wider, or when the logo is
+visible again. Identical text does not touch `AppKit`. Tray menu rebuilds run
+on the main thread and only when the phase or busy flag changes.

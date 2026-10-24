@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { About } from "./About";
 import { useAppStore } from "../store/app";
+import type { BootstrapResult } from "../api/models";
 import i18n from "../i18n/config";
 
 vi.mock("../version", () => ({
@@ -17,6 +18,7 @@ describe("About", () => {
 
   beforeEach(() => {
     useAppStore.setState({
+      boot: null,
       update: {
         phase: "idle",
         percent: null,
@@ -77,6 +79,41 @@ describe("About", () => {
     expect(screen.getByRole("status")).toHaveTextContent(
       /quit and open the app again/i,
     );
+  });
+
+  it("tells the operator to drag a downloaded macOS disk image", () => {
+    useAppStore.setState({
+      update: {
+        phase: "downloaded",
+        percent: 100,
+        version: "1.3.0",
+        error: null,
+      },
+    });
+    render(<About />);
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /drag BiFlow onto Applications/i,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(/menu bar/i);
+  });
+
+  it("offers a download on macOS and an install elsewhere", async () => {
+    const installUpdate = vi.fn(async () => undefined);
+    useAppStore.setState({
+      boot: { platform: "macos" } as BootstrapResult,
+      update: {
+        phase: "available",
+        percent: null,
+        version: "1.3.0",
+        error: null,
+      },
+      installUpdate,
+    });
+    render(<About />);
+    await userEvent.click(
+      screen.getByRole("button", { name: /download 1\.3\.0/i }),
+    );
+    expect(installUpdate).toHaveBeenCalledOnce();
   });
 
   it("offers install when an update is available", async () => {

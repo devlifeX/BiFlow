@@ -170,6 +170,8 @@ describe("Tauri frontend contract", () => {
     assert.match(rust, /MenuItem::with_id\(\s*app,\s*"dashboard"/);
     assert.match(rust, /app.emit\("app-navigate", "dashboard"\)/);
     assert.match(rust, /apply_tray_menu/);
+    assert.match(rust, /run_on_main_thread\(move \|\| \{/);
+    assert.match(rust, /fn replace_tray_menu/);
     const tray = readFileSync(join(root, "src-tauri/src/tray.rs"), "utf8");
     assert.match(tray, /fn labels_for/);
     assert.match(tray, /fn actions_enabled/);
@@ -421,7 +423,18 @@ describe("Tauri frontend contract", () => {
     assert.match(githubUpdate, /\$process\.ExitCode -ne 0/);
     assert.match(githubUpdate, /1223/);
     assert.match(rust, /\.try_begin\(/);
-    assert.match(rust, /phase: "installed"/);
+    assert.match(
+      rust,
+      /ManualRestart =>[\s\S]*?emit_finished_update\([\s\S]*?"installed"/,
+    );
+    assert.match(
+      rust,
+      /DiskImageOpened =>[\s\S]*?emit_finished_update\([\s\S]*?"downloaded"/,
+    );
+    const updater = githubUpdate.split("mod tests")[0];
+    assert.match(updater, /async fn open_downloaded_dmg/);
+    assert.doesNotMatch(updater, /fn install_dmg/);
+    assert.doesNotMatch(updater, /fn dmg_relaunch_script/);
     assert.doesNotMatch(rust, /fn spawn_background_update_checks\(/);
     assert.doesNotMatch(rust, /fn fetch_signed_update\(/);
     assert.doesNotMatch(rust, /open_linux_deb_release/);

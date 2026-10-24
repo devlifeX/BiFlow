@@ -637,6 +637,15 @@ async function simulateInstallProgress(version: string) {
     });
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
+  if (/mac/i.test(navigator.platform)) {
+    emitUpdateProgress({
+      phase: "downloaded",
+      percent: 100,
+      version,
+      error: null,
+    });
+    return;
+  }
   emitUpdateProgress({
     phase: "installing",
     percent: 100,
