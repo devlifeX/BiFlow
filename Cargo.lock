@@ -2046,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-cli"
-version = "6.2.79"
+version = "6.2.80"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2064,7 +2064,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-clients"
-version = "6.2.79"
+version = "6.2.80"
 dependencies = [
  "async-trait",
  "ipnet",
@@ -2080,7 +2080,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-config"
-version = "6.2.79"
+version = "6.2.80"
 dependencies = [
  "hex",
  "rand 0.9.5",
@@ -2093,7 +2093,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-core"
-version = "6.2.79"
+version = "6.2.80"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2110,7 +2110,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-desktop"
-version = "6.2.79"
+version = "6.2.80"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -2152,7 +2152,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-helper"
-version = "6.2.79"
+version = "6.2.80"
 dependencies = [
  "clap",
  "hex",
@@ -2177,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-helper-winacl"
-version = "6.2.79"
+version = "6.2.80"
 dependencies = [
  "tokio",
  "windows",
@@ -2185,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-ipc"
-version = "6.2.79"
+version = "6.2.80"
 dependencies = [
  "bytes",
  "chrono",
@@ -2198,7 +2198,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-mihomo"
-version = "6.2.79"
+version = "6.2.80"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2221,7 +2221,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-netstats"
-version = "6.2.79"
+version = "6.2.80"
 dependencies = [
  "libc",
  "tempfile",
@@ -2230,7 +2230,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-platform-linux"
-version = "6.2.79"
+version = "6.2.80"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2254,7 +2254,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-platform-macos"
-version = "6.2.79"
+version = "6.2.80"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2278,7 +2278,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-platform-win"
-version = "6.2.79"
+version = "6.2.80"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2301,7 +2301,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-rules"
-version = "6.2.79"
+version = "6.2.80"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2323,7 +2323,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-taskbar"
-version = "6.2.79"
+version = "6.2.80"
 dependencies = [
  "iran-split-config",
  "objc2",

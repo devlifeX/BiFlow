@@ -71,6 +71,12 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- A failed macOS disk-image open must not resume a user-paused stack. Only
+  package kinds that pause the stack for installation may restore it after
+  failure; pass the install kind into the recovery decision (ADR 0129).
+- Scope About update assertions to its region: the network footer also has
+  a `status` role, so a page-wide status locator matches two elements.
+
 - macOS ships Bash 3.2, where expanding an empty array under `set -u` fails
   even after `array=()`. Guard optional build arguments with
   `${array[@]+"${array[@]}"}` and test signed/unsigned argument forwarding

@@ -15,3 +15,8 @@ only hides it, and the single-instance plugin delivers a later launch to that
 same process. The new version runs after the operator quits BiFlow from the
 menu bar and opens the Applications copy. Linux `.deb` still waits for a
 manual restart. AppImage and NSIS still hand off to their replace helpers.
+
+Amendment (6.2.80): failure to open the downloaded disk image also preserves
+the stack state. The recovery path receives the install kind and resumes a
+paused stack only for an in-place installer. A user-paused macOS connection
+must remain paused when Finder cannot open the image.

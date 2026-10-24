@@ -2807,8 +2807,15 @@ fn verify_direct_rules_after_upgrade(data: &Path) -> Result<(), String> {
         .map_err(|cause| format!("could not clear route-pin upgrade guard: {cause}"))
 }
 
-async fn restore_stack_after_failed_install(services: &AppServices) {
-    if matches!(services.engine.snapshot().phase, StackPhase::Paused) {
+fn failed_update_requires_resume(kind: github_update::InstallKind, phase: StackPhase) -> bool {
+    kind != github_update::InstallKind::Dmg && phase == StackPhase::Paused
+}
+
+async fn restore_stack_after_failed_install(
+    services: &AppServices,
+    kind: github_update::InstallKind,
+) {
+    if failed_update_requires_resume(kind, services.engine.snapshot().phase) {
         if let Err(cause) = services.engine.resume_stack().await {
             warn!(
                 event = "update.stack_restore_failed",
@@ -2819,6 +2826,16 @@ async fn restore_stack_after_failed_install(services: &AppServices) {
                 "paused stack could not be restored after a failed install"
             );
         }
+    } else {
+        info!(
+            event = "update.stack_restore_skipped",
+            section = "updates",
+            initiator = "install_update",
+            cause = "no_installer_pause_to_restore",
+            trace_route = "install_update->restore_stack_after_failed_install",
+            install_kind = ?kind,
+            "failed update preserves the existing stack state"
+        );
     }
 }
 
@@ -3041,7 +3058,7 @@ async fn apply_downloaded_package(
         match github_update::apply_package(kind, package, &current_exe, &target_version).await {
             Ok(outcome) => outcome,
             Err(cause) => {
-                restore_stack_after_failed_install(services(app)?).await;
+                restore_stack_after_failed_install(services(app)?, kind).await;
                 emit_update_progress(
                     app,
                     UpdateProgress {
@@ -4303,6 +4320,21 @@ mod tests {
     fn quit_releases_the_network_and_an_update_exit_does_not() {
         assert!(exit_releases_owned_network(false));
         assert!(!exit_releases_owned_network(true));
+    }
+
+    #[test]
+    fn failed_disk_image_open_preserves_a_user_paused_stack() {
+        use github_update::InstallKind;
+
+        assert!(
+            !failed_update_requires_resume(InstallKind::Dmg, StackPhase::Paused),
+            "opening a DMG never pauses the stack, so failure must not resume it"
+        );
+        for kind in [InstallKind::Deb, InstallKind::AppImage, InstallKind::Nsis] {
+            assert!(failed_update_requires_resume(kind, StackPhase::Paused));
+            assert!(!failed_update_requires_resume(kind, StackPhase::Running));
+            assert!(!failed_update_requires_resume(kind, StackPhase::Stopped));
+        }
     }
 
     #[test]

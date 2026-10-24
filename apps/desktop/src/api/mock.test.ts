@@ -1,10 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MOCK_HIDDIFY_ID } from "../lib/outbound";
 import { APP_VERSION } from "../version";
 import type { StackSnapshot } from "./models";
 import { mockApi, resetMockState } from "./mock";
 
 describe("mock transport", () => {
+  afterEach(() => vi.restoreAllMocks());
+
   beforeEach(() => {
     sessionStorage.removeItem("biflow-mock-force-missing-helper");
     resetMockState();
@@ -172,6 +174,7 @@ describe("mock transport", () => {
   });
 
   it("emits download progress during mock install", async () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux x86_64");
     sessionStorage.setItem("biflow-mock-update-available", "1");
     const phases: string[] = [];
     const unsubscribe = mockApi.subscribeUpdateProgress((progress) => {
@@ -181,6 +184,22 @@ describe("mock transport", () => {
     unsubscribe();
     expect(phases).toContain("downloading");
     expect(phases.at(-1)).toBe("restarting");
+  });
+
+  it("finishes a macOS update as downloaded without starting an installer", async () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+    sessionStorage.setItem("biflow-mock-update-available", "1");
+    const before = await mockApi.getSnapshot();
+    const phases: string[] = [];
+    const unsubscribe = mockApi.subscribeUpdateProgress((progress) => {
+      phases.push(progress.phase);
+    });
+    await mockApi.installUpdate();
+    unsubscribe();
+    expect(phases.at(-1)).toBe("downloaded");
+    expect(phases).not.toContain("installing");
+    expect(phases).not.toContain("restarting");
+    expect(await mockApi.getSnapshot()).toEqual(before);
   });
 
   it("publishes real start stages on the snapshot", async () => {
