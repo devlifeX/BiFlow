@@ -151,7 +151,7 @@ pub async fn restore(persist: &Path, endpoints: &[(String, u16)]) -> Result<(), 
 
 fn unchanged_after_clear(original: &Snapshot, current: &Snapshot) -> bool {
     let mut disabled = original.clone();
-    disabled.mode = current.mode.clone();
+    disabled.mode.clone_from(&current.mode);
     matches!(current.mode.as_str(), "none" | "0" | "") && current == &disabled
 }
 

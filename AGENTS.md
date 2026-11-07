@@ -71,6 +71,10 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- Reuse an existing `String` with `clone_from` when comparing a normalized
+  Linux proxy snapshot. Its native Clippy cfg rejects assignment from `clone`,
+  which the Windows workspace check cannot see (ADR 0132).
+
 - Clearing a user's already-enabled local proxy during Connect is temporary
   ownership, not permission to discard their working network after Disconnect.
   Capture before launching clients, retain that first baseline, and hand it back
