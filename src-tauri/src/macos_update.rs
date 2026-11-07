@@ -82,7 +82,9 @@ fn relaunch_script(pid: u32, target: &Path, log: &Path, trace_id: uuid::Uuid) ->
 target={target}
 log={log}
 audit() {{
-    printf '%s\n' '{{"level":"INFO","fields":{{"event":"update.relaunch_result","section":"updates","initiator":"user_relaunch_helper","cause":"'"$1"'","trace_route":"update->wait_old_pid->open","trace_id":"{trace_id}"}}}}' >> "$log"
+    level=ERROR
+    if [ "$1" = launch_requested ]; then level=INFO; fi
+    printf '{{"timestamp":"%s","level":"%s","event":"update.relaunch_result","section":"updates","initiator":"user_relaunch_helper","cause":"%s","trace_route":"update->wait_old_pid->open","trace_id":"{trace_id}"}}\n' "$(/bin/date -u +'%Y-%m-%dT%H:%M:%SZ')" "$level" "$1" >> "$log"
 }}
 count=0
 while /bin/kill -0 {pid} 2>/dev/null; do
@@ -441,7 +443,9 @@ mod tests {
             .lines()
             .map(|line| {
                 let event: serde_json::Value = serde_json::from_str(line).unwrap();
-                event["fields"]["cause"].as_str().unwrap().to_owned()
+                assert!(event["timestamp"].as_str().unwrap().ends_with('Z'));
+                assert_eq!(event["event"], "update.relaunch_result");
+                event["cause"].as_str().unwrap().to_owned()
             })
             .collect();
         assert_eq!(causes, ["launch_requested", "launch_failed"]);

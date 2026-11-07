@@ -71,6 +71,11 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- Relaunch helpers that append JSONL must use the diagnostic writer's flat
+  event schema, including timestamp, level, and top-level event/action fields.
+  A nested `fields` object makes the launch result invisible to the normal log
+  reader; cover the actual JSON record shape in native tests (ADR 0131).
+
 - A parameter used only by a macOS cfg branch cannot be underscore-prefixed:
   native Clippy rejects `used_underscore_binding`. Use its ordinary name and
   consume the operation ID in the shared structured installer event so every
