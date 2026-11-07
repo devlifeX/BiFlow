@@ -2,6 +2,7 @@
 
 use crate::helper_install::macos_shell_quote;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 #[cfg(target_os = "macos")]
 use tracing::{info, warn};
 
@@ -126,25 +127,22 @@ pub async fn install(
         trace_route = "update->hdiutil->install_bundle",
         "mounting verified update image"
     );
-    let attached = tokio::process::Command::new("/usr/bin/hdiutil")
-        .args([
-            "attach",
-            "-readonly",
-            "-nobrowse",
-            "-noautoopen",
-            "-mountpoint",
-        ])
-        .arg(&mount)
-        .arg(package)
-        .output()
-        .await;
+    let attached = attach_image(package, &mount).await;
     // Even an attach failure can leave a mounted device. Never recursively
     // remove the mount root unless detach has positively succeeded.
     let result = match attached {
         Ok(output) if output.status.success() => {
             replace_bundle(&directory, &mount.join("BiFlow.app"), &target, version).await
         }
-        _ => Err("could not mount the verified update disk image".into()),
+        failure => {
+            warn!(trace_id = %trace_id, event = "update.dmg_mount_failed",
+                section = "updates", initiator = "install_update",
+                cause = if failure.is_err() { "attach_execution_failed" } else { "attach_rejected" },
+                exit_code = failure.ok().and_then(|output| output.status.code()),
+                trace_route = "update->hdiutil->attach",
+                "could not attach the verified disk image");
+            Err("could not mount the verified update disk image".into())
+        }
     };
     cleanup_mount(&directory, &mount, trace_id).await;
     result?;
@@ -152,12 +150,36 @@ pub async fn install(
 }
 
 #[cfg(target_os = "macos")]
-async fn cleanup_mount(directory: &Path, mount: &Path, trace_id: uuid::Uuid) {
-    let detached = tokio::process::Command::new("/usr/bin/hdiutil")
-        .arg("detach")
+async fn attach_image(package: &Path, mount: &Path) -> std::io::Result<std::process::Output> {
+    let mut command = tokio::process::Command::new("/usr/bin/hdiutil");
+    command
+        .args([
+            "attach",
+            "-readonly",
+            "-nobrowse",
+            "-noautoopen",
+            "-mountpoint",
+        ])
         .arg(mount)
-        .output()
-        .await;
+        .arg(package)
+        .kill_on_drop(true);
+    disk_command(command.output(), Duration::from_secs(60)).await
+}
+
+async fn disk_command<T>(
+    command: impl std::future::Future<Output = std::io::Result<T>>,
+    budget: Duration,
+) -> std::io::Result<T> {
+    tokio::time::timeout(budget, command).await.map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "disk image command timed out")
+    })?
+}
+
+#[cfg(target_os = "macos")]
+async fn cleanup_mount(directory: &Path, mount: &Path, trace_id: uuid::Uuid) {
+    let mut command = tokio::process::Command::new("/usr/bin/hdiutil");
+    command.arg("detach").arg(mount).kill_on_drop(true);
+    let detached = disk_command(command.output(), Duration::from_secs(20)).await;
     if detached.is_ok_and(|output| output.status.success()) {
         if std::fs::remove_dir_all(directory).is_err() {
             warn!(trace_id = %trace_id, event = "update.staging_cleanup_failed",
@@ -230,6 +252,31 @@ async fn replace_bundle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn disk_command_preserves_failures_and_bounds_a_stalled_operation() {
+        let result = disk_command(
+            async { Ok::<_, std::io::Error>(42) },
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(result.unwrap(), 42);
+        let refused = disk_command(
+            async { Err::<(), _>(std::io::Error::from(std::io::ErrorKind::PermissionDenied)) },
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(
+            refused.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let stalled = disk_command(
+            std::future::pending::<std::io::Result<()>>(),
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(stalled.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    }
 
     #[test]
     fn installed_location_is_preserved_but_disk_images_are_not_destinations() {
@@ -343,50 +390,55 @@ mod tests {
         std::fs::create_dir(&payload).unwrap();
         bundle(&payload, "BiFlow.app", "6.2.82");
         let image = fixtures.path().join("update.dmg");
+        let volume_name = format!("BiFlow-test-{}", uuid::Uuid::new_v4());
         let created = std::process::Command::new("/usr/bin/hdiutil")
-            .args(["create", "-format", "UDZO", "-srcfolder"])
+            .args([
+                "create",
+                "-fs",
+                "HFS+",
+                "-volname",
+                &volume_name,
+                "-format",
+                "UDZO",
+                "-srcfolder",
+            ])
             .arg(&payload)
             .arg(&image)
             .output()
             .unwrap();
         assert!(
             created.status.success(),
-            "fixture disk image creation failed"
+            "fixture disk image creation failed: status={:?}, stderr={}",
+            created.status.code(),
+            String::from_utf8_lossy(&created.stderr)
         );
         let staging = tempfile::tempdir().unwrap().keep();
         let mount = staging.join("image");
         std::fs::create_dir(&mount).unwrap();
-        let attached = std::process::Command::new("/usr/bin/hdiutil")
-            .args([
-                "attach",
-                "-readonly",
-                "-nobrowse",
-                "-noautoopen",
-                "-mountpoint",
-            ])
-            .arg(&mount)
-            .arg(&image)
-            .output()
-            .unwrap();
+        let attached = attach_image(&image, &mount).await;
         let target = fixtures.path().join("Installed BiFlow.app");
-        let installed = if attached.status.success() {
+        let installed = if attached
+            .as_ref()
+            .is_ok_and(|output| output.status.success())
+        {
             std::process::Command::new("/bin/sh")
                 .arg("-c")
                 .arg(install_script(&mount.join("BiFlow.app"), &target, "6.2.82"))
                 .output()
-                .unwrap()
-                .status
-                .success()
+                .map(|output| output.status.success())
         } else {
-            false
+            Ok(false)
         };
         cleanup_mount(&staging, &mount, uuid::Uuid::nil()).await;
+        let attached = attached.expect("fixture disk image attach could not complete");
         assert!(
             attached.status.success(),
-            "fixture disk image attachment failed"
+            "fixture disk image attachment failed: status={:?}, stderr={}",
+            attached.status.code(),
+            String::from_utf8_lossy(&attached.stderr)
         );
         assert!(
-            installed,
+            installed.expect("fixture installer could not complete"),
             "the mounted application's replacement must succeed"
         );
         assert!(

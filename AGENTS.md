@@ -71,6 +71,14 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- A native DMG fixture must select its filesystem and use a unique volume name;
+  do not depend on a runner's image-creation defaults. Preserve hdiutil exit
+  status and stderr in fixture assertions. A generic attach assertion hid the
+  upstream macOS failure while fork CI passed. Exercise the production attach
+  helper in that test; bound attach/detach and retain staging on an unconfirmed
+  detach rather than retrying arbitrary failures or deleting mounted paths
+  (ADR 0131, 6.2.84).
+
 - Reuse an existing `String` with `clone_from` when comparing a normalized
   Linux proxy snapshot. Its native Clippy cfg rejects assignment from `clone`,
   which the Windows workspace check cannot see (ADR 0132).

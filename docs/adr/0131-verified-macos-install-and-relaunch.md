@@ -54,3 +54,14 @@ UI unit tests and the primary-flow e2e assert install/restarting rather than
 download-only completion. The real administrator prompt and signed release
 upgrade still require a physical Mac acceptance test; CI does not establish
 that those interactions occurred.
+
+Amendment (6.2.84): the upstream macOS job failed to attach its temporary
+fixture while fork CI passed, and the assertion discarded the command error.
+Create a uniquely named HFS+ fixture explicitly and include its exit status
+and stderr in test failures. Run attachment through the same helper as the
+installer. Bound attachment to 60 seconds and detachment to 20 seconds, killing
+the command on timeout while preserving the existing mounted-directory cleanup
+rule. Production diagnostics contain safe exit codes and operation classes;
+raw paths and command stderr remain out of debug.log. A failed command is not
+a successful mount, and failures are not hidden by whole-test retries. The
+fixture detaches before asserting failures, including command execution errors.
