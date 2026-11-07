@@ -36,8 +36,8 @@ pub struct AppsInfo {
     pub mihomo: Option<BinaryInfo>,
     pub openvpn: Option<BinaryInfo>,
     pub side_tunnels: Vec<SideTunnelProfile>,
-    /// `system-proxy-snapshot.json`: Pause cleared a Hiddify OS proxy and
-    /// will restore it on Resume.
+    /// A pending proxy baseline, captured before client startup and retired
+    /// after handing ordinary networking back on Pause/Disconnect.
     pub system_proxy_saved_by_pause: bool,
 }
 
@@ -637,6 +637,10 @@ pub(super) fn app_findings(
         && phase_is(report, &[StackPhase::Paused, StackPhase::Stopped])
     {
         findings.push("pause_cleared_hiddify_system_proxy".into());
+        if !report.system_proxy.is_empty() && report.system_proxy.iter().all(|proxy| !proxy.enabled)
+        {
+            findings.push("saved_user_proxy_handoff_pending".into());
+        }
     }
 }
 
@@ -807,6 +811,31 @@ fn side_tunnel_findings(report: &EnvironmentReport, findings: &mut Vec<String>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn disconnected_stack_exposes_a_proxy_baseline_not_handed_back() {
+        let mut report = EnvironmentReport::default();
+        report.apps.system_proxy_saved_by_pause = true;
+        report.biflow.stack_phase = "stopped".into();
+        report.system_proxy.push(super::super::ProxySetting {
+            source: "test".into(),
+            enabled: false,
+            scheme: None,
+            host: None,
+            port: None,
+            detail: None,
+        });
+        let mut findings = Vec::new();
+        app_findings(&report, None, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding == "saved_user_proxy_handoff_pending"));
+        report.apps.system_proxy_saved_by_pause = false;
+        findings.clear();
+        app_findings(&report, None, &mut findings);
+        assert!(!findings
+            .iter()
+            .any(|finding| finding == "saved_user_proxy_handoff_pending"));
+    }
 
     #[test]
     fn redact_addresses_keeps_timestamps_and_classifies_ips() {

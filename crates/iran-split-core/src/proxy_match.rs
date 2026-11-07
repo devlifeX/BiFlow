@@ -47,7 +47,7 @@ fn normalize_host(host: &str) -> String {
         .to_owned()
 }
 
-fn is_loopback(host: &str) -> bool {
+pub(crate) fn is_loopback(host: &str) -> bool {
     ["localhost", "127.0.0.1", "::1", "0:0:0:0:0:0:0:1"]
         .iter()
         .any(|candidate| host.eq_ignore_ascii_case(candidate))

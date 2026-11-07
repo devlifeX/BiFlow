@@ -71,9 +71,73 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
-- A failed macOS disk-image open must not resume a user-paused stack. Only
-  package kinds that pause the stack for installation may restore it after
-  failure; pass the install kind into the recovery decision (ADR 0129).
+- A native DMG fixture must select its filesystem and use a unique volume name;
+  do not depend on a runner's image-creation defaults. Preserve hdiutil exit
+  status and stderr in fixture assertions. A generic attach assertion hid the
+  upstream macOS failure while fork CI passed. Exercise the production attach
+  helper in that test; bound attach/detach and retain staging on an unconfirmed
+  detach rather than retrying arbitrary failures or deleting mounted paths
+  (ADR 0131, 6.2.84).
+
+- Reuse an existing `String` with `clone_from` when comparing a normalized
+  Linux proxy snapshot. Its native Clippy cfg rejects assignment from `clone`,
+  which the Windows workspace check cannot see (ADR 0132).
+
+- Clearing a user's already-enabled local proxy during Connect is temporary
+  ownership, not permission to discard their working network after Disconnect.
+  Capture before launching clients, retain that first baseline, and hand it back
+  only after verified TUN cleanup, only to a reachable loopback client, and only
+  when the settings have not changed outside BiFlow. Never restore into Running
+  or overwrite a corporate proxy/PAC choice. Keep a borrowed client alive and
+  cover the live-proxy and dead-proxy cases separately (ADR 0132).
+- An unused app must not clear a user proxy merely because Quit was requested.
+  Cleanup only state the app took over; a helper's presence is not ownership.
+- `BiFlow` in new Rust documentation needs Markdown backticks under strict
+  Clippy. An old test requiring a clear call during an early cancelled Connect
+  tested an implementation detail; assert preserved original proxy state instead.
+  Environment finding fixtures must set `biflow.stack_phase`, which the finding
+  policy actually consumes, rather than only the duplicate runtime snapshot.
+
+- Relaunch helpers that append JSONL must use the diagnostic writer's flat
+  event schema, including timestamp, level, and top-level event/action fields.
+  A nested `fields` object makes the launch result invisible to the normal log
+  reader; cover the actual JSON record shape in native tests (ADR 0131).
+
+- A parameter used only by a macOS cfg branch cannot be underscore-prefixed:
+  native Clippy rejects `used_underscore_binding`. Use its ordinary name and
+  consume the operation ID in the shared structured installer event so every
+  host compiles it without unused-variable warnings (ADR 0131).
+- `gh pr edit` can require unrelated `read:org` scopes through its GraphQL
+  metadata query. Update the PR through the repository REST endpoint with a
+  structured JSON input file instead of expanding credential permissions.
+
+- Fetch upstream main and compare the latest release before building a patch.
+  An older feature branch can carry a higher version while missing later fixes.
+  Base the patch on current main and preserve its accepted platform behavior.
+- NSIS staging must use `$COMMONPROGRAMDATA`; `$PROGRAMDATA` is not a defined
+  variable and silently corrupts the helper argument. Require the valid spelling
+  and reject the retired token in installer contracts, then compile the generated
+  installer with `/WX` before installing it (ADR 0130).
+- Refreshing main does not refresh a lockfile's yanked releases. Replace
+  `async-executor` 1.14.0 and `clipboard-win` 5.4.1 through `cargo update -p`
+  when the advisory check flags them; do not add an advisory ignore.
+- Repeated Quit requests must all prevent exit until owned network cleanup
+  completes. Drain client maintenance and pending Connect, reject new actions,
+  and retain cleanup errors for retry instead of exiting after a warning
+  (ADR 0130). Clear recovery's operation ID before releasing its lifecycle lock,
+  and cover the next user Pause so a successful repair cannot strand that lock.
+- A controller can report a stale enabled TUN after sleep. Use native timer gaps
+  and Windows unlock alongside persistent component failures, preserve idle
+  intent, and exclude the health/recovery work itself from timer-gap detection.
+
+- Failed installers must restore only a connection they actually paused. Track
+  that intent explicitly for every package kind; the paused phase alone does not
+  distinguish an installer pause from a user pause (ADR 0131). Update the
+  diagnostic fields with that decision too; retaining the removed `kind` local
+  in the recovery event breaks the desktop compilation.
+- Update-flow e2e changes must keep the Pause readiness assertion enabled;
+  only the repeated update action is disabled during restart. Broad replacement
+  of `toBeEnabled()` assertions reverses that setup and breaks the primary flow.
 - Scope About update assertions to its region: the network footer also has
   a `status` role, so a page-wide status locator matches two elements.
 
@@ -796,12 +860,10 @@ SHA-256")`); launchd `KeepAlive` then restarts it in a crash loop and the
   `webpki-roots`, or `webpki-root-certs` fall inside a new RustSec range.
   Update them with `cargo update -p`. `webpki-roots` has two majors, so
   name `webpki-roots@1` (RUSTSEC-2026-0381, 0382, 0383, 0386).
-- macOS in-app update must not replace `/Applications/BiFlow.app` or quit.
-  Closing the window only hides the menu-bar process, so an automatic swap
-  and relaunch was easy to miss and left the operator on the old version
-  when the helper never ran. Download the signed disk image, open it with
-  `/usr/bin/open`, and leave the tunnel up. The new version starts only
-  after the operator drags BiFlow onto Applications, quits the menu-bar
-  process, and opens that Applications copy (ADR 0129). Linux `.deb` still
-  waits for a manual restart. AppImage and NSIS still use their replace
-  helpers.
+- Downloading/opening a DMG does not install an update. The requested macOS
+  automatic updater supersedes ADR 0129: await authorized replacement, verify
+  bundle identity and version before swapping, preserve rollback backups on any
+  rollback failure, and launch as the desktop user only after the old PID exits
+  (ADR 0131). Keep mounted staging out of automatic recursive cleanup before
+  starting attach, including cancellation. Linux `.deb` still waits for a manual
+  restart; AppImage and NSIS use their existing replace helpers.

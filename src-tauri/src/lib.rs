@@ -6,6 +6,9 @@ mod environment;
 mod github_update;
 mod helper_install;
 mod hiddify_reset;
+mod lifecycle;
+#[cfg(any(target_os = "macos", test))]
+mod macos_update;
 mod network;
 mod platform_paths;
 mod profile;
@@ -26,8 +29,8 @@ use iran_split_config::{
     ValidationIssue,
 };
 use iran_split_core::{
-    ComponentPhase, CoreError, Engine, LifecycleBusy, OperationAccepted, PlatformBackend,
-    StackPhase, StackSnapshot,
+    ComponentPhase, Engine, LifecycleBusy, OperationAccepted, PlatformBackend, StackPhase,
+    StackSnapshot,
 };
 use iran_split_mihomo::{ActiveConnection, ControllerClient};
 use iran_split_rules::{
@@ -531,12 +534,12 @@ fn emit_update_progress<R: Runtime>(app: &AppHandle<R>, mut progress: UpdateProg
     }
 }
 
-async fn pause_stack_for_update(services: &AppServices) -> Result<(), String> {
+async fn pause_stack_for_update(services: &AppServices) -> Result<bool, String> {
     if matches!(
         services.engine.snapshot().phase,
         StackPhase::Running | StackPhase::Degraded
     ) {
-        services
+        let accepted = services
             .engine
             .pause_stack()
             .await
@@ -546,8 +549,9 @@ async fn pause_stack_for_update(services: &AppServices) -> Result<(), String> {
             .wait_for_phase(StackPhase::Paused, Duration::from_secs(25))
             .await
             .map_err(|error| error.to_string())?;
+        return Ok(!accepted.already_complete);
     }
-    Ok(())
+    Ok(false)
 }
 
 fn services<R: Runtime>(app: &AppHandle<R>) -> Result<&AppServices, String> {
@@ -2807,15 +2811,12 @@ fn verify_direct_rules_after_upgrade(data: &Path) -> Result<(), String> {
         .map_err(|cause| format!("could not clear route-pin upgrade guard: {cause}"))
 }
 
-fn failed_update_requires_resume(kind: github_update::InstallKind, phase: StackPhase) -> bool {
-    kind != github_update::InstallKind::Dmg && phase == StackPhase::Paused
+fn failed_update_requires_resume(paused_for_install: bool, phase: StackPhase) -> bool {
+    paused_for_install && phase == StackPhase::Paused
 }
 
-async fn restore_stack_after_failed_install(
-    services: &AppServices,
-    kind: github_update::InstallKind,
-) {
-    if failed_update_requires_resume(kind, services.engine.snapshot().phase) {
+async fn restore_stack_after_failed_install(services: &AppServices, paused_for_install: bool) {
+    if failed_update_requires_resume(paused_for_install, services.engine.snapshot().phase) {
         if let Err(cause) = services.engine.resume_stack().await {
             warn!(
                 event = "update.stack_restore_failed",
@@ -2833,7 +2834,7 @@ async fn restore_stack_after_failed_install(
             initiator = "install_update",
             cause = "no_installer_pause_to_restore",
             trace_route = "install_update->restore_stack_after_failed_install",
-            install_kind = ?kind,
+            paused_for_install,
             "failed update preserves the existing stack state"
         );
     }
@@ -3035,46 +3036,50 @@ async fn apply_downloaded_package(
     operation_id: Uuid,
     info: &github_update::UpdateInfo,
     package: &Path,
+    paused_for_install: bool,
 ) -> Result<OperationAccepted, String> {
     let target_version = info.latest_version.clone();
     let kind = github_update::detect_install_kind();
-    if kind != github_update::InstallKind::Dmg {
-        emit_update_progress(
-            app,
-            UpdateProgress {
-                phase: "installing".into(),
-                percent: Some(100),
-                version: Some(target_version.clone()),
-                error: None,
-                operation_id: Some(operation_id),
-                app_available: None,
-                rules_available: None,
-                thirdparty_available: None,
-            },
-        );
+    emit_update_progress(
+        app,
+        UpdateProgress {
+            phase: "installing".into(),
+            percent: Some(100),
+            version: Some(target_version.clone()),
+            error: None,
+            operation_id: Some(operation_id),
+            app_available: None,
+            rules_available: None,
+            thirdparty_available: None,
+        },
+    );
+    let applied = async {
+        let current_exe =
+            std::env::current_exe().map_err(|_| "could not locate the installed application")?;
+        github_update::apply_package(kind, package, &current_exe, &target_version, operation_id)
+            .await
     }
-    let current_exe = std::env::current_exe().map_err(|error| error.to_string())?;
-    let outcome =
-        match github_update::apply_package(kind, package, &current_exe, &target_version).await {
-            Ok(outcome) => outcome,
-            Err(cause) => {
-                restore_stack_after_failed_install(services(app)?, kind).await;
-                emit_update_progress(
-                    app,
-                    UpdateProgress {
-                        phase: "failed".into(),
-                        percent: None,
-                        version: Some(target_version),
-                        error: Some(cause.clone()),
-                        operation_id: Some(operation_id),
-                        app_available: None,
-                        rules_available: None,
-                        thirdparty_available: None,
-                    },
-                );
-                return Err(cause);
-            }
-        };
+    .await;
+    let outcome = match applied {
+        Ok(outcome) => outcome,
+        Err(cause) => {
+            restore_stack_after_failed_install(services(app)?, paused_for_install).await;
+            emit_update_progress(
+                app,
+                UpdateProgress {
+                    phase: "failed".into(),
+                    percent: None,
+                    version: Some(target_version),
+                    error: Some(cause.clone()),
+                    operation_id: Some(operation_id),
+                    app_available: None,
+                    rules_available: None,
+                    thirdparty_available: None,
+                },
+            );
+            return Err(cause);
+        }
+    };
     record_package_apply_outcome(operation_id, &target_version, outcome);
     match outcome {
         github_update::ApplyOutcome::ManualRestart => Ok(emit_finished_update(
@@ -3082,13 +3087,6 @@ async fn apply_downloaded_package(
             operation_id,
             target_version,
             "installed",
-        )),
-        #[cfg(target_os = "macos")]
-        github_update::ApplyOutcome::DiskImageOpened => Ok(emit_finished_update(
-            app,
-            operation_id,
-            target_version,
-            "downloaded",
         )),
         github_update::ApplyOutcome::HelperRestart => {
             emit_update_progress(
@@ -3125,26 +3123,15 @@ fn record_package_apply_outcome(
             update_version = %target_version,
             "application package installation completed; restart is required"
         ),
-        #[cfg(target_os = "macos")]
-        github_update::ApplyOutcome::DiskImageOpened => info!(
-            event = "update.dmg_ready",
-            section = "updates",
-            initiator = "install_update",
-            cause = "disk_image_opened",
-            trace_route = "tauri_command->github_update->open_downloaded_dmg",
-            trace_id = %operation_id,
-            update_version = %target_version,
-            "verified disk image is open; the running app was not replaced"
-        ),
         github_update::ApplyOutcome::HelperRestart => info!(
             event = "update.restart_helper_started",
             section = "updates",
             initiator = "install_update",
-            cause = "package_install_pending",
+            cause = "relaunch_handoff",
             trace_route = "tauri_command->github_update->apply_helper",
             trace_id = %operation_id,
             update_version = %target_version,
-            "application update helper was launched; package installation is pending"
+            "application update helper was launched; restart is scheduled"
         ),
     }
 }
@@ -3181,13 +3168,9 @@ async fn perform_complete_update_install(
         });
     }
     let package = download_github_package(app, operation_id, &update).await?;
-    // A disk image is opened for the user to drag. Pausing the tunnel or
-    // writing an upgrade guard would treat a download as an in-place install.
-    if github_update::detect_install_kind() != github_update::InstallKind::Dmg {
-        record_direct_rules_upgrade_guard(&services(app)?.paths.data)?;
-        pause_stack_for_update(services(app)?).await?;
-    }
-    apply_downloaded_package(app, operation_id, &update, &package).await
+    record_direct_rules_upgrade_guard(&services(app)?.paths.data)?;
+    let paused_for_install = pause_stack_for_update(services(app)?).await?;
+    apply_downloaded_package(app, operation_id, &update, &package, paused_for_install).await
 }
 
 #[tauri::command]
@@ -3872,8 +3855,12 @@ fn spawn_traffic_loop<R: Runtime>(handle: AppHandle<R>) {
 /// Refreshes health and rejoins late local proxies every 10 seconds.
 fn spawn_health_loop(health_engine: Arc<Engine<NativeBackend>>) {
     tauri::async_runtime::spawn(async move {
+        let mut recovery = lifecycle::RecoveryMonitor::default();
+        #[cfg(windows)]
+        let mut was_locked = false;
         loop {
             tokio::time::sleep(Duration::from_secs(10)).await;
+            let tick_time = std::time::SystemTime::now();
             if matches!(
                 health_engine.snapshot().phase,
                 StackPhase::Stopped
@@ -3883,10 +3870,50 @@ fn spawn_health_loop(health_engine: Arc<Engine<NativeBackend>>) {
                     | StackPhase::Error
             ) {
                 health_engine.refresh_health().await;
+                #[cfg(not(windows))]
+                let unlocked = false;
+                #[cfg(windows)]
+                let unlocked = match lifecycle::session_locked().await {
+                    Ok(locked) => {
+                        let changed = was_locked && !locked;
+                        if was_locked != locked {
+                            info!(
+                                event = "session.lock_state_changed",
+                                section = "lifecycle",
+                                initiator = "health_loop",
+                                cause = "session_transition",
+                                locked,
+                                trace_route = "health_loop->session_query->recovery_monitor",
+                                "Windows session lock state changed"
+                            );
+                        }
+                        was_locked = locked;
+                        changed
+                    }
+                    Err(cause) => {
+                        warn!(
+                            event = "session.state_query_failed",
+                            section = "lifecycle",
+                            initiator = "health_loop",
+                            cause,
+                            trace_route = "health_loop->session_query",
+                            "session state unavailable; timer and health recovery remain active"
+                        );
+                        false
+                    }
+                };
+                if recovery.observe(tick_time, &health_engine.snapshot(), unlocked) {
+                    if let Err(cause) = health_engine.recover_network().await {
+                        warn!(event = "network.recovery_request_failed", section = "lifecycle",
+                            initiator = "health_loop", %cause, trace_route = "health_loop->engine",
+                            "automatic network recovery did not complete");
+                    }
+                }
                 // ADR 0076: a local proxy (e.g. Happ) the operator connected
                 // after Connect rejoins live routing without a full reconnect.
                 health_engine.recover_clients().await;
             }
+            recovery.finish_tick(std::time::SystemTime::now());
         }
     });
 }
@@ -4216,30 +4243,41 @@ pub fn run() {
 }
 
 static UPDATE_EXIT_KEEPS_NETWORK: AtomicBool = AtomicBool::new(false);
-static NETWORK_RELEASE_STARTED: AtomicBool = AtomicBool::new(false);
-
-/// User quit gives the machine its previous network back. An in-app update
-/// already paused the tunnel and must keep that paused stack (ADR 0120).
-#[must_use]
-fn exit_releases_owned_network(update_exit: bool) -> bool {
-    !update_exit
-}
+static NETWORK_EXIT: lifecycle::ExitCoordinator = lifecycle::ExitCoordinator::new();
 
 fn handle_run_event(handle: &AppHandle, event: &tauri::RunEvent) {
     match event {
         tauri::RunEvent::ExitRequested { api, code, .. } => {
             diagnostics::exit_requested(*code);
-            if !exit_releases_owned_network(UPDATE_EXIT_KEEPS_NETWORK.load(Ordering::SeqCst)) {
-                return;
+            match NETWORK_EXIT.decision(UPDATE_EXIT_KEEPS_NETWORK.load(Ordering::SeqCst)) {
+                lifecycle::ExitDecision::Allow => return,
+                lifecycle::ExitDecision::Wait => {
+                    api.prevent_exit();
+                    return;
+                }
+                lifecycle::ExitDecision::Cleanup => api.prevent_exit(),
             }
-            if NETWORK_RELEASE_STARTED.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            api.prevent_exit();
             let app = handle.clone();
+            let exit_code = code.unwrap_or(0);
             tauri::async_runtime::spawn(async move {
-                release_owned_network(&app).await;
-                app.exit(0);
+                match release_owned_network(&app).await {
+                    Ok(()) => {
+                        NETWORK_EXIT.completed();
+                        app.exit(exit_code);
+                    }
+                    Err(cause) => {
+                        warn!(
+                            event = "session.network_release_failed",
+                            section = "lifecycle",
+                            initiator = "application_exit",
+                            cause,
+                            trace_route = "application_exit->engine->shutdown",
+                            "application remains open so network cleanup can be retried"
+                        );
+                        NETWORK_EXIT.failed();
+                        show_main(&app);
+                    }
+                }
             });
         }
         tauri::RunEvent::Exit => {
@@ -4251,61 +4289,22 @@ fn handle_run_event(handle: &AppHandle, event: &tauri::RunEvent) {
     }
 }
 
-async fn release_owned_network<R: Runtime>(app: &AppHandle<R>) {
-    let Ok(services) = services(app) else {
-        return;
-    };
-    info!(
-        event = "session.network_release_started",
-        section = "lifecycle",
-        initiator = "application_exit",
-        cause = "quit",
-        trace_route = "application_exit->stop_stack",
-        "releasing the tunnel, system DNS, and system proxy before exit"
-    );
-    let engine = &services.engine;
-    if let Some(operation_id) = engine.snapshot().operation_id {
-        engine.cancel_operation(operation_id).await;
-    }
-    let deadline = std::time::Instant::now() + Duration::from_secs(50);
-    loop {
-        match engine.stop_stack().await {
-            Ok(accepted) => {
-                if !accepted.already_complete {
-                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                    if let Err(cause) = engine
-                        .wait_for_phase(StackPhase::Stopped, remaining.max(Duration::from_secs(1)))
-                        .await
-                    {
-                        warn!(
-                            event = "session.network_release_failed",
-                            section = "lifecycle",
-                            initiator = "application_exit",
-                            cause = %cause,
-                            trace_route = "application_exit->stop_stack",
-                            "quit continued after the network release did not finish"
-                        );
-                    }
-                }
-                break;
-            }
-            Err(CoreError::OperationInProgress) if std::time::Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            Err(cause) => {
-                warn!(
-                    event = "session.network_release_failed",
-                    section = "lifecycle",
-                    initiator = "application_exit",
-                    cause = %cause,
-                    trace_route = "application_exit->stop_stack",
-                    "quit continued without a completed disconnect"
-                );
-                break;
-            }
-        }
-    }
+async fn release_owned_network<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let result = diagnostics::trace_action(
+        "lifecycle",
+        "application_exit",
+        "release_owned_network",
+        async {
+            services(app)?
+                .engine
+                .shutdown()
+                .await
+                .map_err(|cause| cause.to_string())
+        },
+    )
+    .await;
     diagnostics::flush();
+    result
 }
 
 #[cfg(test)]
@@ -4317,60 +4316,11 @@ mod tests {
     };
 
     #[test]
-    fn quit_releases_the_network_and_an_update_exit_does_not() {
-        assert!(exit_releases_owned_network(false));
-        assert!(!exit_releases_owned_network(true));
-    }
-
-    #[test]
-    fn failed_disk_image_open_preserves_a_user_paused_stack() {
-        use github_update::InstallKind;
-
-        assert!(
-            !failed_update_requires_resume(InstallKind::Dmg, StackPhase::Paused),
-            "opening a DMG never pauses the stack, so failure must not resume it"
-        );
-        for kind in [InstallKind::Deb, InstallKind::AppImage, InstallKind::Nsis] {
-            assert!(failed_update_requires_resume(kind, StackPhase::Paused));
-            assert!(!failed_update_requires_resume(kind, StackPhase::Running));
-            assert!(!failed_update_requires_resume(kind, StackPhase::Stopped));
-        }
-    }
-
-    #[test]
-    fn macos_disk_image_update_stays_running() {
-        let source = include_str!("lib.rs");
-        let production = source.split("mod tests").next().expect("production half");
-        let start = production
-            .find("async fn perform_complete_update_install")
-            .expect("install");
-        let end = production[start..]
-            .find("async fn install_update")
-            .expect("command");
-        let body = &production[start..start + end];
-        let skip = body
-            .find("!= github_update::InstallKind::Dmg")
-            .expect("dmg skip");
-        let pause = body.find("pause_stack_for_update").expect("pause");
-        assert!(
-            skip < pause,
-            "a disk image download must not pause the tunnel"
-        );
-        let apply = production
-            .find("async fn apply_downloaded_package")
-            .expect("apply");
-        let record = production[apply..]
-            .find("fn record_package_apply_outcome")
-            .expect("record");
-        let apply_body = &production[apply..apply + record];
-        let opened = apply_body.find("DiskImageOpened").expect("opened");
-        let helper = apply_body.find("HelperRestart").expect("helper");
-        assert!(opened < helper);
-        assert!(apply_body.contains("\"downloaded\""));
-        assert!(
-            !apply_body[opened..helper].contains("schedule_update_exit"),
-            "opening a disk image must not quit BiFlow"
-        );
+    fn failed_install_restores_only_a_connection_paused_by_the_installer() {
+        assert!(failed_update_requires_resume(true, StackPhase::Paused));
+        assert!(!failed_update_requires_resume(false, StackPhase::Paused));
+        assert!(!failed_update_requires_resume(true, StackPhase::Running));
+        assert!(!failed_update_requires_resume(true, StackPhase::Stopped));
     }
 
     /// Regression (ADR 0115): the application's data roots and the

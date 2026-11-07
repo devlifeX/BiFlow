@@ -1314,6 +1314,18 @@ fn running_findings(
     config: Option<&AppConfig>,
     findings: &mut Vec<String>,
 ) {
+    if let Some(stack) = &report.runtime.stack {
+        for component in ["mihomo", "tun", "dns"] {
+            if stack
+                .get(component)
+                .and_then(|status| status.get("phase"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|phase| phase != "running")
+            {
+                findings.push(format!("active_stack_runtime_unhealthy:{component}"));
+            }
+        }
+    }
     let is_tun = |name: &str| is_biflow_tun(config, name);
     {
         let client_ports: BTreeSet<u16> = config
@@ -1670,6 +1682,23 @@ async fn collect_platform(_report: &mut EnvironmentReport, _tun_name: &str) -> P
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn active_stack_reports_missing_tun_and_dns_after_resume() {
+        let mut report = EnvironmentReport::default();
+        report.biflow.stack_phase = "running".into();
+        report.runtime.stack = Some(serde_json::json!({
+            "mihomo": {"phase": "running"}, "tun": {"phase": "stopped"},
+            "dns": {"phase": "error"}
+        }));
+        assert_eq!(
+            findings(&report, None),
+            vec![
+                "active_stack_runtime_unhealthy:tun",
+                "active_stack_runtime_unhealthy:dns"
+            ]
+        );
+    }
+
     #[test]
     fn physical_adapter_failures_are_findings_only_when_enabled() {
         let mut report = super::EnvironmentReport {

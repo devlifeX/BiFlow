@@ -6,7 +6,9 @@
 //! the GNOME/KDE backend on Linux, but driven by `networksetup` per network
 //! service (Wi-Fi, Ethernet, …).
 
-use iran_split_core::CoreError;
+use iran_split_core::{
+    proxy_endpoint_ready, proxy_restore_decision, CoreError, ProxyRestoreDecision,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
@@ -43,6 +45,9 @@ pub struct Snapshot {
 
 #[must_use]
 pub fn points_at_hiddify(snapshot: &Snapshot, host: &str, port: u16) -> bool {
+    if !iran_split_core::proxy_host_is_loopback(host) {
+        return false;
+    }
     if matches!(snapshot.mode.as_str(), "none" | "") {
         return false;
     }
@@ -91,8 +96,8 @@ pub async fn clear_if_hiddify(
     if !points_at_hiddify(&snapshot, host, port) {
         return Ok(None);
     }
-    write_snapshot(persist, &snapshot)?;
-    apply_disabled(&snapshot).await?;
+    remember_first_snapshot(persist, &snapshot)?;
+    apply_disabled(&snapshot, host, port).await?;
     info!(
         event = "system_proxy.cleared",
         section = "system_proxy",
@@ -104,29 +109,134 @@ pub async fn clear_if_hiddify(
     Ok(Some(snapshot))
 }
 
-/// Restores a previously cleared Hiddify system proxy.
-///
-/// # Errors
-///
-/// Returns a platform error when `networksetup` cannot reapply the snapshot.
-pub async fn restore(persist: &Path) -> Result<(), CoreError> {
+/// Capture once before starting clients, including an originally disabled proxy.
+/// A disabled baseline prevents a newly launched client from becoming the
+/// apparent owner of the user's preexisting network settings.
+pub async fn capture(persist: &Path, endpoints: &[(String, u16)]) -> Result<(), CoreError> {
+    if read_snapshot(persist)?.is_none() {
+        if let Some(snapshot) = read_current().await? {
+            let baseline = if endpoints
+                .iter()
+                .any(|(host, port)| points_at_hiddify(&snapshot, host, *port))
+            {
+                snapshot
+            } else {
+                Snapshot::default()
+            };
+            write_snapshot(persist, &baseline)?;
+            info!(
+                event = "system_proxy.baseline_captured",
+                section = "system_proxy",
+                initiator = "platform_backend",
+                cause = "before_client_start",
+                trace_route = "connect->capture_system_proxy->snapshot",
+                "captured the original desktop proxy without logging its settings"
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn saved_proxy_uses(persist: &Path, host: &str, port: u16) -> Result<bool, CoreError> {
+    Ok(read_snapshot(persist)?.is_some_and(|snapshot| points_at_hiddify(&snapshot, host, port)))
+}
+
+/// Restore after detaching the TUN, only if the saved local client is alive
+/// and the settings are still in the state `BiFlow` left them.
+pub async fn restore(persist: &Path, endpoints: &[(String, u16)]) -> Result<(), CoreError> {
     let Some(snapshot) = read_snapshot(persist)? else {
         return Ok(());
     };
-    apply_snapshot(&snapshot).await?;
-    let _ = std::fs::remove_file(persist);
+    let mut managed = false;
+    let mut reachable = true;
+    for (host, port) in endpoints {
+        if points_at_hiddify(&snapshot, host, *port) {
+            managed = true;
+            reachable &= proxy_endpoint_ready(host, *port).await;
+        }
+    }
+    let current = read_current().await?;
+    let decision = proxy_restore_decision(
+        current
+            .as_ref()
+            .is_some_and(|current| unchanged_after_clear(&snapshot, current, endpoints)),
+        managed,
+        reachable,
+    );
+    if decision == ProxyRestoreDecision::Restore {
+        apply_snapshot(&snapshot).await?;
+        if read_current().await?.as_ref() != Some(&snapshot) {
+            return Err(CoreError::Platform(
+                "restored system proxy could not be verified".into(),
+            ));
+        }
+    }
+    std::fs::remove_file(persist)
+        .map_err(|_| CoreError::Platform("could not retire the saved system proxy".into()))?;
     info!(
-        event = "system_proxy.restored",
+        event = "system_proxy.handoff_completed",
         section = "system_proxy",
-        initiator = "macos_platform_backend",
-        cause = "resume",
-        trace_route = "engine->macos_platform_backend->system_proxy",
-        "restored the previous Hiddify system proxy"
+        initiator = "platform_backend",
+        cause = decision.cause(),
+        trace_route = "disconnect->restore_system_proxy->verify",
+        restored = decision == ProxyRestoreDecision::Restore,
+        "completed desktop proxy handoff without logging settings"
     );
     Ok(())
 }
 
-/// Reads the proxy state of every network service.
+fn cleared_snapshot(snapshot: &Snapshot, host: &str, port: u16) -> Snapshot {
+    let mut cleared = snapshot.clone();
+    for service in &mut cleared.services {
+        if iran_split_core::proxy_endpoint_matches(
+            &service.http_host,
+            &service.http_port,
+            host,
+            port,
+        ) {
+            service.web_enabled = false;
+        }
+        if iran_split_core::proxy_endpoint_matches(
+            &service.https_host,
+            &service.https_port,
+            host,
+            port,
+        ) {
+            service.secure_web_enabled = false;
+        }
+        if iran_split_core::proxy_endpoint_matches(
+            &service.socks_host,
+            &service.socks_port,
+            host,
+            port,
+        ) {
+            service.socks_enabled = false;
+        }
+    }
+    cleared.mode =
+        if cleared.services.iter().any(|service| {
+            service.web_enabled || service.secure_web_enabled || service.socks_enabled
+        }) {
+            "manual"
+        } else {
+            "none"
+        }
+        .into();
+    cleared
+}
+
+fn unchanged_after_clear(
+    original: &Snapshot,
+    current: &Snapshot,
+    endpoints: &[(String, u16)],
+) -> bool {
+    let mut disabled = original.clone();
+    for (host, port) in endpoints {
+        disabled = cleared_snapshot(&disabled, host, *port);
+    }
+    current == &disabled
+}
+
 async fn read_current() -> Result<Option<Snapshot>, CoreError> {
     if !Path::new(NETWORKSETUP).is_file() {
         return Ok(None);
@@ -151,14 +261,18 @@ async fn read_current() -> Result<Option<Snapshot>, CoreError> {
     }))
 }
 
-async fn apply_disabled(snapshot: &Snapshot) -> Result<(), CoreError> {
-    // Always off. Replaying each service's saved enabled flag left Hiddify's
-    // HTTP/SOCKS proxy in place while "connected", so Safari/Chrome sent
-    // `localhost` through Hiddify and got 502 (ADR 0062).
-    for service in &snapshot.services {
-        set_proxy_state(&service.service, ProxyKind::Web, false).await?;
-        set_proxy_state(&service.service, ProxyKind::SecureWeb, false).await?;
-        set_proxy_state(&service.service, ProxyKind::Socks, false).await?;
+async fn apply_disabled(snapshot: &Snapshot, host: &str, port: u16) -> Result<(), CoreError> {
+    let cleared = cleared_snapshot(snapshot, host, port);
+    for (before, after) in snapshot.services.iter().zip(&cleared.services) {
+        if before.web_enabled != after.web_enabled {
+            set_proxy_state(&before.service, ProxyKind::Web, false).await?;
+        }
+        if before.secure_web_enabled != after.secure_web_enabled {
+            set_proxy_state(&before.service, ProxyKind::SecureWeb, false).await?;
+        }
+        if before.socks_enabled != after.socks_enabled {
+            set_proxy_state(&before.service, ProxyKind::Socks, false).await?;
+        }
     }
     Ok(())
 }
@@ -331,15 +445,32 @@ async fn run_ok(program: &str, args: &[&str]) -> Result<(), CoreError> {
     }
 }
 
-fn write_snapshot(path: &Path, snapshot: &Snapshot) -> Result<(), CoreError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| CoreError::Platform(error.to_string()))?;
+fn remember_first_snapshot(persist: &Path, snapshot: &Snapshot) -> Result<(), CoreError> {
+    if read_snapshot(persist)?.is_none() {
+        write_snapshot(persist, snapshot)?;
     }
-    std::fs::write(
-        path,
-        serde_json::to_vec(snapshot).map_err(|error| CoreError::Platform(error.to_string()))?,
-    )
-    .map_err(|error| CoreError::Platform(error.to_string()))
+    Ok(())
+}
+
+fn write_snapshot(path: &Path, snapshot: &Snapshot) -> Result<(), CoreError> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| CoreError::Platform("saved proxy has no parent directory".into()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|_| CoreError::Platform("could not prepare the saved proxy directory".into()))?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|_| CoreError::Platform("could not stage the proxy baseline".into()))?;
+    let bytes = serde_json::to_vec(snapshot)
+        .map_err(|_| CoreError::Platform("could not encode the proxy baseline".into()))?;
+    staged
+        .write_all(&bytes)
+        .and_then(|()| staged.as_file().sync_all())
+        .map_err(|_| CoreError::Platform("could not write the proxy baseline".into()))?;
+    staged
+        .persist(path)
+        .map_err(|_| CoreError::Platform("could not publish the proxy baseline".into()))?;
+    Ok(())
 }
 
 fn read_snapshot(path: &Path) -> Result<Option<Snapshot>, CoreError> {
@@ -355,6 +486,26 @@ fn read_snapshot(path: &Path) -> Result<Option<Snapshot>, CoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn capture_before_start_cannot_be_overwritten_by_an_auto_started_client() {
+        let directory = tempfile::tempdir().unwrap();
+        let persist = snapshot_path(directory.path());
+        let original = Snapshot::default();
+        remember_first_snapshot(&persist, &original).unwrap();
+        let started = Snapshot {
+            mode: "manual".into(),
+            services: vec![service("Wi-Fi", "127.0.0.1", "12334")],
+        };
+        remember_first_snapshot(&persist, &started).unwrap();
+        capture(&persist, &[("127.0.0.1".into(), 12334)])
+            .await
+            .unwrap();
+        assert_eq!(read_snapshot(&persist).unwrap(), Some(original));
+        assert!(!saved_proxy_uses(&persist, "127.0.0.1", 12334).unwrap());
+        write_snapshot(&persist, &started).unwrap();
+        assert!(saved_proxy_uses(&persist, "127.0.0.1", 12334).unwrap());
+    }
 
     fn service(name: &str, host: &str, port: &str) -> ServiceProxy {
         ServiceProxy {
@@ -405,28 +556,22 @@ mod tests {
     }
 
     #[test]
-    fn apply_disabled_turns_proxies_off_instead_of_replaying_snapshot() {
-        // `include_str` of this file would match the assertion itself if we
-        // scanned `mod tests`. Only the production half is the contract.
-        let production = include_str!("system_proxy.rs")
-            .split("mod tests")
-            .next()
-            .expect("production");
-        let body = production
-            .split("async fn apply_disabled")
-            .nth(1)
-            .and_then(|rest| rest.split("async fn apply_snapshot").next())
-            .expect("apply_disabled body");
-        assert!(
-            body.contains("ProxyKind::Web, false")
-                && body.contains("ProxyKind::SecureWeb, false")
-                && body.contains("ProxyKind::Socks, false"),
-            "apply_disabled must force every proxy kind off"
-        );
-        assert!(
-            !body.contains("service.web_enabled"),
-            "replaying snapshot enabled flags leaves the Hiddify proxy up"
-        );
+    fn clear_preserves_unrelated_services_and_restore_detects_user_edits() {
+        let original = Snapshot {
+            mode: "manual".into(),
+            services: vec![
+                service("Wi-Fi", "127.0.0.1", "12334"),
+                service("Corporate", "proxy.corp.example", "8080"),
+            ],
+        };
+        let cleared = cleared_snapshot(&original, "127.0.0.1", 12334);
+        assert!(!cleared.services[0].web_enabled);
+        assert!(cleared.services[1].web_enabled);
+        let endpoints = [("127.0.0.1".into(), 12334)];
+        assert!(unchanged_after_clear(&original, &cleared, &endpoints));
+        let mut edited = cleared;
+        edited.services[1].http_host = "new.corp.example".into();
+        assert!(!unchanged_after_clear(&original, &edited, &endpoints));
     }
 
     #[test]

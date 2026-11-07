@@ -165,6 +165,7 @@ test.describe("primary BiFlow flows", () => {
       page.getByRole("heading", { name: "Paused", exact: true }),
     ).toBeVisible();
     await expect(page.getByRole("button", { name: "Resume" })).toBeVisible();
+    await expect(statusBar).toContainText("Internet connected");
     await page.getByRole("button", { name: "Resume" }).click();
     await expect(
       page.getByRole("heading", { name: "Connected", exact: true }),
@@ -175,6 +176,15 @@ test.describe("primary BiFlow flows", () => {
       page.getByRole("heading", { name: "Not connected" }),
     ).toBeVisible();
     await expect(page.locator(".traffic-flow-route")).toHaveCount(0);
+    await expect(statusBar).toContainText("Internet connected");
+    await connectButton(page).click();
+    await expect(
+      page.getByRole("heading", { name: "Connected", exact: true }),
+    ).toBeVisible();
+    await disconnectButton(page).click();
+    await expect(
+      page.getByRole("heading", { name: "Not connected" }),
+    ).toBeVisible();
   });
 
   test("adds a pasted site from Home and reroutes it in place", async ({
@@ -845,7 +855,7 @@ test.describe("primary BiFlow flows", () => {
     ).toHaveCount(0);
   });
 
-  test("downloads the macOS update and preserves a paused connection", async ({
+  test("installs and restarts the macOS update while preserving paused intent", async ({
     page,
   }) => {
     await page.addInitScript(() => {
@@ -864,15 +874,15 @@ test.describe("primary BiFlow flows", () => {
       sessionStorage.setItem("biflow-mock-update-available", "1"),
     );
     await page.getByRole("button", { name: "Check for updates" }).click();
-    await page.getByRole("button", { name: "Download 9.9.9" }).click();
+    await page.getByRole("button", { name: "Install update 9.9.9" }).click();
     await expect(
       page
         .getByRole("region", { name: "About", exact: true })
         .getByRole("status"),
-    ).toContainText("Drag BiFlow onto Applications");
+    ).toContainText("Restarting BiFlow");
     await expect(
       page.getByRole("button", { name: "Check for updates" }),
-    ).toBeEnabled();
+    ).toBeDisabled();
     await goTo(page, "Home");
     await expect(
       page.getByRole("heading", { name: "Paused", exact: true }),

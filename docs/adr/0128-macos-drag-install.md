@@ -16,6 +16,5 @@ a failed AppleScript produced a disk image with nothing to drag onto.
 volume name, icon position, Applications link, window size, and background as
 the normal bundle. The alias is on the image either way.
 
-The in-app updater opens this same disk image and leaves the running app in
-place (ADR 0129). This decision is the disk image a person opens from the
-release or from About.
+The disk image still supports a manual first install from a release. In-app
+updates now install its verified bundle and restart automatically (ADR 0131).

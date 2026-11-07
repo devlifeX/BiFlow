@@ -1683,6 +1683,19 @@ impl PlatformBackend for LinuxBackend {
         if !config.hiddify_stop_with_stack() {
             return Ok(());
         }
+        let persist = system_proxy::snapshot_path(&self.paths.user_data_dir);
+        let (host, port) = config.hiddify_endpoint();
+        if system_proxy::saved_proxy_uses(&persist, &host, port)? {
+            info!(
+                event = "client.borrowed_proxy_preserved",
+                section = "client_lifecycle",
+                initiator = "platform_backend",
+                cause = "preexisting_system_proxy",
+                trace_route = "disconnect->stop_user_proxy->saved_proxy",
+                "leaving the user's original proxy client running"
+            );
+            return Ok(());
+        }
         if let Some(mut child) = self.launched_hiddify.lock().await.take() {
             let trace_id = Uuid::new_v4();
             if let Err(cause) = child.start_kill() {
@@ -1731,6 +1744,12 @@ impl PlatformBackend for LinuxBackend {
         Ok(())
     }
 
+    async fn capture_system_proxy(&self) -> Result<(), CoreError> {
+        let persist = system_proxy::snapshot_path(&self.paths.user_data_dir);
+        let config = self.config.read().await.clone();
+        system_proxy::capture(&persist, &config.local_proxy_endpoints()).await
+    }
+
     async fn clear_hiddify_system_proxy(&self) -> Result<bool, CoreError> {
         let config = self.config.read().await.clone();
         let persist = system_proxy::snapshot_path(&self.paths.user_data_dir);
@@ -1748,7 +1767,8 @@ impl PlatformBackend for LinuxBackend {
 
     async fn restore_hiddify_system_proxy(&self) -> Result<(), CoreError> {
         let persist = system_proxy::snapshot_path(&self.paths.user_data_dir);
-        system_proxy::restore(&persist).await
+        let config = self.config.read().await.clone();
+        system_proxy::restore(&persist, &config.local_proxy_endpoints()).await
     }
 
     async fn core_process(&self) -> Result<ProcessStatus, CoreError> {
