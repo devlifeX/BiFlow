@@ -16,6 +16,10 @@ use uuid::Uuid;
 
 mod proxy_match;
 pub use proxy_match::{proxy_endpoint_matches, proxy_server_matches};
+mod proxy_restore;
+pub use proxy_restore::{
+    proxy_endpoint_ready, proxy_host_is_loopback, proxy_restore_decision, ProxyRestoreDecision,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -616,6 +620,10 @@ pub trait PlatformBackend: Send + Sync + 'static {
     }
     async fn stop_core(&self) -> Result<(), CoreError>;
     async fn stop_user_proxy(&self) -> Result<(), CoreError> {
+        Ok(())
+    }
+    /// Captures the user's proxy before any client is launched or reconfigured.
+    async fn capture_system_proxy(&self) -> Result<(), CoreError> {
         Ok(())
     }
     /// Clears the desktop system proxy when it points at Hiddify.
@@ -1417,18 +1425,16 @@ impl<B: PlatformBackend> Engine<B> {
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            // An unused install without an available helper has nothing privileged
-            // to detach. Still remove a dead local-proxy endpoint from OS settings.
+            // An unused install without a helper does not own the user's proxy.
             let snapshot = self.snapshot();
             if matches!(
                 snapshot.phase,
                 StackPhase::Stopped | StackPhase::Uninitialized
-            ) && snapshot.helper.phase != ComponentPhase::Running
-                && snapshot.mihomo.phase != ComponentPhase::Running
+            ) && snapshot.mihomo.phase != ComponentPhase::Running
                 && snapshot.tun.phase != ComponentPhase::Running
             {
-                self.backend.clear_hiddify_system_proxy().await?;
-                return self.backend.stop_user_proxy().await;
+                self.backend.stop_user_proxy().await?;
+                return self.backend.restore_hiddify_system_proxy().await;
             }
             self.run_stop(Uuid::new_v4()).await
         })
@@ -1736,8 +1742,8 @@ impl<B: PlatformBackend> Engine<B> {
         let helper_ready = health.helper.phase == ComponentPhase::Running;
         self.update(|snapshot| apply_health(snapshot, health));
         if helper_ready {
-            let process = self.backend.core_process().await.unwrap_or_default();
-            let tun = self.backend.tun_status().await.unwrap_or_default();
+            let process = self.backend.core_process().await?;
+            let tun = self.backend.tun_status().await?;
             if process.running || tun.active {
                 warn!(
                     event = "startup.owned_state_found",
@@ -1753,6 +1759,8 @@ impl<B: PlatformBackend> Engine<B> {
                     return Err(CoreError::TunCleanupFailed(report.warnings.join("; ")));
                 }
             }
+            self.backend.verify_not_intercepting().await?;
+            self.backend.restore_hiddify_system_proxy().await?;
         }
         let health = self.backend.runtime_health().await;
         self.set_stopped(health);
@@ -1865,6 +1873,7 @@ impl<B: PlatformBackend> Engine<B> {
             );
         });
 
+        self.backend.capture_system_proxy().await?;
         self.start_enabled_clients(operation_id, cancel).await?;
 
         self.announce(StackPhase::PreparingRuntime, operation_id)
@@ -2044,6 +2053,7 @@ impl<B: PlatformBackend> Engine<B> {
                 report.warnings.join("; ")
             )));
         }
+        self.backend.restore_hiddify_system_proxy().await?;
         Ok(())
     }
 
@@ -2100,6 +2110,7 @@ impl<B: PlatformBackend> Engine<B> {
             )));
         }
         self.backend.forget_client_egress().await;
+        self.backend.restore_hiddify_system_proxy().await?;
         proxy_stop?;
         proxy_clear?;
         let health = self.backend.runtime_health().await;
@@ -2144,6 +2155,7 @@ impl<B: PlatformBackend> Engine<B> {
             )));
         }
         self.backend.verify_not_intercepting().await?;
+        self.backend.restore_hiddify_system_proxy().await?;
         proxy_clear?;
         let health = self.backend.runtime_health().await;
         self.set_paused(health);
@@ -2202,6 +2214,7 @@ impl<B: PlatformBackend> Engine<B> {
                 report.warnings.join("; ")
             )));
         }
+        self.backend.restore_hiddify_system_proxy().await?;
         Ok(())
     }
 
@@ -2497,6 +2510,11 @@ mod tests {
         proxy_stops: AtomicUsize,
         proxy_clears: AtomicUsize,
         proxy_restores: AtomicUsize,
+        proxy_captures: AtomicUsize,
+        proxy_active: AtomicBool,
+        proxy_baseline: AtomicBool,
+        proxy_lease: AtomicBool,
+        auto_client_sets_proxy: AtomicBool,
         fail_proxy_clear: AtomicBool,
         fail_proxy_stop: AtomicBool,
     }
@@ -2580,6 +2598,9 @@ mod tests {
         }
 
         async fn ensure_hiddify(&self, cancel: CancellationToken) -> Result<(), CoreError> {
+            if self.auto_client_sets_proxy.load(Ordering::SeqCst) {
+                self.proxy_active.store(true, Ordering::SeqCst);
+            }
             if self.hiddify_missing.load(Ordering::SeqCst) {
                 return Err(CoreError::HiddifyNotFound);
             }
@@ -2660,8 +2681,18 @@ mod tests {
             Ok(())
         }
 
+        async fn capture_system_proxy(&self) -> Result<(), CoreError> {
+            self.proxy_captures.fetch_add(1, Ordering::SeqCst);
+            if !self.proxy_lease.swap(true, Ordering::SeqCst) {
+                self.proxy_baseline
+                    .store(self.proxy_active.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
+            Ok(())
+        }
+
         async fn clear_hiddify_system_proxy(&self) -> Result<bool, CoreError> {
             self.proxy_clears.fetch_add(1, Ordering::SeqCst);
+            self.proxy_active.store(false, Ordering::SeqCst);
             if self.fail_proxy_clear.load(Ordering::SeqCst) {
                 return Err(CoreError::Platform("system proxy clear failed".into()));
             }
@@ -2669,7 +2700,20 @@ mod tests {
         }
 
         async fn restore_hiddify_system_proxy(&self) -> Result<(), CoreError> {
+            assert!(
+                !self.tun.load(Ordering::SeqCst),
+                "proxy must never bypass an active TUN"
+            );
+            assert!(
+                !self.process.load(Ordering::SeqCst),
+                "core must stop before proxy handoff"
+            );
             self.proxy_restores.fetch_add(1, Ordering::SeqCst);
+            if self.proxy_lease.load(Ordering::SeqCst) {
+                self.proxy_active
+                    .store(self.proxy_baseline.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
+            self.proxy_lease.store(false, Ordering::SeqCst);
             Ok(())
         }
 
@@ -2726,6 +2770,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disconnect_returns_the_original_proxy_after_detaching_capture() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.proxy_active.store(true, Ordering::SeqCst);
+        let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+        engine.start_stack(None).await.unwrap();
+        engine
+            .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(backend.proxy_captures.load(Ordering::SeqCst), 1);
+        assert!(!backend.proxy_active.load(Ordering::SeqCst));
+        engine.stop_stack().await.unwrap();
+        engine
+            .wait_for_phase(StackPhase::Stopped, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(!backend.tun.load(Ordering::SeqCst));
+        assert!(backend.proxy_active.load(Ordering::SeqCst));
+        assert!(!backend.proxy_lease.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_client_started_by_connect_does_not_replace_an_originally_disabled_proxy() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.auto_client_sets_proxy.store(true, Ordering::SeqCst);
+        let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+        engine.start_stack(None).await.unwrap();
+        engine
+            .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
+            .await
+            .unwrap();
+        engine.stop_stack().await.unwrap();
+        engine
+            .wait_for_phase(StackPhase::Stopped, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(!backend.proxy_active.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn unused_application_quit_does_not_clear_the_users_proxy() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.proxy_active.store(true, Ordering::SeqCst);
+        let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+        engine.refresh_health().await;
+        engine.shutdown().await.unwrap();
+        assert_eq!(backend.proxy_clears.load(Ordering::SeqCst), 0);
+        assert!(backend.proxy_active.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
     async fn shutdown_cancels_connect_and_detaches_before_returning() {
         let backend = Arc::new(FakeBackend::default());
         backend.slow_hiddify.store(true, Ordering::SeqCst);
@@ -2735,7 +2830,7 @@ mod tests {
         assert!(!backend.process.load(Ordering::SeqCst));
         assert!(!backend.tun.load(Ordering::SeqCst));
         assert!(backend.cleanups.load(Ordering::SeqCst) > 0);
-        assert!(backend.proxy_clears.load(Ordering::SeqCst) > 0);
+        assert!(!backend.proxy_active.load(Ordering::SeqCst));
         assert!(
             engine.start_stack(None).await.is_err(),
             "exit must reject a new Connect"
@@ -2976,9 +3071,9 @@ mod tests {
             .await
             .expect("running again");
         assert!(backend.tun.load(Ordering::SeqCst));
-        // resume must never restore a Hiddify system proxy: it would bypass
-        // the TUN split routing and break DIRECT domains
-        assert_eq!(backend.proxy_restores.load(Ordering::SeqCst), 0);
+        // Pause restores ordinary access, then Resume clears it for split routing.
+        assert_eq!(backend.proxy_restores.load(Ordering::SeqCst), 1);
+        assert!(!backend.proxy_active.load(Ordering::SeqCst));
         // start, pause, and the resume's start steps each clear once
         assert_eq!(backend.proxy_clears.load(Ordering::SeqCst), 3);
     }
@@ -3019,7 +3114,7 @@ mod tests {
         );
         assert!(!backend.tun.load(Ordering::SeqCst));
         assert_eq!(backend.proxy_stops.load(Ordering::SeqCst), 0);
-        assert_eq!(backend.proxy_restores.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.proxy_restores.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

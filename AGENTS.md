@@ -71,6 +71,21 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- Clearing a user's already-enabled local proxy during Connect is temporary
+  ownership, not permission to discard their working network after Disconnect.
+  Capture before launching clients, retain that first baseline, and hand it back
+  only after verified TUN cleanup, only to a reachable loopback client, and only
+  when the settings have not changed outside BiFlow. Never restore into Running
+  or overwrite a corporate proxy/PAC choice. Keep a borrowed client alive and
+  cover the live-proxy and dead-proxy cases separately (ADR 0132).
+- An unused app must not clear a user proxy merely because Quit was requested.
+  Cleanup only state the app took over; a helper's presence is not ownership.
+- `BiFlow` in new Rust documentation needs Markdown backticks under strict
+  Clippy. An old test requiring a clear call during an early cancelled Connect
+  tested an implementation detail; assert preserved original proxy state instead.
+  Environment finding fixtures must set `biflow.stack_phase`, which the finding
+  policy actually consumes, rather than only the duplicate runtime snapshot.
+
 - Relaunch helpers that append JSONL must use the diagnostic writer's flat
   event schema, including timestamp, level, and top-level event/action fields.
   A nested `fields` object makes the launch result invisible to the normal log

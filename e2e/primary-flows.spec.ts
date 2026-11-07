@@ -165,6 +165,7 @@ test.describe("primary BiFlow flows", () => {
       page.getByRole("heading", { name: "Paused", exact: true }),
     ).toBeVisible();
     await expect(page.getByRole("button", { name: "Resume" })).toBeVisible();
+    await expect(statusBar).toContainText("Internet connected");
     await page.getByRole("button", { name: "Resume" }).click();
     await expect(
       page.getByRole("heading", { name: "Connected", exact: true }),

@@ -135,3 +135,4 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0129](./0129-macos-update-downloads-only.md)                  | macOS update downloads a disk image and does not restart              | Superseded |
 | [0130](./0130-resume-recovery-and-serialized-quit.md)          | Recover after unlock and serialize network release on Quit            | Accepted   |
 | [0131](./0131-verified-macos-install-and-relaunch.md)          | Verify and replace the macOS bundle before scheduling a user relaunch | Accepted   |
+| [0132](./0132-return-user-proxy-on-disconnect.md)              | Return the original live local proxy after releasing owned routing    | Accepted   |
