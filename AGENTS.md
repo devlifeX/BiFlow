@@ -71,6 +71,25 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- Fetch upstream main and compare the latest release before building a patch.
+  An older feature branch can carry a higher version while missing later fixes.
+  Base the patch on current main and preserve its accepted platform behavior.
+- NSIS staging must use `$COMMONPROGRAMDATA`; `$PROGRAMDATA` is not a defined
+  variable and silently corrupts the helper argument. Require the valid spelling
+  and reject the retired token in installer contracts, then compile the generated
+  installer with `/WX` before installing it (ADR 0130).
+- Refreshing main does not refresh a lockfile's yanked releases. Replace
+  `async-executor` 1.14.0 and `clipboard-win` 5.4.1 through `cargo update -p`
+  when the advisory check flags them; do not add an advisory ignore.
+- Repeated Quit requests must all prevent exit until owned network cleanup
+  completes. Drain client maintenance and pending Connect, reject new actions,
+  and retain cleanup errors for retry instead of exiting after a warning
+  (ADR 0130). Clear recovery's operation ID before releasing its lifecycle lock,
+  and cover the next user Pause so a successful repair cannot strand that lock.
+- A controller can report a stale enabled TUN after sleep. Use native timer gaps
+  and Windows unlock alongside persistent component failures, preserve idle
+  intent, and exclude the health/recovery work itself from timer-gap detection.
+
 - A failed macOS disk-image open must not resume a user-paused stack. Only
   package kinds that pause the stack for installation may restore it after
   failure; pass the install kind into the recovery decision (ADR 0129).

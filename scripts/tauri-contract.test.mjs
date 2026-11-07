@@ -123,7 +123,8 @@ describe("Tauri frontend contract", () => {
       join(root, "crates/iran-split-helper/src/windows.rs"),
       "utf8",
     );
-    assert.match(hook, /\$PROGRAMDATA\\iran-split\\staging/);
+    assert.match(hook, /\$COMMONPROGRAMDATA\\iran-split\\staging/);
+    assert.doesNotMatch(hook, /\$PROGRAMDATA/);
     assert.doesNotMatch(hook, /\$LOCALAPPDATA\\biflow\\runtime\\generations/);
     assert.ok(install.includes(String.raw`C:\ProgramData\iran-split\staging`));
     assert.match(desktop, /generation_staging_dir/);

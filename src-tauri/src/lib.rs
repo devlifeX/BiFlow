@@ -6,6 +6,7 @@ mod environment;
 mod github_update;
 mod helper_install;
 mod hiddify_reset;
+mod lifecycle;
 mod network;
 mod platform_paths;
 mod profile;
@@ -26,8 +27,8 @@ use iran_split_config::{
     ValidationIssue,
 };
 use iran_split_core::{
-    ComponentPhase, CoreError, Engine, LifecycleBusy, OperationAccepted, PlatformBackend,
-    StackPhase, StackSnapshot,
+    ComponentPhase, Engine, LifecycleBusy, OperationAccepted, PlatformBackend, StackPhase,
+    StackSnapshot,
 };
 use iran_split_mihomo::{ActiveConnection, ControllerClient};
 use iran_split_rules::{
@@ -3872,8 +3873,12 @@ fn spawn_traffic_loop<R: Runtime>(handle: AppHandle<R>) {
 /// Refreshes health and rejoins late local proxies every 10 seconds.
 fn spawn_health_loop(health_engine: Arc<Engine<NativeBackend>>) {
     tauri::async_runtime::spawn(async move {
+        let mut recovery = lifecycle::RecoveryMonitor::default();
+        #[cfg(windows)]
+        let mut was_locked = false;
         loop {
             tokio::time::sleep(Duration::from_secs(10)).await;
+            let tick_time = std::time::SystemTime::now();
             if matches!(
                 health_engine.snapshot().phase,
                 StackPhase::Stopped
@@ -3883,10 +3888,50 @@ fn spawn_health_loop(health_engine: Arc<Engine<NativeBackend>>) {
                     | StackPhase::Error
             ) {
                 health_engine.refresh_health().await;
+                #[cfg(not(windows))]
+                let unlocked = false;
+                #[cfg(windows)]
+                let unlocked = match lifecycle::session_locked().await {
+                    Ok(locked) => {
+                        let changed = was_locked && !locked;
+                        if was_locked != locked {
+                            info!(
+                                event = "session.lock_state_changed",
+                                section = "lifecycle",
+                                initiator = "health_loop",
+                                cause = "session_transition",
+                                locked,
+                                trace_route = "health_loop->session_query->recovery_monitor",
+                                "Windows session lock state changed"
+                            );
+                        }
+                        was_locked = locked;
+                        changed
+                    }
+                    Err(cause) => {
+                        warn!(
+                            event = "session.state_query_failed",
+                            section = "lifecycle",
+                            initiator = "health_loop",
+                            cause,
+                            trace_route = "health_loop->session_query",
+                            "session state unavailable; timer and health recovery remain active"
+                        );
+                        false
+                    }
+                };
+                if recovery.observe(tick_time, &health_engine.snapshot(), unlocked) {
+                    if let Err(cause) = health_engine.recover_network().await {
+                        warn!(event = "network.recovery_request_failed", section = "lifecycle",
+                            initiator = "health_loop", %cause, trace_route = "health_loop->engine",
+                            "automatic network recovery did not complete");
+                    }
+                }
                 // ADR 0076: a local proxy (e.g. Happ) the operator connected
                 // after Connect rejoins live routing without a full reconnect.
                 health_engine.recover_clients().await;
             }
+            recovery.finish_tick(std::time::SystemTime::now());
         }
     });
 }
@@ -4216,30 +4261,41 @@ pub fn run() {
 }
 
 static UPDATE_EXIT_KEEPS_NETWORK: AtomicBool = AtomicBool::new(false);
-static NETWORK_RELEASE_STARTED: AtomicBool = AtomicBool::new(false);
-
-/// User quit gives the machine its previous network back. An in-app update
-/// already paused the tunnel and must keep that paused stack (ADR 0120).
-#[must_use]
-fn exit_releases_owned_network(update_exit: bool) -> bool {
-    !update_exit
-}
+static NETWORK_EXIT: lifecycle::ExitCoordinator = lifecycle::ExitCoordinator::new();
 
 fn handle_run_event(handle: &AppHandle, event: &tauri::RunEvent) {
     match event {
         tauri::RunEvent::ExitRequested { api, code, .. } => {
             diagnostics::exit_requested(*code);
-            if !exit_releases_owned_network(UPDATE_EXIT_KEEPS_NETWORK.load(Ordering::SeqCst)) {
-                return;
+            match NETWORK_EXIT.decision(UPDATE_EXIT_KEEPS_NETWORK.load(Ordering::SeqCst)) {
+                lifecycle::ExitDecision::Allow => return,
+                lifecycle::ExitDecision::Wait => {
+                    api.prevent_exit();
+                    return;
+                }
+                lifecycle::ExitDecision::Cleanup => api.prevent_exit(),
             }
-            if NETWORK_RELEASE_STARTED.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            api.prevent_exit();
             let app = handle.clone();
+            let exit_code = code.unwrap_or(0);
             tauri::async_runtime::spawn(async move {
-                release_owned_network(&app).await;
-                app.exit(0);
+                match release_owned_network(&app).await {
+                    Ok(()) => {
+                        NETWORK_EXIT.completed();
+                        app.exit(exit_code);
+                    }
+                    Err(cause) => {
+                        warn!(
+                            event = "session.network_release_failed",
+                            section = "lifecycle",
+                            initiator = "application_exit",
+                            cause,
+                            trace_route = "application_exit->engine->shutdown",
+                            "application remains open so network cleanup can be retried"
+                        );
+                        NETWORK_EXIT.failed();
+                        show_main(&app);
+                    }
+                }
             });
         }
         tauri::RunEvent::Exit => {
@@ -4251,61 +4307,22 @@ fn handle_run_event(handle: &AppHandle, event: &tauri::RunEvent) {
     }
 }
 
-async fn release_owned_network<R: Runtime>(app: &AppHandle<R>) {
-    let Ok(services) = services(app) else {
-        return;
-    };
-    info!(
-        event = "session.network_release_started",
-        section = "lifecycle",
-        initiator = "application_exit",
-        cause = "quit",
-        trace_route = "application_exit->stop_stack",
-        "releasing the tunnel, system DNS, and system proxy before exit"
-    );
-    let engine = &services.engine;
-    if let Some(operation_id) = engine.snapshot().operation_id {
-        engine.cancel_operation(operation_id).await;
-    }
-    let deadline = std::time::Instant::now() + Duration::from_secs(50);
-    loop {
-        match engine.stop_stack().await {
-            Ok(accepted) => {
-                if !accepted.already_complete {
-                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                    if let Err(cause) = engine
-                        .wait_for_phase(StackPhase::Stopped, remaining.max(Duration::from_secs(1)))
-                        .await
-                    {
-                        warn!(
-                            event = "session.network_release_failed",
-                            section = "lifecycle",
-                            initiator = "application_exit",
-                            cause = %cause,
-                            trace_route = "application_exit->stop_stack",
-                            "quit continued after the network release did not finish"
-                        );
-                    }
-                }
-                break;
-            }
-            Err(CoreError::OperationInProgress) if std::time::Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            Err(cause) => {
-                warn!(
-                    event = "session.network_release_failed",
-                    section = "lifecycle",
-                    initiator = "application_exit",
-                    cause = %cause,
-                    trace_route = "application_exit->stop_stack",
-                    "quit continued without a completed disconnect"
-                );
-                break;
-            }
-        }
-    }
+async fn release_owned_network<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let result = diagnostics::trace_action(
+        "lifecycle",
+        "application_exit",
+        "release_owned_network",
+        async {
+            services(app)?
+                .engine
+                .shutdown()
+                .await
+                .map_err(|cause| cause.to_string())
+        },
+    )
+    .await;
     diagnostics::flush();
+    result
 }
 
 #[cfg(test)]
@@ -4315,12 +4332,6 @@ mod tests {
         BaseDirs, ProfileEnv, ResolvedProfile, DEV_HELPER_ENDPOINT_VAR, DEV_MIHOMO_BINARY_VAR,
         DEV_PROFILE_VAR, DEV_SYSTEM_RUNTIME_VAR,
     };
-
-    #[test]
-    fn quit_releases_the_network_and_an_update_exit_does_not() {
-        assert!(exit_releases_owned_network(false));
-        assert!(!exit_releases_owned_network(true));
-    }
 
     #[test]
     fn failed_disk_image_open_preserves_a_user_paused_stack() {

@@ -133,3 +133,4 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0127](./0127-macos-update-relaunch.md)                        | Relaunch the replaced macOS app after the old process exits         | Superseded |
 | [0128](./0128-macos-drag-install.md)                           | macOS disk image is a drag-to-Applications install                  | Accepted   |
 | [0129](./0129-macos-update-downloads-only.md)                  | macOS update downloads a disk image and does not restart            | Accepted   |
+| [0130](./0130-resume-recovery-and-serialized-quit.md)          | Recover after unlock and serialize network release on Quit          | Accepted   |

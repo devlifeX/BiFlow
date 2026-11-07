@@ -1,5 +1,6 @@
 !macro NSIS_HOOK_POSTINSTALL
-  nsExec::ExecToLog '"$INSTDIR\helper\iran-split-helper.exe" --install --mihomo "$INSTDIR\dependencies\mihomo.exe" --staging-dir "$PROGRAMDATA\iran-split\staging" --tun-name clash-iran'
+  ; NSIS exposes the machine-wide data directory as COMMONPROGRAMDATA.
+  nsExec::ExecToLog '"$INSTDIR\helper\iran-split-helper.exe" --install --mihomo "$INSTDIR\dependencies\mihomo.exe" --staging-dir "$COMMONPROGRAMDATA\iran-split\staging" --tun-name clash-iran'
   Pop $R0
   StrCmp $R0 "0" helper_install_completed
   DetailPrint "BiFlow Helper installation failed (exit: $R0)."

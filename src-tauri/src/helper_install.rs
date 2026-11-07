@@ -1104,13 +1104,13 @@ mod tests {
     #[test]
     fn nsis_hook_stages_into_programdata_iran_split() {
         let hook = include_str!("../../packaging/windows/installer-hooks.nsh");
-        assert!(hook.contains(r"$PROGRAMDATA\iran-split\staging"));
+        assert!(hook.contains(r"$COMMONPROGRAMDATA\iran-split\staging"));
         assert_eq!(
             super::WINDOWS_HELPER_STAGING,
             r"C:\ProgramData\iran-split\staging"
         );
         assert!(!hook.contains(r"$LOCALAPPDATA\biflow\runtime\generations"));
-        assert!(!hook.contains("$COMMONPROGRAMDATA"));
+        assert!(!hook.contains("$PROGRAMDATA"));
         let source = include_str!("helper_install.rs");
         assert!(source.contains("PathBuf::from(WINDOWS_HELPER_STAGING)"));
     }

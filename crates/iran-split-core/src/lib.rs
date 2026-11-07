@@ -721,6 +721,8 @@ pub struct Engine<B: PlatformBackend> {
     probe_degraded: AtomicBool,
     /// Connect-time override for side-tunnel start (progressive 15/30/60s UX).
     side_tunnel_connect_timeout: Mutex<Option<u64>>,
+    shutting_down: AtomicBool,
+    maintenance: Mutex<()>,
 }
 
 /// Health ticks run every ~10s; three consecutive egress failures (~30s)
@@ -765,6 +767,8 @@ impl<B: PlatformBackend> Engine<B> {
             primary_egress_failures: AtomicUsize::new(0),
             probe_degraded: AtomicBool::new(false),
             side_tunnel_connect_timeout: Mutex::new(None),
+            shutting_down: AtomicBool::new(false),
+            maintenance: Mutex::new(()),
         });
         runtime.spawn(Self::worker(Arc::clone(&engine), receiver));
         engine
@@ -857,6 +861,10 @@ impl<B: PlatformBackend> Engine<B> {
     /// the periodic health tick, so a recovered client rejoins routing without
     /// restarting the stack. A failed apply is retried on the next tick.
     pub async fn recover_clients(&self) {
+        let _maintenance = self.maintenance.lock().await;
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
         let snapshot = self.snapshot();
         if !matches!(snapshot.phase, StackPhase::Running | StackPhase::Degraded) {
             // Stop/start rebuilds every handle, so a leftover pending refresh
@@ -1047,6 +1055,10 @@ impl<B: PlatformBackend> Engine<B> {
     /// Returns an error when the stack is not live, another operation is
     /// reserved, or the platform retry fails.
     pub async fn retry_side_tunnels(&self, timeout_seconds: u64) -> Result<bool, CoreError> {
+        let _maintenance = self.maintenance.lock().await;
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err(CoreError::OperationInProgress);
+        }
         if !matches!(
             self.snapshot().phase,
             StackPhase::Running | StackPhase::Degraded
@@ -1100,6 +1112,10 @@ impl<B: PlatformBackend> Engine<B> {
         client_id: ClientId,
         timeout_seconds: u64,
     ) -> Result<(), CoreError> {
+        let _maintenance = self.maintenance.lock().await;
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err(CoreError::OperationInProgress);
+        }
         if !matches!(
             self.snapshot().phase,
             StackPhase::Running | StackPhase::Degraded
@@ -1144,6 +1160,10 @@ impl<B: PlatformBackend> Engine<B> {
     /// holds the lock, and [`CoreError::Platform`] when the client is a local
     /// proxy that stops only with the stack.
     pub async fn disconnect_client(&self, client_id: ClientId) -> Result<(), CoreError> {
+        let _maintenance = self.maintenance.lock().await;
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err(CoreError::OperationInProgress);
+        }
         if self.snapshot().busy.is_some() {
             return Err(CoreError::OperationInProgress);
         }
@@ -1377,8 +1397,108 @@ impl<B: PlatformBackend> Engine<B> {
         }
     }
 
+    /// Cancels pending work and restores owned networking before process exit.
+    ///
+    /// # Errors
+    /// Returns the cleanup error, or a timeout if another action cannot drain.
+    pub async fn shutdown(&self) -> Result<(), CoreError> {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        let result = tokio::time::timeout(self.timeouts.start + self.timeouts.stop, async {
+            // A reservation that passed the shutdown check must publish busy
+            // before we decide the worker has drained.
+            drop(self.pending.lock().await);
+            let _maintenance = self.maintenance.lock().await;
+            loop {
+                for operation in self.operations.lock().await.values() {
+                    operation.cancel.cancel();
+                }
+                if self.snapshot().busy.is_none() && self.operations.lock().await.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            // An unused install without an available helper has nothing privileged
+            // to detach. Still remove a dead local-proxy endpoint from OS settings.
+            let snapshot = self.snapshot();
+            if matches!(
+                snapshot.phase,
+                StackPhase::Stopped | StackPhase::Uninitialized
+            ) && snapshot.helper.phase != ComponentPhase::Running
+                && snapshot.mihomo.phase != ComponentPhase::Running
+                && snapshot.tun.phase != ComponentPhase::Running
+            {
+                self.backend.clear_hiddify_system_proxy().await?;
+                return self.backend.stop_user_proxy().await;
+            }
+            self.run_stop(Uuid::new_v4()).await
+        })
+        .await
+        .unwrap_or(Err(CoreError::OperationTimeout));
+        if let Err(ref cause) = result {
+            self.update(|snapshot| {
+                snapshot.phase = StackPhase::Error;
+                snapshot.last_error = Some(cause.to_app_error(Uuid::new_v4()));
+                snapshot.operation_id = None;
+            });
+            self.shutting_down.store(false, Ordering::SeqCst);
+        }
+        result
+    }
+
+    /// Rebuilds owned routing after sleep or persistent local runtime failure.
+    /// Keeps the user's paused/stopped intent and uses the lifecycle lock.
+    ///
+    /// # Errors
+    /// Returns a lifecycle conflict, readiness failure, or cleanup error.
+    pub async fn recover_network(&self) -> Result<(), CoreError> {
+        let _maintenance = self.maintenance.lock().await;
+        if !matches!(
+            self.snapshot().phase,
+            StackPhase::Running | StackPhase::Degraded
+        ) {
+            return Ok(());
+        }
+        self.reserve_lifecycle(LifecycleBusy::Resuming).await?;
+        let trace_id = Uuid::new_v4();
+        info!(event = "network.recovery_started", section = "lifecycle", initiator = "health_loop",
+            cause = "resume_or_runtime_failure", trace_route = "health_loop->engine->pause->resume",
+            %trace_id, "rebuilding owned networking");
+        let work = async {
+            self.run_pause(trace_id).await?;
+            self.backend.forget_client_egress().await;
+            self.run_resume(trace_id, &CancellationToken::new()).await
+        };
+        let result = tokio::time::timeout(self.timeouts.start + self.timeouts.stop, work)
+            .await
+            .unwrap_or(Err(CoreError::OperationTimeout));
+        if let Err(ref cause) = result {
+            warn!(event = "network.recovery_failed", section = "lifecycle", initiator = "health_loop",
+                %cause, trace_route = "health_loop->engine->cleanup", %trace_id,
+                "network recovery failed; restoring ordinary networking");
+            let cleanup = tokio::time::timeout(self.timeouts.stop, self.run_pause(trace_id)).await;
+            if !matches!(cleanup, Ok(Ok(()))) {
+                self.update(|snapshot| snapshot.phase = StackPhase::Error);
+                error!(event = "network.recovery_cleanup_failed", section = "lifecycle",
+                    initiator = "health_loop", cause = "cleanup_failed_or_timed_out",
+                    trace_route = "health_loop->engine->cleanup", %trace_id,
+                    "network cleanup needs operator attention");
+            }
+            self.update(|snapshot| snapshot.last_error = Some(cause.to_app_error(trace_id)));
+        } else {
+            info!(event = "network.recovery_completed", section = "lifecycle", initiator = "health_loop",
+                cause = "ready", trace_route = "health_loop->engine->readiness", %trace_id,
+                "owned networking recovered");
+        }
+        self.update(|snapshot| snapshot.operation_id = None);
+        self.release_lifecycle(LifecycleBusy::Resuming).await;
+        result
+    }
+
     async fn reserve(&self, kind: OperationKind) -> Result<(), CoreError> {
         let pending = self.pending.lock().await;
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err(CoreError::OperationInProgress);
+        }
         if let Some(operation_id) = pending.get(&kind) {
             info!(
                 event = "operation.deduplicated",
@@ -1402,11 +1522,11 @@ impl<B: PlatformBackend> Engine<B> {
             }
             return Ok(());
         }
-        drop(pending);
         self.update(|snapshot| {
             snapshot.busy = Some(kind.busy());
             snapshot.operation_stage = Some(kind.initial_stage());
         });
+        drop(pending);
         info!(
             event = "operation.reserved",
             section = "engine",
@@ -1928,30 +2048,25 @@ impl<B: PlatformBackend> Engine<B> {
     }
 
     async fn run_stop(&self, operation_id: Uuid) -> Result<(), CoreError> {
-        let was_active = matches!(
-            self.snapshot().phase,
-            StackPhase::Running | StackPhase::Degraded | StackPhase::Paused
-        );
         self.announce(StackPhase::Stopping, operation_id).await;
         self.announce_stage(OperationStage::StoppingCore).await;
-        if was_active {
-            if let Err(cause) = self.backend.stop_core().await {
-                warn!(
-                    event = "operation.stop_core_failed",
-                    section = "engine",
-                    initiator = "run_stop",
-                    cause = %cause,
-                    trace_id = %operation_id,
-                    trace_route = "engine_operation->platform_backend->stop_core",
-                    "stop continued after core stop failure"
-                );
-            }
+        if let Err(cause) = self.backend.stop_core().await {
+            warn!(
+                event = "operation.stop_core_failed",
+                section = "engine",
+                initiator = "run_stop",
+                cause = %cause,
+                trace_id = %operation_id,
+                trace_route = "engine_operation->platform_backend->stop_core",
+                "stop continued after core stop failure"
+            );
         }
         self.announce_stage(OperationStage::StoppingProxy).await;
         // A proxy-tool failure must not skip TUN and DNS cleanup. Leaving the
         // capture in place is what makes the network unusable until the next
         // Connect (ADR 0120).
-        if let Err(cause) = self.backend.stop_user_proxy().await {
+        let proxy_stop = self.backend.stop_user_proxy().await;
+        if let Err(ref cause) = proxy_stop {
             warn!(
                 event = "operation.stop_proxy_failed",
                 section = "engine",
@@ -1962,7 +2077,8 @@ impl<B: PlatformBackend> Engine<B> {
                 "stop continued after the local proxy client could not be stopped"
             );
         }
-        if let Err(cause) = self.backend.clear_hiddify_system_proxy().await {
+        let proxy_clear = self.backend.clear_hiddify_system_proxy().await;
+        if let Err(ref cause) = proxy_clear {
             warn!(
                 event = "operation.stop_clear_proxy_failed",
                 section = "engine",
@@ -1984,6 +2100,8 @@ impl<B: PlatformBackend> Engine<B> {
             )));
         }
         self.backend.forget_client_egress().await;
+        proxy_stop?;
+        proxy_clear?;
         let health = self.backend.runtime_health().await;
         self.set_stopped(health);
         Ok(())
@@ -2003,7 +2121,8 @@ impl<B: PlatformBackend> Engine<B> {
                 "pause continued after core stop failure"
             );
         }
-        if let Err(cause) = self.backend.clear_hiddify_system_proxy().await {
+        let proxy_clear = self.backend.clear_hiddify_system_proxy().await;
+        if let Err(ref cause) = proxy_clear {
             warn!(
                 event = "operation.pause_clear_proxy_failed",
                 section = "engine",
@@ -2025,6 +2144,7 @@ impl<B: PlatformBackend> Engine<B> {
             )));
         }
         self.backend.verify_not_intercepting().await?;
+        proxy_clear?;
         let health = self.backend.runtime_health().await;
         self.set_paused(health);
         Ok(())
@@ -2378,6 +2498,7 @@ mod tests {
         proxy_clears: AtomicUsize,
         proxy_restores: AtomicUsize,
         fail_proxy_clear: AtomicBool,
+        fail_proxy_stop: AtomicBool,
     }
 
     #[async_trait]
@@ -2533,6 +2654,9 @@ mod tests {
 
         async fn stop_user_proxy(&self) -> Result<(), CoreError> {
             self.proxy_stops.fetch_add(1, Ordering::SeqCst);
+            if self.fail_proxy_stop.load(Ordering::SeqCst) {
+                return Err(CoreError::Platform("proxy stop failed".into()));
+            }
             Ok(())
         }
 
@@ -2599,6 +2723,112 @@ mod tests {
                 warnings: vec![],
             })
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_connect_and_detaches_before_returning() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.slow_hiddify.store(true, Ordering::SeqCst);
+        let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+        engine.start_stack(None).await.expect("connect");
+        engine.shutdown().await.expect("shutdown");
+        assert!(!backend.process.load(Ordering::SeqCst));
+        assert!(!backend.tun.load(Ordering::SeqCst));
+        assert!(backend.cleanups.load(Ordering::SeqCst) > 0);
+        assert!(backend.proxy_clears.load(Ordering::SeqCst) > 0);
+        assert!(
+            engine.start_stack(None).await.is_err(),
+            "exit must reject a new Connect"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_cleans_error_state_even_when_optional_proxy_stop_fails() {
+        let backend = Arc::new(FakeBackend::default());
+        let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+        backend.process.store(true, Ordering::SeqCst);
+        backend.tun.store(true, Ordering::SeqCst);
+        backend.fail_proxy_stop.store(true, Ordering::SeqCst);
+        engine.update(|snapshot| snapshot.phase = StackPhase::Error);
+        assert!(engine.shutdown().await.is_err());
+        assert!(!backend.process.load(Ordering::SeqCst));
+        assert!(!backend.tun.load(Ordering::SeqCst));
+        assert!(backend.proxy_clears.load(Ordering::SeqCst) > 0);
+        backend.fail_proxy_stop.store(false, Ordering::SeqCst);
+        engine.shutdown().await.expect("retry cleanup");
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_maintenance_and_prevents_client_relaunch() {
+        let backend = Arc::new(FakeBackend::default());
+        let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+        engine.update(|snapshot| snapshot.phase = StackPhase::Running);
+        let maintenance = engine.maintenance.lock().await;
+        let exiting = Arc::clone(&engine);
+        let shutdown = tokio::spawn(async move { exiting.shutdown().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !shutdown.is_finished(),
+            "must drain in-flight client maintenance"
+        );
+        drop(maintenance);
+        shutdown.await.expect("join").expect("cleanup");
+        engine.recover_clients().await;
+        assert_eq!(backend.recover_calls.load(Ordering::SeqCst), 0);
+        let client_id = ClientId::parse("11111111-1111-1111-1111-111111111111").expect("client id");
+        assert!(matches!(
+            engine.connect_client(client_id, 15).await,
+            Err(CoreError::OperationInProgress)
+        ));
+        assert!(matches!(
+            engine.retry_side_tunnels(15).await,
+            Err(CoreError::OperationInProgress)
+        ));
+        assert!(matches!(
+            engine.disconnect_client(client_id).await,
+            Err(CoreError::OperationInProgress)
+        ));
+    }
+
+    #[tokio::test]
+    async fn network_recovery_rebuilds_tun_and_preserves_paused_intent() {
+        let backend = Arc::new(FakeBackend::default());
+        let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+        engine.start_stack(None).await.expect("start");
+        engine
+            .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
+            .await
+            .expect("running");
+        backend.tun.store(false, Ordering::SeqCst);
+        engine.recover_network().await.expect("recover");
+        assert_eq!(engine.snapshot().phase, StackPhase::Running);
+        assert!(backend.tun.load(Ordering::SeqCst));
+        assert_eq!(backend.starts.load(Ordering::SeqCst), 2);
+        engine.pause_stack().await.expect("pause");
+        engine
+            .wait_for_phase(StackPhase::Paused, Duration::from_secs(2))
+            .await
+            .expect("paused");
+        engine.recover_network().await.expect("idle recovery");
+        assert_eq!(engine.snapshot().phase, StackPhase::Paused);
+        assert_eq!(backend.starts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn failed_network_recovery_leaves_normal_networking_detached() {
+        let backend = Arc::new(FakeBackend::default());
+        let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+        engine.start_stack(None).await.expect("start");
+        engine
+            .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
+            .await
+            .expect("running");
+        backend.fail_readiness.store(true, Ordering::SeqCst);
+        assert!(engine.recover_network().await.is_err());
+        assert_eq!(engine.snapshot().phase, StackPhase::Paused);
+        assert!(!backend.process.load(Ordering::SeqCst));
+        assert!(!backend.tun.load(Ordering::SeqCst));
+        assert!(engine.snapshot().busy.is_none());
     }
 
     #[tokio::test]
@@ -2705,7 +2935,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_removes_the_tunnel_when_system_proxy_clear_fails() {
+    async fn stop_reports_proxy_failure_after_removing_the_tunnel() {
         let backend = Arc::new(FakeBackend::default());
         backend.fail_proxy_clear.store(true, Ordering::SeqCst);
         let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
@@ -2719,7 +2949,8 @@ mod tests {
         engine
             .wait_for_phase(StackPhase::Stopped, Duration::from_secs(2))
             .await
-            .expect("stopped");
+            .expect_err("proxy cleanup failure must remain visible after TUN cleanup");
+        assert_eq!(engine.snapshot().phase, StackPhase::Error);
         assert!(!backend.tun.load(Ordering::SeqCst));
         assert!(backend.cleanups.load(Ordering::SeqCst) >= 1);
     }
