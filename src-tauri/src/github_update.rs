@@ -2,9 +2,9 @@
 //!
 //! Check uses the public Releases API. Install downloads the platform package
 //! and applies it with `pkexec apt-get` (`.deb`), a replace helper (`AppImage`),
-//! or an elevated NSIS installer (Windows). On macOS the verified disk image
-//! is opened for a drag install and the running app is left in place. Do not
-//! log asset URLs.
+//! or an elevated NSIS installer (Windows). macOS validates and replaces the
+//! installed bundle, then relaunches after the old process exits. Do not log
+//! asset URLs.
 
 use serde::Deserialize;
 use std::{
@@ -52,14 +52,8 @@ pub struct UpdateInfo {
 pub enum ApplyOutcome {
     /// Linux `.deb`: package is installed; the running process is still old.
     ManualRestart,
-    /// A helper script will replace this process after exit.
+    /// A helper relaunches after exit; package replacement may already be complete.
     HelperRestart,
-    /// The signed macOS disk image is open. Nothing was replaced or restarted.
-    ///
-    /// Only macOS constructs this variant. Leaving it in the Linux and Windows
-    /// builds makes Clippy reject it as dead code.
-    #[cfg(target_os = "macos")]
-    DiskImageOpened,
 }
 
 #[must_use]
@@ -347,6 +341,7 @@ pub async fn apply_package(
     package: &Path,
     current_exe: &Path,
     expected_version: &str,
+    _operation_id: uuid::Uuid,
 ) -> Result<ApplyOutcome, String> {
     match kind {
         InstallKind::Deb => {
@@ -364,8 +359,9 @@ pub async fn apply_package(
         InstallKind::Dmg => {
             #[cfg(target_os = "macos")]
             {
-                open_downloaded_dmg(package).await?;
-                Ok(ApplyOutcome::DiskImageOpened)
+                crate::macos_update::install(package, current_exe, expected_version, _operation_id)
+                    .await?;
+                Ok(ApplyOutcome::HelperRestart)
             }
             #[cfg(not(target_os = "macos"))]
             {
@@ -445,33 +441,6 @@ async fn install_appimage(package: &Path) -> Result<(), String> {
         .spawn()
         .map_err(|error| error.to_string())?;
     Ok(())
-}
-
-/// Opens the verified disk image in Finder.
-///
-/// The user drags `BiFlow` onto Applications. This process stays running, so
-/// the menu-bar copy keeps the old version until they quit it and open the
-/// Applications bundle.
-#[cfg(target_os = "macos")]
-async fn open_downloaded_dmg(package: &Path) -> Result<(), String> {
-    info!(
-        event = "update.dmg_opened",
-        section = "updater",
-        initiator = "tauri_command",
-        cause = "verified_package",
-        trace_route = "ui->apply_app_update->open_downloaded_dmg",
-        "opening the verified disk image for drag install"
-    );
-    let status = tokio::process::Command::new("/usr/bin/open")
-        .arg(package)
-        .status()
-        .await
-        .map_err(|error| error.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("could not open the update disk image".into())
-    }
 }
 
 async fn install_nsis(
@@ -742,19 +711,6 @@ mod tests {
             install_kind_from(Some(OsStr::new("/tmp/BiFlow.AppImage")), false, true),
             InstallKind::Dmg
         );
-    }
-
-    #[test]
-    fn macos_update_opens_the_disk_image_without_replacing_the_app() {
-        let source = include_str!("github_update.rs");
-        let production = source.split("mod tests").next().expect("production half");
-        assert!(production.contains("async fn open_downloaded_dmg"));
-        assert!(production.contains("ApplyOutcome::DiskImageOpened"));
-        assert!(production.contains("/usr/bin/open"));
-        assert!(!production.contains("fn install_dmg"));
-        assert!(!production.contains("fn dmg_relaunch_script"));
-        assert!(!production.contains("with administrator privileges"));
-        assert!(!production.contains("/Applications/BiFlow.app"));
     }
 
     #[test]

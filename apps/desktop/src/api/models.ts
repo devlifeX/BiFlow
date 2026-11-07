@@ -387,7 +387,6 @@ export type UpdatePhase =
   | "installing"
   | "restarting"
   | "installed"
-  | "downloaded"
   | "failed";
 
 export interface UpdateProgress {

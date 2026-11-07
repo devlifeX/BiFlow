@@ -428,14 +428,10 @@ describe("Tauri frontend contract", () => {
       rust,
       /ManualRestart =>[\s\S]*?emit_finished_update\([\s\S]*?"installed"/,
     );
-    assert.match(
-      rust,
-      /DiskImageOpened =>[\s\S]*?emit_finished_update\([\s\S]*?"downloaded"/,
-    );
+    assert.match(rust, /HelperRestart =>[\s\S]*?schedule_update_exit/);
     const updater = githubUpdate.split("mod tests")[0];
-    assert.match(updater, /async fn open_downloaded_dmg/);
-    assert.doesNotMatch(updater, /fn install_dmg/);
-    assert.doesNotMatch(updater, /fn dmg_relaunch_script/);
+    assert.match(updater, /macos_update::install\([\s\S]*?_operation_id/);
+    assert.doesNotMatch(updater, /open_downloaded_dmg/);
     assert.doesNotMatch(rust, /fn spawn_background_update_checks\(/);
     assert.doesNotMatch(rust, /fn fetch_signed_update\(/);
     assert.doesNotMatch(rust, /open_linux_deb_release/);

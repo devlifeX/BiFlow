@@ -186,7 +186,7 @@ describe("mock transport", () => {
     expect(phases.at(-1)).toBe("restarting");
   });
 
-  it("finishes a macOS update as downloaded without starting an installer", async () => {
+  it("installs and restarts a macOS update while retaining paused intent", async () => {
     vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
     sessionStorage.setItem("biflow-mock-update-available", "1");
     const before = await mockApi.getSnapshot();
@@ -196,9 +196,8 @@ describe("mock transport", () => {
     });
     await mockApi.installUpdate();
     unsubscribe();
-    expect(phases.at(-1)).toBe("downloaded");
-    expect(phases).not.toContain("installing");
-    expect(phases).not.toContain("restarting");
+    expect(phases.at(-1)).toBe("restarting");
+    expect(phases).toContain("installing");
     expect(await mockApi.getSnapshot()).toEqual(before);
   });
 

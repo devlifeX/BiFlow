@@ -7,6 +7,8 @@ mod github_update;
 mod helper_install;
 mod hiddify_reset;
 mod lifecycle;
+#[cfg(any(target_os = "macos", test))]
+mod macos_update;
 mod network;
 mod platform_paths;
 mod profile;
@@ -532,12 +534,12 @@ fn emit_update_progress<R: Runtime>(app: &AppHandle<R>, mut progress: UpdateProg
     }
 }
 
-async fn pause_stack_for_update(services: &AppServices) -> Result<(), String> {
+async fn pause_stack_for_update(services: &AppServices) -> Result<bool, String> {
     if matches!(
         services.engine.snapshot().phase,
         StackPhase::Running | StackPhase::Degraded
     ) {
-        services
+        let accepted = services
             .engine
             .pause_stack()
             .await
@@ -547,8 +549,9 @@ async fn pause_stack_for_update(services: &AppServices) -> Result<(), String> {
             .wait_for_phase(StackPhase::Paused, Duration::from_secs(25))
             .await
             .map_err(|error| error.to_string())?;
+        return Ok(!accepted.already_complete);
     }
-    Ok(())
+    Ok(false)
 }
 
 fn services<R: Runtime>(app: &AppHandle<R>) -> Result<&AppServices, String> {
@@ -2808,15 +2811,12 @@ fn verify_direct_rules_after_upgrade(data: &Path) -> Result<(), String> {
         .map_err(|cause| format!("could not clear route-pin upgrade guard: {cause}"))
 }
 
-fn failed_update_requires_resume(kind: github_update::InstallKind, phase: StackPhase) -> bool {
-    kind != github_update::InstallKind::Dmg && phase == StackPhase::Paused
+fn failed_update_requires_resume(paused_for_install: bool, phase: StackPhase) -> bool {
+    paused_for_install && phase == StackPhase::Paused
 }
 
-async fn restore_stack_after_failed_install(
-    services: &AppServices,
-    kind: github_update::InstallKind,
-) {
-    if failed_update_requires_resume(kind, services.engine.snapshot().phase) {
+async fn restore_stack_after_failed_install(services: &AppServices, paused_for_install: bool) {
+    if failed_update_requires_resume(paused_for_install, services.engine.snapshot().phase) {
         if let Err(cause) = services.engine.resume_stack().await {
             warn!(
                 event = "update.stack_restore_failed",
@@ -2834,7 +2834,7 @@ async fn restore_stack_after_failed_install(
             initiator = "install_update",
             cause = "no_installer_pause_to_restore",
             trace_route = "install_update->restore_stack_after_failed_install",
-            install_kind = ?kind,
+            paused_for_install,
             "failed update preserves the existing stack state"
         );
     }
@@ -3036,46 +3036,50 @@ async fn apply_downloaded_package(
     operation_id: Uuid,
     info: &github_update::UpdateInfo,
     package: &Path,
+    paused_for_install: bool,
 ) -> Result<OperationAccepted, String> {
     let target_version = info.latest_version.clone();
     let kind = github_update::detect_install_kind();
-    if kind != github_update::InstallKind::Dmg {
-        emit_update_progress(
-            app,
-            UpdateProgress {
-                phase: "installing".into(),
-                percent: Some(100),
-                version: Some(target_version.clone()),
-                error: None,
-                operation_id: Some(operation_id),
-                app_available: None,
-                rules_available: None,
-                thirdparty_available: None,
-            },
-        );
+    emit_update_progress(
+        app,
+        UpdateProgress {
+            phase: "installing".into(),
+            percent: Some(100),
+            version: Some(target_version.clone()),
+            error: None,
+            operation_id: Some(operation_id),
+            app_available: None,
+            rules_available: None,
+            thirdparty_available: None,
+        },
+    );
+    let applied = async {
+        let current_exe =
+            std::env::current_exe().map_err(|_| "could not locate the installed application")?;
+        github_update::apply_package(kind, package, &current_exe, &target_version, operation_id)
+            .await
     }
-    let current_exe = std::env::current_exe().map_err(|error| error.to_string())?;
-    let outcome =
-        match github_update::apply_package(kind, package, &current_exe, &target_version).await {
-            Ok(outcome) => outcome,
-            Err(cause) => {
-                restore_stack_after_failed_install(services(app)?, kind).await;
-                emit_update_progress(
-                    app,
-                    UpdateProgress {
-                        phase: "failed".into(),
-                        percent: None,
-                        version: Some(target_version),
-                        error: Some(cause.clone()),
-                        operation_id: Some(operation_id),
-                        app_available: None,
-                        rules_available: None,
-                        thirdparty_available: None,
-                    },
-                );
-                return Err(cause);
-            }
-        };
+    .await;
+    let outcome = match applied {
+        Ok(outcome) => outcome,
+        Err(cause) => {
+            restore_stack_after_failed_install(services(app)?, paused_for_install).await;
+            emit_update_progress(
+                app,
+                UpdateProgress {
+                    phase: "failed".into(),
+                    percent: None,
+                    version: Some(target_version),
+                    error: Some(cause.clone()),
+                    operation_id: Some(operation_id),
+                    app_available: None,
+                    rules_available: None,
+                    thirdparty_available: None,
+                },
+            );
+            return Err(cause);
+        }
+    };
     record_package_apply_outcome(operation_id, &target_version, outcome);
     match outcome {
         github_update::ApplyOutcome::ManualRestart => Ok(emit_finished_update(
@@ -3083,13 +3087,6 @@ async fn apply_downloaded_package(
             operation_id,
             target_version,
             "installed",
-        )),
-        #[cfg(target_os = "macos")]
-        github_update::ApplyOutcome::DiskImageOpened => Ok(emit_finished_update(
-            app,
-            operation_id,
-            target_version,
-            "downloaded",
         )),
         github_update::ApplyOutcome::HelperRestart => {
             emit_update_progress(
@@ -3126,26 +3123,15 @@ fn record_package_apply_outcome(
             update_version = %target_version,
             "application package installation completed; restart is required"
         ),
-        #[cfg(target_os = "macos")]
-        github_update::ApplyOutcome::DiskImageOpened => info!(
-            event = "update.dmg_ready",
-            section = "updates",
-            initiator = "install_update",
-            cause = "disk_image_opened",
-            trace_route = "tauri_command->github_update->open_downloaded_dmg",
-            trace_id = %operation_id,
-            update_version = %target_version,
-            "verified disk image is open; the running app was not replaced"
-        ),
         github_update::ApplyOutcome::HelperRestart => info!(
             event = "update.restart_helper_started",
             section = "updates",
             initiator = "install_update",
-            cause = "package_install_pending",
+            cause = "relaunch_handoff",
             trace_route = "tauri_command->github_update->apply_helper",
             trace_id = %operation_id,
             update_version = %target_version,
-            "application update helper was launched; package installation is pending"
+            "application update helper was launched; restart is scheduled"
         ),
     }
 }
@@ -3182,13 +3168,9 @@ async fn perform_complete_update_install(
         });
     }
     let package = download_github_package(app, operation_id, &update).await?;
-    // A disk image is opened for the user to drag. Pausing the tunnel or
-    // writing an upgrade guard would treat a download as an in-place install.
-    if github_update::detect_install_kind() != github_update::InstallKind::Dmg {
-        record_direct_rules_upgrade_guard(&services(app)?.paths.data)?;
-        pause_stack_for_update(services(app)?).await?;
-    }
-    apply_downloaded_package(app, operation_id, &update, &package).await
+    record_direct_rules_upgrade_guard(&services(app)?.paths.data)?;
+    let paused_for_install = pause_stack_for_update(services(app)?).await?;
+    apply_downloaded_package(app, operation_id, &update, &package, paused_for_install).await
 }
 
 #[tauri::command]
@@ -4334,54 +4316,11 @@ mod tests {
     };
 
     #[test]
-    fn failed_disk_image_open_preserves_a_user_paused_stack() {
-        use github_update::InstallKind;
-
-        assert!(
-            !failed_update_requires_resume(InstallKind::Dmg, StackPhase::Paused),
-            "opening a DMG never pauses the stack, so failure must not resume it"
-        );
-        for kind in [InstallKind::Deb, InstallKind::AppImage, InstallKind::Nsis] {
-            assert!(failed_update_requires_resume(kind, StackPhase::Paused));
-            assert!(!failed_update_requires_resume(kind, StackPhase::Running));
-            assert!(!failed_update_requires_resume(kind, StackPhase::Stopped));
-        }
-    }
-
-    #[test]
-    fn macos_disk_image_update_stays_running() {
-        let source = include_str!("lib.rs");
-        let production = source.split("mod tests").next().expect("production half");
-        let start = production
-            .find("async fn perform_complete_update_install")
-            .expect("install");
-        let end = production[start..]
-            .find("async fn install_update")
-            .expect("command");
-        let body = &production[start..start + end];
-        let skip = body
-            .find("!= github_update::InstallKind::Dmg")
-            .expect("dmg skip");
-        let pause = body.find("pause_stack_for_update").expect("pause");
-        assert!(
-            skip < pause,
-            "a disk image download must not pause the tunnel"
-        );
-        let apply = production
-            .find("async fn apply_downloaded_package")
-            .expect("apply");
-        let record = production[apply..]
-            .find("fn record_package_apply_outcome")
-            .expect("record");
-        let apply_body = &production[apply..apply + record];
-        let opened = apply_body.find("DiskImageOpened").expect("opened");
-        let helper = apply_body.find("HelperRestart").expect("helper");
-        assert!(opened < helper);
-        assert!(apply_body.contains("\"downloaded\""));
-        assert!(
-            !apply_body[opened..helper].contains("schedule_update_exit"),
-            "opening a disk image must not quit BiFlow"
-        );
+    fn failed_install_restores_only_a_connection_paused_by_the_installer() {
+        assert!(failed_update_requires_resume(true, StackPhase::Paused));
+        assert!(!failed_update_requires_resume(false, StackPhase::Paused));
+        assert!(!failed_update_requires_resume(true, StackPhase::Running));
+        assert!(!failed_update_requires_resume(true, StackPhase::Stopped));
     }
 
     /// Regression (ADR 0115): the application's data roots and the

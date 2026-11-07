@@ -81,23 +81,24 @@ describe("About", () => {
     );
   });
 
-  it("tells the operator to drag a downloaded macOS disk image", () => {
+  it("shows automatic restart progress and disables another update", () => {
     useAppStore.setState({
+      boot: { platform: "macos" } as BootstrapResult,
       update: {
-        phase: "downloaded",
+        phase: "restarting",
         percent: 100,
         version: "1.3.0",
         error: null,
       },
     });
     render(<About />);
-    expect(screen.getByRole("status")).toHaveTextContent(
-      /drag BiFlow onto Applications/i,
-    );
-    expect(screen.getByRole("status")).toHaveTextContent(/menu bar/i);
+    expect(screen.getByRole("status")).toHaveTextContent(/restarting BiFlow/i);
+    expect(
+      screen.getByRole("button", { name: /check for updates/i }),
+    ).toBeDisabled();
   });
 
-  it("offers a download on macOS and an install elsewhere", async () => {
+  it("offers installation on macOS", async () => {
     const installUpdate = vi.fn(async () => undefined);
     useAppStore.setState({
       boot: { platform: "macos" } as BootstrapResult,
@@ -111,7 +112,7 @@ describe("About", () => {
     });
     render(<About />);
     await userEvent.click(
-      screen.getByRole("button", { name: /download 1\.3\.0/i }),
+      screen.getByRole("button", { name: /install update 1\.3\.0/i }),
     );
     expect(installUpdate).toHaveBeenCalledOnce();
   });

@@ -90,9 +90,14 @@ If a required command fails or emits a warning from project code, fix it in the 
   and Windows unlock alongside persistent component failures, preserve idle
   intent, and exclude the health/recovery work itself from timer-gap detection.
 
-- A failed macOS disk-image open must not resume a user-paused stack. Only
-  package kinds that pause the stack for installation may restore it after
-  failure; pass the install kind into the recovery decision (ADR 0129).
+- Failed installers must restore only a connection they actually paused. Track
+  that intent explicitly for every package kind; the paused phase alone does not
+  distinguish an installer pause from a user pause (ADR 0131). Update the
+  diagnostic fields with that decision too; retaining the removed `kind` local
+  in the recovery event breaks the desktop compilation.
+- Update-flow e2e changes must keep the Pause readiness assertion enabled;
+  only the repeated update action is disabled during restart. Broad replacement
+  of `toBeEnabled()` assertions reverses that setup and breaks the primary flow.
 - Scope About update assertions to its region: the network footer also has
   a `status` role, so a page-wide status locator matches two elements.
 
@@ -815,12 +820,10 @@ SHA-256")`); launchd `KeepAlive` then restarts it in a crash loop and the
   `webpki-roots`, or `webpki-root-certs` fall inside a new RustSec range.
   Update them with `cargo update -p`. `webpki-roots` has two majors, so
   name `webpki-roots@1` (RUSTSEC-2026-0381, 0382, 0383, 0386).
-- macOS in-app update must not replace `/Applications/BiFlow.app` or quit.
-  Closing the window only hides the menu-bar process, so an automatic swap
-  and relaunch was easy to miss and left the operator on the old version
-  when the helper never ran. Download the signed disk image, open it with
-  `/usr/bin/open`, and leave the tunnel up. The new version starts only
-  after the operator drags BiFlow onto Applications, quits the menu-bar
-  process, and opens that Applications copy (ADR 0129). Linux `.deb` still
-  waits for a manual restart. AppImage and NSIS still use their replace
-  helpers.
+- Downloading/opening a DMG does not install an update. The requested macOS
+  automatic updater supersedes ADR 0129: await authorized replacement, verify
+  bundle identity and version before swapping, preserve rollback backups on any
+  rollback failure, and launch as the desktop user only after the old PID exits
+  (ADR 0131). Keep mounted staging out of automatic recursive cleanup before
+  starting attach, including cancellation. Linux `.deb` still waits for a manual
+  restart; AppImage and NSIS use their existing replace helpers.

@@ -1,6 +1,6 @@
 # ADR 0129: macOS update downloads a disk image and does not restart
 
-Status: Accepted (6.2.78)
+Status: Superseded by [ADR 0131](./0131-verified-macos-install-and-relaunch.md) (6.2.82)
 
 Supersedes the install half of [ADR 0127](./0127-macos-update-relaunch.md).
 
