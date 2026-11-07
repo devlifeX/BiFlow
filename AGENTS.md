@@ -71,6 +71,14 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- A parameter used only by a macOS cfg branch cannot be underscore-prefixed:
+  native Clippy rejects `used_underscore_binding`. Use its ordinary name and
+  consume the operation ID in the shared structured installer event so every
+  host compiles it without unused-variable warnings (ADR 0131).
+- `gh pr edit` can require unrelated `read:org` scopes through its GraphQL
+  metadata query. Update the PR through the repository REST endpoint with a
+  structured JSON input file instead of expanding credential permissions.
+
 - Fetch upstream main and compare the latest release before building a patch.
   An older feature branch can carry a higher version while missing later fixes.
   Base the patch on current main and preserve its accepted platform behavior.

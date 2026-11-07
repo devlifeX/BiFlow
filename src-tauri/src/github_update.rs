@@ -341,8 +341,18 @@ pub async fn apply_package(
     package: &Path,
     current_exe: &Path,
     expected_version: &str,
-    _operation_id: uuid::Uuid,
+    operation_id: uuid::Uuid,
 ) -> Result<ApplyOutcome, String> {
+    info!(
+        event = "update.package_apply_started",
+        section = "updates",
+        initiator = "install_update",
+        cause = "verified_package",
+        trace_route = "update->apply_package->platform_installer",
+        trace_id = %operation_id,
+        install_kind = ?kind,
+        "applying the verified update package"
+    );
     match kind {
         InstallKind::Deb => {
             install_deb(package).await?;
@@ -359,7 +369,7 @@ pub async fn apply_package(
         InstallKind::Dmg => {
             #[cfg(target_os = "macos")]
             {
-                crate::macos_update::install(package, current_exe, expected_version, _operation_id)
+                crate::macos_update::install(package, current_exe, expected_version, operation_id)
                     .await?;
                 Ok(ApplyOutcome::HelperRestart)
             }
