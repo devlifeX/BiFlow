@@ -57,3 +57,8 @@ flow also asserts absent traffic routes while paused.
 These tests do not stop the installed app or change the host network. The helper
 also passes Apple Silicon target Clippy from Windows using Zig for its C
 dependencies. Native end-to-end macOS behavior still requires validation on a Mac.
+
+The native desktop CI matrix also checks that the macOS collector can call the
+shared bounded command runner. Portable DNS parser tests and helper/core
+cross-checks do not compile this desktop boundary; both the runner and its
+timeout policy must include macOS (6.2.90).

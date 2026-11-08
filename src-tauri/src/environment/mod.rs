@@ -43,7 +43,10 @@ use std::{
 use tracing::{info, warn};
 use uuid::Uuid;
 
-#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+#[cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "macos")),
+    allow(dead_code)
+)]
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Service and scheduled-task names worth reporting. Same matching rules as
@@ -1651,7 +1654,7 @@ fn host_findings(
 // Platform collectors.
 // ---------------------------------------------------------------------------
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 async fn run_command(program: &str, args: &[&str]) -> Result<String, String> {
     run_command_timeout(OsStr::new(program), args, COMMAND_TIMEOUT).await
 }

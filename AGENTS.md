@@ -71,6 +71,11 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- A native collector's caller and shared command runner must have matching OS
+  coverage. Adding a macOS `scutil` caller while retaining a Windows/Linux-only
+  `run_command` cfg breaks the desktop on macOS even when the portable parser
+  tests and helper/core cross-Clippy pass. Include macOS in the runner and its
+  timeout constant's cfg policy; native desktop CI remains a required check.
 - Configured DNS addresses do not prove usable resolution. A detached host can
   have no owned tunnel or proxy while its original resolver returns private
   answers for a public control name. Record answer classes, empty responses,
