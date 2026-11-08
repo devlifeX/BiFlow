@@ -10,7 +10,7 @@ and logged the handoff as completed. A temporary client outage therefore lost
 the record needed to restore the user's ordinary proxy on a later retry.
 
 Live checks also reproduced an untrusted-root TLS error for a direct request to
-`rade.ir`, while the same request through Hiddify passed certificate validation.
+the reported site, while the same request through Hiddify passed certificate validation.
 Chrome's Proxy Switcher was on No Proxy and bypassed the restored system proxy.
 With System Proxy selected, the site opened while BiFlow was disconnected.
 BiFlow does not manage that browser extension or change certificate validation.

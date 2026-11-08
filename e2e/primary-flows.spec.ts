@@ -474,21 +474,21 @@ test.describe("primary BiFlow flows", () => {
   }) => {
     await openFresh(page);
     await goTo(page, "Troubleshoot", "Test");
-    await page.getByLabel("Test IP or domain").fill("https://www.rade.ir/");
+    await page.getByLabel("Test IP or domain").fill("https://www.example.ir/");
     await page.getByRole("button", { name: "Test flow" }).click();
     // The bundled Iran list keeps every .ir host direct until it is pinned.
     const flow = page.locator('[role="status"]').filter({
-      hasText: "www.rade.ir",
+      hasText: "www.example.ir",
     });
-    await expect(flow.getByText("www.rade.ir → DIRECT")).toBeVisible();
+    await expect(flow.getByText("www.example.ir → DIRECT")).toBeVisible();
 
     await flow.locator("select").selectOption({ label: "Hiddify" });
-    await expect(flow.getByText("www.rade.ir → Hiddify")).toBeVisible();
+    await expect(flow.getByText("www.example.ir → Hiddify")).toBeVisible();
 
     await goTo(page, "Routing", "Sites");
     // Pins stay exactly as typed; the moved host keeps its www label.
     const pinned = page.getByRole("row").filter({
-      has: page.getByText("www.rade.ir", { exact: true }),
+      has: page.getByText("www.example.ir", { exact: true }),
     });
     await expect(pinned.locator("select")).toHaveValue(
       "11111111-1111-1111-1111-111111111111",
@@ -497,9 +497,9 @@ test.describe("primary BiFlow flows", () => {
     await pinned.locator("select").selectOption("direct");
     await expect(pinned.locator("select")).toHaveValue("direct");
     await goTo(page, "Troubleshoot");
-    await page.getByLabel("Test IP or domain").fill("www.rade.ir");
+    await page.getByLabel("Test IP or domain").fill("www.example.ir");
     await page.getByRole("button", { name: "Test flow" }).click();
-    await expect(page.getByText("www.rade.ir → DIRECT")).toBeVisible();
+    await expect(page.getByText("www.example.ir → DIRECT")).toBeVisible();
   });
 
   test("restarts Hiddify on clean state from diagnostics", async ({ page }) => {

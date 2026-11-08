@@ -3,7 +3,7 @@ import { extractHost } from "./host";
 
 describe("extractHost", () => {
   it("reduces a full URL to its host", () => {
-    expect(extractHost("https://www.rade.ir/")).toBe("www.rade.ir");
+    expect(extractHost("https://www.example.ir/")).toBe("www.example.ir");
     expect(extractHost("http://digikala.com/product/1?a=2#top")).toBe(
       "digikala.com",
     );

@@ -131,12 +131,12 @@ describe("Diagnostics", () => {
     renderOn("test");
     await userEvent.type(
       screen.getByLabelText("Test IP or domain"),
-      "https://www.rade.ir/some/path?a=1",
+      "https://www.example.ir/some/path?a=1",
     );
     await userEvent.click(screen.getByRole("button", { name: "Test flow" }));
 
     const { desktop } = await import("../api/desktop");
-    expect(desktop.testRoute).toHaveBeenCalledWith("www.rade.ir");
+    expect(desktop.testRoute).toHaveBeenCalledWith("www.example.ir");
   });
 
   it("offers to move a VPN host to direct and re-tests it", async () => {
