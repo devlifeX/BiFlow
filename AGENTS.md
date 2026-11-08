@@ -71,6 +71,11 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- A fixed sleep does not prove a child has installed its signal handler on a
+  busy native runner. The graceful-stop fixture must read an explicit flushed
+  readiness message after handler installation, keep the child alive through
+  ignored signals, and assert the eventual SIGKILL status. Preserve the real
+  graceful wait assertion; do not rerun the race or relax it into a false pass.
 - A native collector's caller and shared command runner must have matching OS
   coverage. Adding a macOS `scutil` caller while retaining a Windows/Linux-only
   `run_command` cfg breaks the desktop on macOS even when the portable parser

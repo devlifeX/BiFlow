@@ -62,3 +62,8 @@ The native desktop CI matrix also checks that the macOS collector can call the
 shared bounded command runner. Portable DNS parser tests and helper/core
 cross-checks do not compile this desktop boundary; both the runner and its
 timeout policy must include macOS (6.2.90).
+
+The Unix graceful-stop fixture synchronizes on a flushed child readiness message
+after signal-handler installation, rather than a fixed startup delay. It verifies
+both the actual graceful wait and the final SIGKILL fallback, keeping native
+runner scheduling out of the ownership assertions (6.2.91).

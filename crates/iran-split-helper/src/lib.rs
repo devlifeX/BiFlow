@@ -1749,14 +1749,27 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn stop_waits_for_a_graceful_exit_before_killing() {
-        // Perl installs the ignore handler before it sleeps. A shell `trap`
-        // loses the race: stop's SIGTERM arrives before the trap is parsed.
-        let child = Command::new("perl")
-            .args(["-e", "$SIG{TERM} = 'IGNORE'; sleep 30;"])
+        use std::os::unix::process::ExitStatusExt;
+
+        // Readiness follows handler installation. A fixed startup sleep can
+        // still send SIGTERM before a busy native runner has started Perl.
+        let mut child = Command::new("perl")
+            .args([
+                "-e",
+                "$| = 1; $SIG{TERM} = 'IGNORE'; print qq(ready\\n); while (1) { sleep 30; }",
+            ])
+            .stdout(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .expect("process that ignores SIGTERM");
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let stdout = child.stdout.take().expect("readiness pipe");
+        let mut readiness = BufReader::new(stdout).lines();
+        let ready = tokio::time::timeout(PROCESS_STOP_TIMEOUT, readiness.next_line())
+            .await
+            .expect("child readiness deadline")
+            .expect("read child readiness")
+            .expect("child stayed alive until ready");
+        assert_eq!(ready, "ready");
         let mut managed = ManagedChild {
             child,
             generation_id: Uuid::new_v4(),
@@ -1771,9 +1784,10 @@ mod tests {
             elapsed >= GRACEFUL_STOP_TIMEOUT,
             "stop killed the process before the graceful wait: {elapsed:?}"
         );
-        assert!(
-            elapsed < PROCESS_STOP_TIMEOUT,
-            "stop waited for the force-kill timeout: {elapsed:?}"
+        assert_eq!(
+            managed.child.wait().await.expect("reaped child").signal(),
+            Some(libc::SIGKILL),
+            "the ready child must survive SIGTERM until the bounded kill fallback"
         );
     }
 
