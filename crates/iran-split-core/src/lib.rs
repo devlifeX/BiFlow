@@ -1452,7 +1452,14 @@ impl<B: PlatformBackend> Engine<B> {
             ) && snapshot.mihomo.phase != ComponentPhase::Running
                 && snapshot.tun.phase != ComponentPhase::Running
             {
-                self.backend.stop_user_proxy().await?;
+                info!(
+                    event = "network.released_client_preserved",
+                    section = "lifecycle",
+                    initiator = "shutdown",
+                    cause = "stack_already_detached",
+                    trace_route = "shutdown->preserve_completed_handoff",
+                    "leaving a previously returned proxy client alone during Quit"
+                );
                 return self.backend.restore_hiddify_system_proxy().await;
             }
             self.run_stop(Uuid::new_v4()).await
@@ -1773,10 +1780,13 @@ impl<B: PlatformBackend> Engine<B> {
                     trace_route = "startup->engine->platform_backend->cleanup",
                     "found owned runtime state during startup reconciliation"
                 );
-                let report = self.backend.cleanup_owned_state().await?;
-                if !report.clean() {
-                    return Err(CoreError::TunCleanupFailed(report.warnings.join("; ")));
-                }
+            }
+            // DNS recovery can remain after the process and TUN are gone
+            // (including a helper restart). Cleanup is idempotent and must not
+            // depend on a live controller to discover this persisted state.
+            let report = self.backend.cleanup_owned_state().await?;
+            if !report.clean() {
+                return Err(CoreError::TunCleanupFailed(report.warnings.join("; ")));
             }
             self.backend.verify_not_intercepting().await?;
             self.backend.restore_hiddify_system_proxy().await?;
@@ -2078,6 +2088,16 @@ impl<B: PlatformBackend> Engine<B> {
     }
 
     async fn run_stop(&self, operation_id: Uuid) -> Result<(), CoreError> {
+        if self.snapshot().phase == StackPhase::Stopped {
+            self.backend.verify_not_intercepting().await?;
+            self.backend.restore_hiddify_system_proxy().await?;
+            info!(event = "network.released_client_preserved", section = "lifecycle",
+                initiator = "run_stop", cause = "stack_already_detached", trace_id = %operation_id,
+                trace_route = "stop->verify_detached->preserve_completed_handoff",
+                "repeated Stop preserved the completed user proxy handoff");
+            self.set_stopped(self.backend.runtime_health().await);
+            return Ok(());
+        }
         self.announce(StackPhase::Stopping, operation_id).await;
         self.announce_stage(OperationStage::StoppingCore).await;
         if let Err(cause) = self.backend.stop_core().await {
@@ -2543,6 +2563,9 @@ mod tests {
         fail_proxy_stop: AtomicBool,
         fail_proxy_restore: AtomicBool,
         process_survives_cleanup: AtomicBool,
+        dns_restore_fails: AtomicBool,
+        kill_proxy_after_handoff: AtomicBool,
+        proxy_client_alive: AtomicBool,
     }
 
     #[async_trait]
@@ -2704,6 +2727,13 @@ mod tests {
             if self.fail_proxy_stop.load(Ordering::SeqCst) {
                 return Err(CoreError::Platform("proxy stop failed".into()));
             }
+            // A native Child handle can outlive the retired proxy baseline.
+            // A second stop must not reclaim the client after handoff.
+            if self.kill_proxy_after_handoff.load(Ordering::SeqCst)
+                && !self.proxy_lease.load(Ordering::SeqCst)
+            {
+                self.proxy_client_alive.store(false, Ordering::SeqCst);
+            }
             Ok(())
         }
 
@@ -2796,11 +2826,55 @@ mod tests {
             Ok(CleanupReport {
                 process_stopped: true,
                 tun_removed: true,
-                dns_restored: true,
+                dns_restored: !self.dns_restore_fails.load(Ordering::SeqCst),
                 routes_removed: 2,
                 warnings: vec![],
             })
         }
+    }
+
+    #[tokio::test]
+    async fn stop_and_quit_retain_proxy_ownership_until_dns_cleanup_succeeds() {
+        for quit in [false, true] {
+            let backend = Arc::new(FakeBackend::default());
+            backend.proxy_active.store(true, Ordering::SeqCst);
+            let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+            engine.start_stack(None).await.unwrap();
+            engine
+                .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
+                .await
+                .unwrap();
+            backend.dns_restore_fails.store(true, Ordering::SeqCst);
+            if quit {
+                assert!(engine.shutdown().await.is_err());
+            } else {
+                engine.stop_stack().await.unwrap();
+                engine
+                    .wait_for_phase(StackPhase::Error, Duration::from_secs(2))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(engine.snapshot().phase, StackPhase::Error);
+            assert_eq!(backend.proxy_restores.load(Ordering::SeqCst), 0);
+            assert!(backend.proxy_lease.load(Ordering::SeqCst));
+            backend.dns_restore_fails.store(false, Ordering::SeqCst);
+            engine.shutdown().await.unwrap();
+            assert!(backend.proxy_active.load(Ordering::SeqCst));
+            assert!(!backend.proxy_lease.load(Ordering::SeqCst));
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_cleans_persisted_dns_without_a_live_process_or_tun() {
+        let backend = Arc::new(FakeBackend::default());
+        let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+        engine.reconcile_startup().await.unwrap();
+        engine
+            .wait_for_phase(StackPhase::Stopped, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(backend.cleanups.load(Ordering::SeqCst) > 0);
+        assert_eq!(backend.starts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -2875,6 +2949,48 @@ mod tests {
                 .store(false, Ordering::SeqCst);
             engine.shutdown().await.unwrap();
             assert!(backend.proxy_active.load(Ordering::SeqCst));
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_then_quit_or_repeated_stop_keeps_the_returned_client_alive() {
+        for quit in [false, true] {
+            let backend = Arc::new(FakeBackend::default());
+            backend.proxy_active.store(true, Ordering::SeqCst);
+            backend.proxy_client_alive.store(true, Ordering::SeqCst);
+            backend
+                .kill_proxy_after_handoff
+                .store(true, Ordering::SeqCst);
+            let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+            engine.start_stack(None).await.unwrap();
+            engine
+                .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
+                .await
+                .unwrap();
+            engine.stop_stack().await.unwrap();
+            engine
+                .wait_for_phase(StackPhase::Stopped, Duration::from_secs(2))
+                .await
+                .unwrap();
+            assert!(backend.proxy_client_alive.load(Ordering::SeqCst));
+            assert!(backend.proxy_active.load(Ordering::SeqCst));
+            assert!(!backend.proxy_lease.load(Ordering::SeqCst));
+            if quit {
+                engine.shutdown().await.unwrap();
+            } else {
+                engine.stop_stack().await.unwrap();
+                engine
+                    .wait_for_phase(StackPhase::Stopped, Duration::from_secs(2))
+                    .await
+                    .unwrap();
+            }
+            assert!(
+                backend.proxy_client_alive.load(Ordering::SeqCst),
+                "returned client was stopped after its proxy baseline was retired"
+            );
+            assert!(backend.proxy_active.load(Ordering::SeqCst));
+            assert!(!backend.process.load(Ordering::SeqCst));
+            assert!(!backend.tun.load(Ordering::SeqCst));
         }
     }
 

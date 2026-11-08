@@ -118,10 +118,7 @@ async fn dispatch(
         HelperCommand::RestartMihomo {
             generation_id,
             config_sha256,
-        } => {
-            supervisor.stop().await?;
-            HelperReply::ProcessStatus(supervisor.start(generation_id, &config_sha256).await?)
-        }
+        } => HelperReply::ProcessStatus(supervisor.restart(generation_id, &config_sha256).await?),
         HelperCommand::GetMihomoProcessStatus => {
             HelperReply::ProcessStatus(supervisor.status().await?)
         }

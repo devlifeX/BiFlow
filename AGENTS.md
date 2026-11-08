@@ -71,6 +71,57 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- Configured DNS addresses do not prove usable resolution. A detached host can
+  have no owned tunnel or proxy while its original resolver returns private
+  answers for a public control name. Record answer classes, empty responses,
+  lookup failures, and timeouts without logging names or addresses. A successful
+  lookup is not proof of HTTP reachability, and intermittent HTTP success is not
+  proof that a previous timeout was caused by DNS or the app (ADR 0137).
+- Initialize a diagnostic fixture's top-level fields in its struct literal.
+  Assigning them immediately after `Default::default()` fails strict Clippy's
+  `field_reassign_with_default`, even when neighboring nested-field setup passes.
+- Native packet-monitor text can carry a UTF-16 BOM. Detect its encoding before
+  parsing a private diagnostic artifact; do not assume UTF-8 or treat a decoder
+  failure as evidence about network behavior.
+
+- A completed Stop already handed the original proxy client back. Its private
+  baseline has been retired, so calling `stop_user_proxy` again during Quit or
+  repeated Stop can mistake a retained child handle for ownership and kill the
+  returned client behind an enabled system proxy. Verify absent capture and
+  retry pending handoff without reclaiming the client. Cover Stop followed by
+  Quit and by Stop, not only Quit directly from Running (ADR 0136).
+- Give concurrent verification invocations distinct output files on Windows.
+  PowerShell cannot truncate a gate log while an earlier process still owns its
+  redirected handle; await completion before reusing that log path.
+
+- Native Windows `MSFT_NetAdapter.AdminStatus` is numeric (Up=1, Down=2), not
+  the formatted `Up`/`Down` text. Use native-shaped fixtures, skip an already
+  disabled adapter, and reenable it before reconnect. Frame IO's five seconds
+  is not a native lifecycle budget. Serialize the helper through the end of
+  release so a timed-out Stop cannot disable a later Connect (ADR 0135).
+- Launch detached installation scripts with the same known PowerShell runtime
+  used to prepare them. A legacy Windows PowerShell child can inherit an
+  incompatible module path and fail to find `Get-FileHash` before installation.
+
+- Missing native inspection is not successful cleanup. Windows must not use
+  `ifconfig` or a no-op adapter remover; verify its owned adapter, routes, and
+  DNS with native commands. A disabled retained adapter must be reenabled before
+  reconnect. On macOS, record the core's actual `utunN` with a per-launch UUID,
+  retain incomplete DNS/device recovery after process exit, reject an empty live
+  resolver, and run idempotent startup cleanup without requiring a controller.
+  Exercise production scripts with mocked native commands so network regression
+  tests cannot disconnect the developer (ADR 0134).
+- PowerShell functions with `[Parameter]` already have common parameters.
+  Declaring `ErrorAction` again breaks a native-command fixture before it tests
+  behavior; shadow cmdlets with compatible parameter signatures.
+- A LAN gateway is not proof of a DNS service. Do not replace restored macOS
+  DHCP/static resolvers with a guessed gateway when native resolver state is
+  delayed; retain the original recovery record and retry (ADR 0134).
+- Apple-target Rust std alone cannot cross-check C dependencies from Windows.
+  Use an Apple-target compiler; a Zig wrapper must translate cc-rs's
+  `arm64-apple-macosx` target to `aarch64-macos`. PowerShell also does not expand
+  wildcard path arguments for `rg`; pass the directory plus `-g` instead.
+
 - Keep user-reported domains, URLs, account identifiers, and infrastructure out
   of documentation, example comments, test fixtures, and PR descriptions. Use
   generic wording, reserved example domains, or synthetic offline fixtures when

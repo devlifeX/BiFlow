@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, LazyLock,
     },
     time::{Duration, Instant},
@@ -178,11 +178,13 @@ struct ManagedChild {
 pub struct Supervisor {
     settings: HelperSettings,
     child: Mutex<Option<ManagedChild>>,
+    lifecycle: Mutex<()>,
     registered: Mutex<HashMap<Uuid, String>>,
     logs: Arc<Mutex<VecDeque<ServiceLogEntry>>>,
     pub(crate) side_tunnels: Mutex<HashMap<Uuid, openvpn::RunningSideTunnel>>,
     desktop_contact: Mutex<Option<Instant>>,
     commands_in_flight: AtomicUsize,
+    network_release_pending: AtomicBool,
     started_at: Instant,
 }
 
@@ -192,17 +194,31 @@ impl Supervisor {
         Self {
             settings,
             child: Mutex::new(None),
+            lifecycle: Mutex::new(()),
             registered: Mutex::new(HashMap::new()),
             logs: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_LOG_ENTRIES))),
             side_tunnels: Mutex::new(HashMap::new()),
             desktop_contact: Mutex::new(None),
             commands_in_flight: AtomicUsize::new(0),
+            network_release_pending: AtomicBool::new(false),
             started_at: Instant::now(),
         }
     }
 
     pub(crate) async fn note_desktop_contact(&self) {
         *self.desktop_contact.lock().await = Some(Instant::now());
+    }
+
+    async fn lock_lifecycle(&self, operation: &'static str) -> tokio::sync::MutexGuard<'_, ()> {
+        let trace_id = Uuid::new_v4();
+        tracing::info!(event = "helper.lifecycle_waiting", section = "helper_lifecycle",
+            initiator = "helper_command", cause = "serialize_native_network_changes", %trace_id, operation,
+            trace_route = "helper_command->lifecycle_lock->native_network", "waiting for owned network lifecycle work");
+        let guard = self.lifecycle.lock().await;
+        tracing::info!(event = "helper.lifecycle_acquired", section = "helper_lifecycle",
+            initiator = "helper_command", cause = "previous_native_work_finished", %trace_id, operation,
+            trace_route = "helper_command->lifecycle_lock->native_network", "acquired owned network lifecycle work");
+        guard
     }
 
     pub(crate) fn begin_command(&self) -> CommandInFlight<'_> {
@@ -304,6 +320,15 @@ impl Supervisor {
         generation_id: Uuid,
         expected_sha256: &str,
     ) -> Result<ProcessStatus, HelperServiceError> {
+        let _lifecycle = self.lock_lifecycle("start").await;
+        self.start_inner(generation_id, expected_sha256).await
+    }
+
+    async fn start_inner(
+        &self,
+        generation_id: Uuid,
+        expected_sha256: &str,
+    ) -> Result<ProcessStatus, HelperServiceError> {
         self.verify_binary()?;
         let registered = self.registered.lock().await;
         if registered.get(&generation_id).map(String::as_str) != Some(expected_sha256) {
@@ -334,12 +359,26 @@ impl Supervisor {
             ));
         }
         orphan::cleanup(&self.settings, generation_id).await?;
+        #[cfg(target_os = "macos")]
+        if macos_dns::recovery_pending(&self.settings.runtime_dir)
+            || macos_tun::saved(&self.settings.runtime_dir).map_or(true, |device| device.is_some())
+        {
+            self.release_macos_network().await?;
+        }
+        self.network_release_pending.store(true, Ordering::SeqCst);
+        #[cfg(windows)]
+        windows_network::prepare(&self.settings.tun_name).await?;
+        // Persist DNS before the core can change native resolver state.
+        #[cfg(target_os = "macos")]
+        macos_dns::prepare(&self.settings.runtime_dir)?;
+        let started_at = now_string();
+        let launch_id = Uuid::new_v4();
         let mut child = spawn_mihomo(&self.settings, &generation_root, &config_path)?;
         if let Some(stdout) = child.stdout.take() {
-            capture_lines(stdout, Arc::clone(&self.logs), "info");
+            capture_lines(stdout, Arc::clone(&self.logs), "info", launch_id);
         }
         if let Some(stderr) = child.stderr.take() {
-            capture_lines(stderr, Arc::clone(&self.logs), "warn");
+            capture_lines(stderr, Arc::clone(&self.logs), "warn", launch_id);
         }
         tokio::time::sleep(MIHOMO_STAY_ALIVE).await;
         if let Some(status) = child.try_wait()? {
@@ -352,7 +391,7 @@ impl Supervisor {
         let managed = ManagedChild {
             child,
             generation_id,
-            started_at: now_string(),
+            started_at,
         };
         let status = process_status(Some(&managed));
         *current = Some(managed);
@@ -364,7 +403,16 @@ impl Supervisor {
         // sees it. Point every network service at `127.0.0.1` (Mihomo listens
         // on port 53 as root) so DNS flows through the TUN.
         #[cfg(target_os = "macos")]
-        macos_dns::apply(&self.settings.runtime_dir)?;
+        {
+            macos_tun::remember_started_device(
+                &self.settings.runtime_dir,
+                &self.logs,
+                launch_id,
+                Duration::from_secs(4),
+            )
+            .await?;
+            macos_dns::apply(&self.settings.runtime_dir)?;
+        }
         Ok(status)
     }
 
@@ -383,6 +431,7 @@ impl Supervisor {
         generation_id: Uuid,
         expected_sha256: &str,
     ) -> Result<ProcessStatus, HelperServiceError> {
+        let _lifecycle = self.lock_lifecycle("overlay").await;
         let registered = self.registered.lock().await;
         if registered.get(&generation_id).map(String::as_str) != Some(expected_sha256) {
             return Err(HelperServiceError::InvalidGeneration(
@@ -437,6 +486,11 @@ impl Supervisor {
     ///
     /// Returns an error when the process cannot be inspected or stopped.
     pub async fn stop(&self) -> Result<ProcessStatus, HelperServiceError> {
+        let _lifecycle = self.lock_lifecycle("stop").await;
+        self.stop_inner().await
+    }
+
+    async fn stop_inner(&self) -> Result<ProcessStatus, HelperServiceError> {
         let mut current = self.child.lock().await;
         if let Some(managed) = current.as_mut() {
             stop_managed_child(managed).await?;
@@ -463,7 +517,13 @@ impl Supervisor {
         // Start takes the same lock before it spawns, and the desktop does
         // not overlap stop with start.
         #[cfg(target_os = "macos")]
-        self.release_macos_network().await;
+        self.release_macos_network().await?;
+        #[cfg(windows)]
+        if windows_network::captured(&self.settings.tun_name, true).await? {
+            return Err(HelperServiceError::Process(
+                "Windows tunnel capture remains after stop".into(),
+            ));
+        }
         Ok(ProcessStatus {
             running: false,
             pid: None,
@@ -472,12 +532,35 @@ impl Supervisor {
         })
     }
 
+    pub(crate) async fn restart(
+        &self,
+        generation_id: Uuid,
+        expected_sha256: &str,
+    ) -> Result<ProcessStatus, HelperServiceError> {
+        let _lifecycle = self.lock_lifecycle("restart").await;
+        self.stop_inner().await?;
+        self.start_inner(generation_id, expected_sha256).await
+    }
+
     /// Drops macOS tunnel routes and points system DNS back at the network
     /// the machine had before Connect.
     #[cfg(target_os = "macos")]
-    async fn release_macos_network(&self) {
-        clear_owned_routes(&self.settings.tun_name).await;
-        if let Err(cause) = macos_dns::restore(&self.settings.runtime_dir) {
+    async fn release_macos_network(&self) -> Result<(), HelperServiceError> {
+        let routes = async {
+            let device = macos_tun::saved(&self.settings.runtime_dir)?;
+            let interface = device.as_deref().unwrap_or(&self.settings.tun_name);
+            if interface_exists(interface)? {
+                // A utun name can be reused after our process exits. Leave a live
+                // device alone and retain recovery instead of touching a new owner.
+                return Err(HelperServiceError::Process(
+                    "macOS native tunnel is still present; release remains pending".into(),
+                ));
+            }
+            clear_owned_routes(interface).await
+        }
+        .await;
+        let dns = macos_dns::restore(&self.settings.runtime_dir);
+        if let Err(ref cause) = dns {
             tracing::warn!(
                 event = "helper.dns_restore_after_stop_failed",
                 section = "helper_dns",
@@ -487,7 +570,11 @@ impl Supervisor {
                 "macOS DNS was not restored when Mihomo stopped"
             );
         }
-        flush_dns_cache();
+        let cache = flush_dns_cache();
+        routes?;
+        dns?;
+        cache?;
+        macos_tun::retire(&self.settings.runtime_dir)
     }
 
     /// Returns the current helper-owned process status.
@@ -511,18 +598,36 @@ impl Supervisor {
     ///
     /// Returns an error when the process or network cleanup fails.
     pub async fn cleanup(&self) -> Result<CleanupReport, HelperServiceError> {
+        let _lifecycle = self.lock_lifecycle("cleanup").await;
+        self.cleanup_inner().await
+    }
+
+    async fn cleanup_inner(&self) -> Result<CleanupReport, HelperServiceError> {
+        self.network_release_pending.store(true, Ordering::SeqCst);
         self.stop_all_side_tunnels().await;
-        let process_stopped = !self.stop().await?.running;
+        // A DNS/route failure must not skip the remaining cleanup. Stop may
+        // have already reaped the process before network restoration failed.
+        let stop_result = self.stop_inner().await;
+        let process_stopped = !self.status().await?.running;
+        #[cfg(target_os = "linux")]
         let was_active = interface_exists(&self.settings.tun_name);
+        #[cfg(target_os = "linux")]
         if was_active {
-            #[cfg(unix)]
             delete_owned_interface(&self.settings.tun_name).await?;
-            #[cfg(not(unix))]
-            delete_owned_interface(&self.settings.tun_name);
         }
         #[cfg(target_os = "macos")]
-        clear_owned_routes(&self.settings.tun_name).await;
+        let native_release = if stop_result.is_ok() {
+            Ok(())
+        } else {
+            self.release_macos_network().await
+        };
+        #[cfg(target_os = "macos")]
+        let tun_removed = native_release.is_ok();
+        #[cfg(target_os = "linux")]
         let tun_removed = !interface_exists(&self.settings.tun_name);
+        #[cfg(windows)]
+        let tun_removed = stop_result.is_ok()
+            || !windows_network::captured(&self.settings.tun_name, true).await?;
         let warnings = if tun_removed {
             Vec::new()
         } else {
@@ -531,13 +636,17 @@ impl Supervisor {
                 self.settings.tun_name
             )]
         };
-        // Restore the macOS system DNS (router resolver) now that the TUN is
-        // down; Mihomo's `127.0.0.1:53` listener is gone with the process.
+        #[cfg(not(target_os = "macos"))]
+        let cache_result = flush_dns_cache();
         #[cfg(target_os = "macos")]
-        let dns_result = macos_dns::restore(&self.settings.runtime_dir);
-        flush_dns_cache();
-        #[cfg(target_os = "macos")]
-        dns_result?;
+        native_release?;
+        #[cfg(not(target_os = "macos"))]
+        cache_result?;
+        // A second pass may repair a transient network failure from Stop. A
+        // process-stop failure still cannot be reported as successful cleanup.
+        if !process_stopped {
+            stop_result?;
+        }
         let report = CleanupReport {
             process_stopped,
             tun_removed,
@@ -547,6 +656,13 @@ impl Supervisor {
         };
         self.push_log("info", "network_cleanup_finished", BTreeMap::new())
             .await;
+        if report.process_stopped
+            && report.tun_removed
+            && report.dns_restored
+            && report.warnings.is_empty()
+        {
+            self.network_release_pending.store(false, Ordering::SeqCst);
+        }
         Ok(report)
     }
 
@@ -758,14 +874,26 @@ fn request_graceful_stop(child: &Child) {
 }
 
 /// Drops cached fake-ip answers (`198.18.0.0/16`) so lookups work again after
-/// the TUN is gone. A missing tool is ignored; a failed flush is not fatal.
-fn flush_dns_cache() {
+/// the TUN is gone. Windows/macOS cache failures keep cleanup retryable.
+fn flush_dns_cache() -> Result<(), HelperServiceError> {
+    let mut flushed = false;
+    let mut failed = false;
     for (program, args) in dns_flush_commands() {
         if !Path::new(program).is_file() {
+            failed = true;
+            tracing::warn!(
+                event = "helper.dns_cache_flush_unavailable",
+                section = "helper_dns",
+                initiator = "helper_process",
+                cause = "native_tool_missing",
+                trace_route = "helper_process->cleanup->dns_cache",
+                "native DNS cache tool is unavailable"
+            );
             continue;
         }
         match dns_flush_status(program, args) {
             Ok(status) if status.success() => {
+                flushed = true;
                 tracing::info!(
                     event = "helper.dns_cache_flushed",
                     section = "helper_dns",
@@ -775,25 +903,39 @@ fn flush_dns_cache() {
                     "flushed the system DNS cache after releasing the tunnel"
                 );
             }
-            Ok(status) => tracing::warn!(
-                event = "helper.dns_cache_flush_failed",
-                section = "helper_dns",
-                initiator = "helper_process",
-                cause = "flush_command_failed",
-                trace_route = "helper_process->cleanup->dns_cache",
-                status = %status,
-                "system DNS cache was not flushed"
-            ),
-            Err(cause) => tracing::warn!(
-                event = "helper.dns_cache_flush_failed",
-                section = "helper_dns",
-                initiator = "helper_process",
-                cause = %cause,
-                trace_route = "helper_process->cleanup->dns_cache",
-                "system DNS cache flush could not start"
-            ),
+            Ok(status) => {
+                failed = true;
+                tracing::warn!(
+                    event = "helper.dns_cache_flush_failed",
+                    section = "helper_dns",
+                    initiator = "helper_process",
+                    cause = "flush_command_failed",
+                    trace_route = "helper_process->cleanup->dns_cache",
+                    status = %status,
+                    "system DNS cache was not flushed"
+                );
+            }
+            Err(cause) => {
+                failed = true;
+                tracing::warn!(
+                    event = "helper.dns_cache_flush_failed",
+                    section = "helper_dns",
+                    initiator = "helper_process",
+                    cause = %cause,
+                    trace_route = "helper_process->cleanup->dns_cache",
+                    "system DNS cache flush could not start"
+                );
+            }
         }
     }
+    // Linux resolver tools are optional alternatives and may be installed
+    // while systemd-resolved is disabled. Preserve that platform's policy.
+    if !cfg!(target_os = "linux") && (!flushed || failed) {
+        return Err(HelperServiceError::Process(
+            "system DNS cache cleanup remains pending".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -873,17 +1015,22 @@ fn abandoned_capture(
 impl Supervisor {
     /// Stops Mihomo and restores DNS when the desktop process has disappeared.
     pub(crate) async fn release_if_desktop_absent(&self) {
+        let Ok(_lifecycle) = self.lifecycle.try_lock() else {
+            return;
+        };
         let in_flight = self.commands_in_flight.load(Ordering::SeqCst) > 0;
         let contact = *self.desktop_contact.lock().await;
-        let captured = self.network_captured().await;
         if !abandoned_capture(
             contact,
             self.started_at,
             Instant::now(),
             in_flight,
-            captured,
+            true,
             DESKTOP_ABSENCE_LIMIT,
         ) {
+            return;
+        }
+        if !self.network_captured().await {
             return;
         }
         tracing::warn!(
@@ -894,7 +1041,7 @@ impl Supervisor {
             trace_route = "helper_process->absence_watch->cleanup",
             "desktop contact expired while the tunnel was still up; releasing the network"
         );
-        if let Err(cause) = self.cleanup().await {
+        if let Err(cause) = self.cleanup_inner().await {
             tracing::warn!(
                 event = "helper.desktop_absent_cleanup_failed",
                 section = "helper_lifecycle",
@@ -910,12 +1057,43 @@ impl Supervisor {
     }
 
     async fn network_captured(&self) -> bool {
-        let running = self
-            .status()
+        let running = if let Ok(status) = self.status().await {
+            status.running
+        } else {
+            tracing::warn!(
+                event = "helper.capture_status_unknown",
+                section = "helper_network",
+                initiator = "absence_watch",
+                cause = "process_inspection_failed",
+                trace_route = "helper_process->absence_watch->native_state",
+                "process inspection failed; keeping network release pending"
+            );
+            true
+        };
+        #[cfg(windows)]
+        let captured = windows_network::captured(&self.settings.tun_name, false)
             .await
-            .map(|status| status.running)
-            .unwrap_or(false);
-        running || interface_exists(&self.settings.tun_name)
+            .unwrap_or(true);
+        #[cfg(target_os = "linux")]
+        let captured = interface_exists(&self.settings.tun_name);
+        #[cfg(target_os = "macos")]
+        let captured = if let (Ok(active), Ok(device)) = (
+            interface_exists(&self.settings.tun_name),
+            macos_tun::saved(&self.settings.runtime_dir),
+        ) {
+            active || device.is_some() || macos_dns::recovery_pending(&self.settings.runtime_dir)
+        } else {
+            tracing::warn!(
+                event = "helper.capture_status_unknown",
+                section = "helper_network",
+                initiator = "absence_watch",
+                cause = "native_inspection_failed",
+                trace_route = "helper_process->absence_watch->native_state",
+                "native inspection failed; keeping network release pending"
+            );
+            true
+        };
+        running || captured || self.network_release_pending.load(Ordering::SeqCst)
     }
 }
 
@@ -1203,8 +1381,12 @@ fn now_string() -> String {
     )
 }
 
-fn capture_lines<R>(reader: R, logs: Arc<Mutex<VecDeque<ServiceLogEntry>>>, level: &'static str)
-where
+fn capture_lines<R>(
+    reader: R,
+    logs: Arc<Mutex<VecDeque<ServiceLogEntry>>>,
+    level: &'static str,
+    launch_id: Uuid,
+) where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
@@ -1218,7 +1400,10 @@ where
                 timestamp: now_string(),
                 level: level.into(),
                 event: "mihomo_output".into(),
-                fields: BTreeMap::from([("message".into(), redact(&line))]),
+                fields: BTreeMap::from([
+                    ("message".into(), redact(&line)),
+                    ("launch_id".into(), launch_id.to_string()),
+                ]),
             });
         }
     });
@@ -1302,38 +1487,58 @@ fn owned_routes(table: &str, interface: &str) -> Vec<OwnedRoute> {
 
 #[cfg(any(target_os = "macos", test))]
 fn route_delete_args(route: &OwnedRoute) -> Vec<String> {
-    if route.destination == "default" {
-        return vec![
-            "-n".into(),
-            "delete".into(),
-            "default".into(),
-            route.gateway.clone(),
-        ];
+    let mut args = vec!["-n".into(), "delete".into()];
+    if route.gateway.contains(':') || route.destination.contains(':') {
+        args.push("-inet6".into());
     }
-    let kind = if route.host_route { "-host" } else { "-net" };
-    vec![
-        "-n".into(),
-        "delete".into(),
-        kind.into(),
-        route.destination.clone(),
-        route.gateway.clone(),
-    ]
+    if route.destination != "default" {
+        args.push(if route.host_route { "-host" } else { "-net" }.into());
+    }
+    args.push(route.destination.clone());
+    args.push(route.gateway.clone());
+    args
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn verify_owned_routes_absent(table: &str, interface: &str) -> Result<(), HelperServiceError> {
+    if !owned_routes(table, interface).is_empty() {
+        return Err(HelperServiceError::Process(
+            "macOS owned routes remain after cleanup".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
-async fn clear_owned_routes(interface: &str) {
-    let mut removed = 0usize;
-    let mut failed = 0usize;
-    for family in ["inet", "inet6"] {
-        let output = Command::new("/usr/sbin/netstat")
-            .args(["-rn", "-f", family])
+async fn route_command(
+    program: &str,
+    args: &[String],
+) -> Result<std::process::Output, HelperServiceError> {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        Command::new(program)
+            .args(args)
             .env_clear()
             .env("LC_ALL", "C")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .output()
-            .await;
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| HelperServiceError::Process("macOS route command timed out".into()))?
+    .map_err(HelperServiceError::Io)
+}
+
+#[cfg(target_os = "macos")]
+async fn clear_owned_routes(interface: &str) -> Result<(), HelperServiceError> {
+    let trace_id = Uuid::new_v4();
+    let mut removed = 0usize;
+    let mut failed = 0usize;
+    for family in ["inet", "inet6"] {
+        let args = ["-rn".into(), "-f".into(), family.into()];
+        let output = route_command("/usr/sbin/netstat", &args).await;
         let Ok(output) = output else {
             failed += 1;
             continue;
@@ -1342,64 +1547,33 @@ async fn clear_owned_routes(interface: &str) {
             failed += 1;
             continue;
         }
-        let table = String::from_utf8_lossy(&output.stdout);
-        for route in owned_routes(&table, interface) {
-            let deleted = Command::new("/sbin/route")
-                .args(route_delete_args(&route))
-                .env_clear()
-                .env("LC_ALL", "C")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .output()
-                .await;
-            match deleted {
+        for route in owned_routes(&String::from_utf8_lossy(&output.stdout), interface) {
+            match route_command("/sbin/route", &route_delete_args(&route)).await {
                 Ok(result) if result.status.success() => removed += 1,
                 _ => failed += 1,
             }
         }
+        match route_command("/usr/sbin/netstat", &args).await {
+            Ok(result)
+                if result.status.success()
+                    && verify_owned_routes_absent(
+                        &String::from_utf8_lossy(&result.stdout),
+                        interface,
+                    )
+                    .is_ok() => {}
+            _ => failed += 1,
+        }
     }
-    if removed > 0 || failed > 0 {
-        tracing::info!(
-            event = "helper.tun_routes_cleared",
-            section = "helper_network",
-            initiator = "helper_process",
-            cause = "network_cleanup",
-            removed,
-            failed,
-            trace_route = "helper_process->stop->route",
-            "removed routes that still pointed at the tunnel"
-        );
-    }
-}
-
-#[cfg(target_os = "macos")]
-async fn delete_owned_interface(name: &str) -> Result<(), HelperServiceError> {
-    // Mihomo creates a `utun` device and destroys it when the process exits, so
-    // a leftover interface is rare. `ifconfig <name> delete` removes the
-    // address; the kernel reaps the interface once it has no addresses and no
-    // controlling process.
-    let output = Command::new("/sbin/ifconfig")
-        .args([name, "delete"])
-        .env_clear()
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
-    if !output.status.success() {
+    tracing::info!(event = "helper.tun_routes_cleared", section = "helper_network",
+        initiator = "helper_process", cause = "network_cleanup", %trace_id, removed, failed,
+        trace_route = "helper_process->stop->route", "verified owned tunnel route release");
+    if failed > 0 {
         return Err(HelperServiceError::Process(
-            String::from_utf8_lossy(&output.stderr)
-                .chars()
-                .take(1_024)
-                .collect(),
+            "macOS owned route cleanup could not be verified".into(),
         ));
     }
     Ok(())
 }
-
-#[cfg(not(unix))]
-fn delete_owned_interface(_name: &str) {}
 
 /// Returns `true` when a network interface with `name` is present.
 #[cfg(target_os = "linux")]
@@ -1408,23 +1582,33 @@ fn interface_exists(name: &str) -> bool {
 }
 
 /// Returns `true` when a network interface with `name` is present. macOS has no
-/// `/sys/class/net`; `ifconfig <name>` exiting successfully is the portable
-/// equivalent.
-#[cfg(not(target_os = "linux"))]
-fn interface_exists(name: &str) -> bool {
-    std::process::Command::new("ifconfig")
-        .arg(name)
-        .stdout(Stdio::null())
+/// `/sys/class/net`; enumerate exact names and propagate inspection failures.
+#[cfg(target_os = "macos")]
+fn interface_exists(name: &str) -> Result<bool, HelperServiceError> {
+    let output = std::process::Command::new("/sbin/ifconfig")
+        .arg("-l")
         .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .output()?;
+    if !output.status.success() {
+        return Err(HelperServiceError::Process(
+            "macOS interface enumeration failed".into(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .any(|interface| interface == name))
 }
 
 mod commands;
 mod orphan;
 
+#[cfg(any(windows, test))]
+mod windows_network;
+
 #[cfg(any(target_os = "macos", test))]
 mod macos_dns;
+#[cfg(any(target_os = "macos", test))]
+mod macos_tun;
 
 #[cfg(unix)]
 mod unix_peer;
@@ -1463,6 +1647,57 @@ pub fn clap_install_error_message(error: &clap::Error) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mutating_commands_wait_until_previous_native_release_finishes() {
+        let root = tempfile::tempdir().unwrap();
+        let supervisor = Supervisor::new(HelperSettings {
+            authorized_uid: 1000,
+            authorized_gid: 1000,
+            socket_path: root.path().join("helper.sock"),
+            staging_dir: root.path().join("staging"),
+            runtime_dir: root.path().join("runtime"),
+            mihomo_binary: root.path().join("missing-core"),
+            mihomo_sha256: "a".repeat(64),
+            tun_name: "biflow-test".into(),
+        });
+        let release = supervisor.lifecycle.lock().await;
+        let budget = Duration::from_millis(20);
+        assert!(
+            tokio::time::timeout(budget, supervisor.start(Uuid::new_v4(), &"a".repeat(64)))
+                .await
+                .is_err()
+        );
+        assert!(tokio::time::timeout(budget, supervisor.stop())
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(budget, supervisor.cleanup())
+            .await
+            .is_err());
+        assert!(
+            tokio::time::timeout(budget, supervisor.restart(Uuid::new_v4(), &"a".repeat(64)))
+                .await
+                .is_err()
+        );
+        assert!(tokio::time::timeout(
+            budget,
+            supervisor.overlay_running(Uuid::new_v4(), &"a".repeat(64))
+        )
+        .await
+        .is_err());
+        // Skip busy work rather than queue a stale absence cleanup after Connect.
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            supervisor.release_if_desktop_absent(),
+        )
+        .await
+        .unwrap();
+        drop(release);
+        assert!(matches!(
+            supervisor.start(Uuid::new_v4(), &"a".repeat(64)).await,
+            Err(HelperServiceError::Io(_))
+        ));
+    }
 
     #[test]
     fn absence_releases_only_an_idle_capture() {
@@ -1543,6 +1778,14 @@ mod tests {
     }
 
     #[test]
+    fn successful_route_command_is_not_proof_of_route_release() {
+        let table = "default 192.0.2.1 UGSc en0\n128.0/1 198.18.0.1 UGSc utun9\n";
+        assert!(verify_owned_routes_absent(table, "utun9").is_err());
+        assert!(verify_owned_routes_absent("default 192.0.2.1 UGSc en0\n", "utun9").is_ok());
+        assert!(verify_owned_routes_absent(table, "utun8").is_ok());
+    }
+
+    #[test]
     fn tun_routes_are_removed_without_touching_the_physical_default() {
         let table = "\
 Routing tables
@@ -1591,7 +1834,7 @@ default            fe80::1%utun9      UGcIg           utun9        1
         );
         assert_eq!(
             route_delete_args(&routes[3]),
-            vec!["-n", "delete", "default", "fe80::1%utun9"]
+            vec!["-n", "delete", "-inet6", "default", "fe80::1%utun9"]
         );
         let physical = owned_routes(table, "en0");
         assert_eq!(physical.len(), 1);
@@ -1653,7 +1896,6 @@ tun_name = "clash-iran"
         let path = Path::new("unused");
         set_file_permissions(path);
         set_directory_permissions(path);
-        delete_owned_interface("unused");
     }
 
     #[cfg(windows)]

@@ -166,6 +166,7 @@ test.describe("primary BiFlow flows", () => {
     ).toBeVisible();
     await expect(page.getByRole("button", { name: "Resume" })).toBeVisible();
     await expect(statusBar).toContainText("Internet connected");
+    await expect(page.locator(".traffic-flow-route")).toHaveCount(0);
     await page.getByRole("button", { name: "Resume" }).click();
     await expect(
       page.getByRole("heading", { name: "Connected", exact: true }),
@@ -182,6 +183,18 @@ test.describe("primary BiFlow flows", () => {
       page.getByRole("heading", { name: "Connected", exact: true }),
     ).toBeVisible();
     await disconnectButton(page).click();
+    await expect(
+      page.getByRole("heading", { name: "Not connected" }),
+    ).toBeVisible();
+    await expect(statusBar).toContainText("Internet connected");
+    await expect(page.locator(".traffic-flow-route")).toHaveCount(0);
+    // A tray Stop may arrive after the page has already finished Disconnect.
+    const repeatedStop = await page.evaluate(async () => {
+      const modulePath = "/src/api/mock.ts";
+      const { mockApi } = await import(modulePath);
+      return mockApi.stop();
+    });
+    expect(repeatedStop.already_complete).toBe(true);
     await expect(
       page.getByRole("heading", { name: "Not connected" }),
     ).toBeVisible();
