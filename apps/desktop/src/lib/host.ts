@@ -1,8 +1,8 @@
 /**
  * Reduces anything a user might paste to the host a routing rule matches on.
  *
- * The rule parser rejects URLs, so `https://www.rade.ir/` has to become
- * `www.rade.ir` before it reaches the backend. Everything that is not a host —
+ * The rule parser rejects URLs, so `https://www.example.ir/` has to become
+ * `www.example.ir` before it reaches the backend. Everything that is not a host —
  * scheme, credentials, port, path, query, fragment — is dropped.
  */
 export function extractHost(input: string): string {

@@ -7,7 +7,8 @@
 //! service (Wi-Fi, Ethernet, …).
 
 use iran_split_core::{
-    proxy_endpoint_ready, proxy_restore_decision, CoreError, ProxyRestoreDecision,
+    proxy_endpoint_ready, proxy_restore_decision, retire_proxy_snapshot, CoreError,
+    ProxyRestoreDecision,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -171,8 +172,7 @@ pub async fn restore(persist: &Path, endpoints: &[(String, u16)]) -> Result<(), 
             ));
         }
     }
-    std::fs::remove_file(persist)
-        .map_err(|_| CoreError::Platform("could not retire the saved system proxy".into()))?;
+    retire_proxy_snapshot(persist, decision)?;
     info!(
         event = "system_proxy.handoff_completed",
         section = "system_proxy",

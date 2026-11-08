@@ -8,6 +8,21 @@ type Snapshot = BTreeMap<String, Vec<String>>;
 const SNAPSHOT_FILE: &str = "system-dns.toml";
 
 #[cfg(target_os = "macos")]
+pub(crate) fn prepare(runtime: &Path) -> Result<(), HelperServiceError> {
+    let result = capture_with(runtime, &mut networksetup).map(|_| ());
+    tracing::info!(event = "helper.dns_baseline_prepared", section = "helper_dns",
+        initiator = "helper_process", cause = "before_core_spawn", trace_id = %uuid::Uuid::new_v4(),
+        verified = result.is_ok(), trace_route = "helper_process->start->dns_baseline",
+        "prepared the DNS recovery baseline without logging settings");
+    result
+}
+
+pub(crate) fn recovery_pending(runtime: &Path) -> bool {
+    // A metadata/read error is not evidence that recovery is finished.
+    !matches!(fs::metadata(runtime.join(SNAPSHOT_FILE)), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn apply(runtime: &Path) -> Result<(), HelperServiceError> {
     run_action(runtime, true)
 }
@@ -25,19 +40,9 @@ fn run_action(runtime: &Path, apply: bool) -> Result<(), HelperServiceError> {
         initiator = "helper_process", cause = "dns_lifecycle", %trace_id, operation,
         trace_route = "helper_process->macos_dns->networksetup", "updating macOS system DNS");
     let result = if apply {
-        apply_with(
-            runtime,
-            &mut networksetup,
-            &mut scutil_dns,
-            &mut default_gateway_text,
-        )
+        apply_with(runtime, &mut networksetup, &mut scutil_dns)
     } else {
-        restore_with(
-            runtime,
-            &mut networksetup,
-            &mut scutil_dns,
-            &mut default_gateway_text,
-        )
+        restore_with(runtime, &mut networksetup, &mut scutil_dns)
     };
     if let Ok(services) = &result {
         tracing::info!(event = "helper.dns_completed", section = "helper_dns",
@@ -69,8 +74,25 @@ fn apply_with(
     runtime: &Path,
     command: &mut impl FnMut(&[String]) -> Result<String, HelperServiceError>,
     live_dns: &mut impl FnMut() -> Result<String, HelperServiceError>,
-    gateway: &mut impl FnMut() -> Result<String, HelperServiceError>,
 ) -> Result<usize, HelperServiceError> {
+    let services = capture_with(runtime, command)?;
+    for service in &services {
+        if let Err(error) = command(&dns_arguments(service, &["127.0.0.1".into()])) {
+            if restore_with(runtime, command, live_dns).is_err() {
+                return Err(HelperServiceError::Process(
+                    "macOS DNS apply failed; recovery remains pending".into(),
+                ));
+            }
+            return Err(error);
+        }
+    }
+    Ok(services.len())
+}
+
+fn capture_with(
+    runtime: &Path,
+    command: &mut impl FnMut(&[String]) -> Result<String, HelperServiceError>,
+) -> Result<Vec<String>, HelperServiceError> {
     let output = command(&["-listallnetworkservices".into()])?;
     let services = parse_services(&output);
     if services.is_empty() {
@@ -100,24 +122,13 @@ fn apply_with(
         snapshot.insert(service.clone(), recoverable);
     }
     write_snapshot(runtime, &snapshot)?;
-    for service in &services {
-        if let Err(error) = command(&dns_arguments(service, &["127.0.0.1".into()])) {
-            if restore_with(runtime, command, live_dns, gateway).is_err() {
-                return Err(HelperServiceError::Process(
-                    "macOS DNS apply failed; recovery remains pending".into(),
-                ));
-            }
-            return Err(error);
-        }
-    }
-    Ok(services.len())
+    Ok(services)
 }
 
 fn restore_with(
     runtime: &Path,
     command: &mut impl FnMut(&[String]) -> Result<String, HelperServiceError>,
     live_dns: &mut impl FnMut() -> Result<String, HelperServiceError>,
-    gateway: &mut impl FnMut() -> Result<String, HelperServiceError>,
 ) -> Result<usize, HelperServiceError> {
     let Some(snapshot) = read_snapshot(runtime)? else {
         return Ok(0);
@@ -137,35 +148,30 @@ fn restore_with(
         return Err(error);
     }
     if still_loopback(command, live_dns, snapshot.keys())? {
-        let gateway = parse_default_gateway(&gateway()?);
-        let Some(gateway) = gateway else {
-            warn!(
-                event = "helper.dns_still_loopback",
-                section = "helper_dns",
-                initiator = "helper_process",
-                cause = "no_private_gateway",
-                trace_route = "helper_process->macos_dns->restore",
-                "macOS DNS still uses the tunnel resolver"
-            );
-            return Err(HelperServiceError::Process(
-                "macOS DNS still uses the tunnel resolver".into(),
-            ));
-        };
         warn!(
-            event = "helper.dns_router_fallback",
+            event = "helper.dns_still_loopback",
             section = "helper_dns",
             initiator = "helper_process",
-            cause = "live_resolver_still_loopback",
-            services = snapshot.len(),
+            cause = "native_resolver_not_restored",
             trace_route = "helper_process->macos_dns->restore",
-            "live macOS DNS stayed on the tunnel resolver; using the LAN gateway"
+            "macOS DNS recovery remains pending without replacing the original resolver"
         );
-        for service in snapshot.keys() {
-            command(&dns_arguments(service, &[gateway.clone()]))?;
-        }
-        if still_loopback(command, live_dns, snapshot.keys())? {
+        return Err(HelperServiceError::Process(
+            "macOS DNS still uses the tunnel resolver".into(),
+        ));
+    }
+    if primary_nameservers(&live_dns()?).is_empty() {
+        return Err(HelperServiceError::Process(
+            "macOS primary DNS resolver is not ready; recovery remains pending".into(),
+        ));
+    }
+    for (service, servers) in &snapshot {
+        if !servers.is_empty()
+            && parse_dns(&command(&["-getdnsservers".into(), service.clone()])?)? != *servers
+        {
             return Err(HelperServiceError::Process(
-                "macOS DNS still uses the tunnel resolver".into(),
+                "macOS original DNS settings could not be verified; recovery remains pending"
+                    .into(),
             ));
         }
     }
@@ -231,7 +237,10 @@ fn without_loopback(servers: &[String]) -> Vec<String> {
 fn is_loopback_resolver(server: &str) -> bool {
     server
         .parse::<IpAddr>()
-        .is_ok_and(|address| address.is_loopback())
+        .is_ok_and(|address| {
+            address.is_loopback()
+                || matches!(address, IpAddr::V4(ip) if ip.octets()[0] == 198 && matches!(ip.octets()[1], 18 | 19))
+        })
 }
 
 /// The first `scutil --dns` resolver is the one unqualified names use.
@@ -270,25 +279,6 @@ fn primary_is_loopback(scutil_dns: &str) -> bool {
         .any(|server| is_loopback_resolver(server))
 }
 
-/// A private IPv4 default gateway can answer DNS when DHCP restore does not
-/// clear a stuck `127.0.0.1`. The tunnel gateway `198.18.0.1` is not private.
-fn parse_default_gateway(output: &str) -> Option<String> {
-    for line in output.lines() {
-        let Some(rest) = line.trim().strip_prefix("gateway:") else {
-            continue;
-        };
-        let candidate = rest.trim();
-        let Ok(addr) = candidate.parse::<IpAddr>() else {
-            return None;
-        };
-        return match addr {
-            IpAddr::V4(ip) if ip.is_private() => Some(candidate.to_owned()),
-            _ => None,
-        };
-    }
-    None
-}
-
 #[cfg(target_os = "macos")]
 fn scutil_dns() -> Result<String, HelperServiceError> {
     let output = std::process::Command::new("/usr/sbin/scutil")
@@ -298,20 +288,6 @@ fn scutil_dns() -> Result<String, HelperServiceError> {
     if !output.status.success() {
         return Err(HelperServiceError::Process(
             "macOS DNS status could not be read".into(),
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-#[cfg(target_os = "macos")]
-fn default_gateway_text() -> Result<String, HelperServiceError> {
-    let output = std::process::Command::new("/sbin/route")
-        .args(["-n", "get", "default"])
-        .env("LC_ALL", "C")
-        .output()?;
-    if !output.status.success() {
-        return Err(HelperServiceError::Process(
-            "macOS default route could not be read".into(),
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -401,9 +377,90 @@ fn write_snapshot(runtime: &Path, snapshot: &Snapshot) -> Result<(), HelperServi
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn successful_set_does_not_retire_a_mismatched_static_dns_baseline() {
+        let root = tempfile::tempdir().unwrap();
+        super::capture_with(root.path(), &mut |args| {
+            if args[0] == "-getdnsservers" {
+                Ok("9.9.9.9\n".into())
+            } else {
+                network_response(args)
+            }
+        })
+        .unwrap();
+        assert!(super::restore_with(
+            root.path(),
+            &mut |args| {
+                if args[0] == "-getdnsservers" {
+                    Ok("192.0.2.53\n".into())
+                } else {
+                    Ok(String::new())
+                }
+            },
+            &mut healthy_resolver,
+        )
+        .is_err());
+        assert!(super::recovery_pending(root.path()));
+        super::restore_with(
+            root.path(),
+            &mut |args| {
+                if args[0] == "-getdnsservers" {
+                    Ok("9.9.9.9\n".into())
+                } else {
+                    Ok(String::new())
+                }
+            },
+            &mut healthy_resolver,
+        )
+        .unwrap();
+        assert!(!super::recovery_pending(root.path()));
+    }
+    #[test]
+    fn empty_live_resolver_keeps_recovery_until_verified_retry() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(!super::recovery_pending(root.path()));
+        super::capture_with(root.path(), &mut network_response).unwrap();
+        assert!(super::recovery_pending(root.path()));
+        assert!(
+            super::restore_with(root.path(), &mut network_response, &mut || Ok(
+                "DNS configuration\n".into()
+            ),)
+            .is_err()
+        );
+        assert!(super::recovery_pending(root.path()));
+        super::restore_with(root.path(), &mut network_response, &mut healthy_resolver).unwrap();
+        assert!(!super::recovery_pending(root.path()));
+    }
+
+    #[test]
+    fn prepare_captures_before_any_network_mutation_and_reuses_baseline() {
+        let root = tempfile::tempdir().unwrap();
+        super::capture_with(root.path(), &mut |args| {
+            assert_ne!(args[0], "-setdnsservers");
+            if args[0] == "-getdnsservers" {
+                Ok("9.9.9.9\n".into())
+            } else {
+                network_response(args)
+            }
+        })
+        .unwrap();
+        super::capture_with(root.path(), &mut |args| {
+            assert_ne!(args[0], "-getdnsservers", "recaptured after takeover");
+            network_response(args)
+        })
+        .unwrap();
+        assert_eq!(
+            super::read_snapshot(root.path()).unwrap().unwrap()["Wi-Fi"],
+            vec!["9.9.9.9"]
+        );
+        assert!(super::is_loopback_resolver("198.18.0.2"));
+        assert!(super::is_loopback_resolver("198.19.255.254"));
+        assert!(!super::is_loopback_resolver("192.168.1.1"));
+    }
+
     use super::{
-        apply_with, dns_arguments, parse_default_gateway, parse_dns, parse_services,
-        primary_is_loopback, read_snapshot, restore_with, SNAPSHOT_FILE,
+        apply_with, dns_arguments, parse_dns, parse_services, primary_is_loopback, read_snapshot,
+        restore_with, SNAPSHOT_FILE,
     };
     use crate::HelperServiceError;
     #[cfg(unix)]
@@ -425,13 +482,7 @@ mod tests {
     #[test]
     fn dhcp_dns_is_restored_with_empty_and_the_snapshot_is_private() {
         let root = tempfile::tempdir().expect("tempdir");
-        apply_with(
-            root.path(),
-            &mut network_response,
-            &mut healthy_resolver,
-            &mut no_gateway,
-        )
-        .expect("apply");
+        apply_with(root.path(), &mut network_response, &mut healthy_resolver).expect("apply");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -452,7 +503,6 @@ mod tests {
                 network_response(args)
             },
             &mut healthy_resolver,
-            &mut no_gateway,
         )
         .expect("restore");
         assert!(calls
@@ -467,28 +517,15 @@ mod tests {
     #[test]
     fn failed_restore_keeps_recovery_for_a_new_helper() {
         let root = tempfile::tempdir().expect("tempdir");
-        apply_with(
-            root.path(),
-            &mut network_response,
-            &mut healthy_resolver,
-            &mut no_gateway,
-        )
-        .expect("apply");
+        apply_with(root.path(), &mut network_response, &mut healthy_resolver).expect("apply");
         assert!(restore_with(
             root.path(),
             &mut |_| Err(HelperServiceError::Process("fixture".into())),
             &mut healthy_resolver,
-            &mut no_gateway,
         )
         .is_err());
         assert!(root.path().join(SNAPSHOT_FILE).is_file());
-        restore_with(
-            root.path(),
-            &mut network_response,
-            &mut healthy_resolver,
-            &mut no_gateway,
-        )
-        .expect("retry");
+        restore_with(root.path(), &mut network_response, &mut healthy_resolver).expect("retry");
         assert!(!root.path().join(SNAPSHOT_FILE).exists());
     }
 
@@ -505,7 +542,6 @@ mod tests {
                 }
             },
             &mut healthy_resolver,
-            &mut no_gateway,
         )
         .expect("first start");
         apply_with(
@@ -515,7 +551,6 @@ mod tests {
                 network_response(args)
             },
             &mut healthy_resolver,
-            &mut no_gateway,
         )
         .expect("restarted helper");
         let snapshot = read_snapshot(root.path())
@@ -524,9 +559,14 @@ mod tests {
         assert_eq!(snapshot["Wi-Fi"], vec!["8.8.8.8", "2001:4860:4860::8888"]);
         restore_with(
             root.path(),
-            &mut network_response,
+            &mut |args| {
+                if args[0] == "-getdnsservers" {
+                    Ok("8.8.8.8\n2001:4860:4860::8888\n".into())
+                } else {
+                    network_response(args)
+                }
+            },
             &mut healthy_resolver,
-            &mut no_gateway,
         )
         .expect("restore");
     }
@@ -550,7 +590,6 @@ mod tests {
                 network_response(args)
             },
             &mut healthy_resolver,
-            &mut no_gateway,
         );
         assert!(result.is_err());
         assert_eq!(restores, vec!["Ethernet", "Wi-Fi"]);
@@ -571,7 +610,6 @@ mod tests {
                 }
             },
             &mut healthy_resolver,
-            &mut no_gateway,
         )
         .is_err());
         assert!(!root.path().join(SNAPSHOT_FILE).exists());
@@ -599,7 +637,6 @@ mod tests {
                 }
             },
             &mut healthy_resolver,
-            &mut no_gateway,
         )
         .expect("apply");
         let snapshot = read_snapshot(root.path())
@@ -616,78 +653,35 @@ mod tests {
                 network_response(args)
             },
             &mut healthy_resolver,
-            &mut no_gateway,
         )
         .expect("restore");
         assert_eq!(sets, vec![vec!["-setdnsservers", "Wi-Fi", "Empty"]]);
     }
 
     #[test]
-    fn stuck_loopback_resolver_uses_the_lan_gateway() {
-        use std::cell::{Cell, RefCell};
-        use std::rc::Rc;
-
-        let root = tempfile::tempdir().expect("tempdir");
-        apply_with(
+    fn delayed_dhcp_preserves_the_original_mode_until_retry() {
+        let root = tempfile::tempdir().unwrap();
+        super::capture_with(root.path(), &mut network_response).unwrap();
+        let mut written = Vec::new();
+        assert!(restore_with(
             root.path(),
             &mut |args| {
-                if args[0] == "-getdnsservers" {
-                    Ok("127.0.0.1\n".into())
-                } else {
-                    network_response(args)
+                if args[0] == "-setdnsservers" {
+                    written.push(args[2..].to_vec());
                 }
+                network_response(args)
             },
-            &mut healthy_resolver,
-            &mut no_gateway,
+            &mut || Ok("resolver #1\n nameserver[0] : 127.0.0.1\n".into())
         )
-        .expect("apply");
-        let using_gateway = Rc::new(Cell::new(false));
-        let sets = Rc::new(RefCell::new(Vec::new()));
-        restore_with(
-            root.path(),
-            &mut {
-                let using_gateway = Rc::clone(&using_gateway);
-                let sets = Rc::clone(&sets);
-                move |args| {
-                    if args[0] == "-setdnsservers" {
-                        sets.borrow_mut().push(args[2..].to_vec());
-                        if args[2] == "10.0.0.1" {
-                            using_gateway.set(true);
-                        }
-                    }
-                    if args[0] == "-getdnsservers" {
-                        return if using_gateway.get() {
-                            Ok("10.0.0.1\n".into())
-                        } else {
-                            Ok("127.0.0.1\n".into())
-                        };
-                    }
-                    Ok(String::new())
-                }
-            },
-            &mut {
-                let using_gateway = Rc::clone(&using_gateway);
-                move || {
-                    if using_gateway.get() {
-                        Ok("resolver #1\n  nameserver[0] : 10.0.0.1\n".into())
-                    } else {
-                        Ok("resolver #1\n  nameserver[0] : 127.0.0.1\n".into())
-                    }
-                }
-            },
-            &mut || Ok("   gateway: 10.0.0.1\n".into()),
-        )
-        .expect("restore");
-        let sets = sets.borrow();
-        assert!(sets.iter().any(|servers| servers == &["Empty".to_owned()]));
-        assert!(sets
-            .iter()
-            .any(|servers| servers == &["10.0.0.1".to_owned()]));
-        assert!(!root.path().join(SNAPSHOT_FILE).exists());
+        .is_err());
+        assert_eq!(written, vec![vec!["Empty"]]);
+        assert!(super::recovery_pending(root.path()));
+        restore_with(root.path(), &mut network_response, &mut healthy_resolver).unwrap();
+        assert!(!super::recovery_pending(root.path()));
     }
 
     #[test]
-    fn stuck_loopback_without_a_lan_gateway_keeps_recovery() {
+    fn stuck_loopback_keeps_recovery() {
         let root = tempfile::tempdir().expect("tempdir");
         apply_with(
             root.path(),
@@ -699,7 +693,6 @@ mod tests {
                 }
             },
             &mut healthy_resolver,
-            &mut no_gateway,
         )
         .expect("apply");
         let error = restore_with(
@@ -712,7 +705,6 @@ mod tests {
                 }
             },
             &mut || Ok("resolver #1\n  nameserver[0] : 127.0.0.1\n".into()),
-            &mut || Ok("   gateway: 198.18.0.1\n".into()),
         )
         .expect_err("tunnel resolver remains");
         assert!(error.to_string().contains("tunnel resolver"));
@@ -722,19 +714,13 @@ mod tests {
     }
 
     #[test]
-    fn live_dns_and_gateway_parsers_ignore_the_tunnel() {
+    fn live_dns_parser_does_not_hide_the_tunnel_behind_a_scoped_resolver() {
         assert!(primary_is_loopback(
             "resolver #1\n  nameserver[0] : 127.0.0.1\n\nresolver #2\n  domain : local\n  nameserver[0] : 8.8.8.8\n"
         ));
         assert!(!primary_is_loopback(
             "resolver #1\n  nameserver[0] : 9.9.9.9\n"
         ));
-        assert_eq!(
-            parse_default_gateway("   gateway: 10.0.0.1\n  interface: en0\n").as_deref(),
-            Some("10.0.0.1")
-        );
-        assert_eq!(parse_default_gateway("   gateway: 198.18.0.1\n"), None);
-        assert_eq!(parse_default_gateway("   gateway: 8.8.8.8\n"), None);
     }
 
     // Production DNS callbacks return `Result`. These fixtures match that
@@ -742,10 +728,5 @@ mod tests {
     #[allow(clippy::unnecessary_wraps)]
     fn healthy_resolver() -> Result<String, HelperServiceError> {
         Ok("resolver #1\n  nameserver[0] : 9.9.9.9\n".into())
-    }
-
-    #[allow(clippy::unnecessary_wraps)]
-    fn no_gateway() -> Result<String, HelperServiceError> {
-        Ok(String::new())
     }
 }

@@ -634,7 +634,10 @@ pub(super) fn app_findings(
         findings.push("mihomo_binary_missing".into());
     }
     if report.apps.system_proxy_saved_by_pause
-        && phase_is(report, &[StackPhase::Paused, StackPhase::Stopped])
+        && phase_is(
+            report,
+            &[StackPhase::Paused, StackPhase::Stopped, StackPhase::Error],
+        )
     {
         findings.push("pause_cleared_hiddify_system_proxy".into());
         if !report.system_proxy.is_empty() && report.system_proxy.iter().all(|proxy| !proxy.enabled)
@@ -825,6 +828,12 @@ mod tests {
             detail: None,
         });
         let mut findings = Vec::new();
+        app_findings(&report, None, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding == "saved_user_proxy_handoff_pending"));
+        report.biflow.stack_phase = "error".into();
+        findings.clear();
         app_findings(&report, None, &mut findings);
         assert!(findings
             .iter()

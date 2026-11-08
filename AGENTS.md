@@ -71,6 +71,87 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- A fixed sleep does not prove a child has installed its signal handler on a
+  busy native runner. The graceful-stop fixture must read an explicit flushed
+  readiness message after handler installation, keep the child alive through
+  ignored signals, and assert the eventual SIGKILL status. Preserve the real
+  graceful wait assertion; do not rerun the race or relax it into a false pass.
+- A native collector's caller and shared command runner must have matching OS
+  coverage. Adding a macOS `scutil` caller while retaining a Windows/Linux-only
+  `run_command` cfg breaks the desktop on macOS even when the portable parser
+  tests and helper/core cross-Clippy pass. Include macOS in the runner and its
+  timeout constant's cfg policy; native desktop CI remains a required check.
+- Configured DNS addresses do not prove usable resolution. A detached host can
+  have no owned tunnel or proxy while its original resolver returns private
+  answers for a public control name. Record answer classes, empty responses,
+  lookup failures, and timeouts without logging names or addresses. A successful
+  lookup is not proof of HTTP reachability, and intermittent HTTP success is not
+  proof that a previous timeout was caused by DNS or the app (ADR 0137).
+- Initialize a diagnostic fixture's top-level fields in its struct literal.
+  Assigning them immediately after `Default::default()` fails strict Clippy's
+  `field_reassign_with_default`, even when neighboring nested-field setup passes.
+- Native packet-monitor text can carry a UTF-16 BOM. Detect its encoding before
+  parsing a private diagnostic artifact; do not assume UTF-8 or treat a decoder
+  failure as evidence about network behavior.
+
+- A completed Stop already handed the original proxy client back. Its private
+  baseline has been retired, so calling `stop_user_proxy` again during Quit or
+  repeated Stop can mistake a retained child handle for ownership and kill the
+  returned client behind an enabled system proxy. Verify absent capture and
+  retry pending handoff without reclaiming the client. Cover Stop followed by
+  Quit and by Stop, not only Quit directly from Running (ADR 0136).
+- Give concurrent verification invocations distinct output files on Windows.
+  PowerShell cannot truncate a gate log while an earlier process still owns its
+  redirected handle; await completion before reusing that log path.
+
+- Native Windows `MSFT_NetAdapter.AdminStatus` is numeric (Up=1, Down=2), not
+  the formatted `Up`/`Down` text. Use native-shaped fixtures, skip an already
+  disabled adapter, and reenable it before reconnect. Frame IO's five seconds
+  is not a native lifecycle budget. Serialize the helper through the end of
+  release so a timed-out Stop cannot disable a later Connect (ADR 0135).
+- Launch detached installation scripts with the same known PowerShell runtime
+  used to prepare them. A legacy Windows PowerShell child can inherit an
+  incompatible module path and fail to find `Get-FileHash` before installation.
+
+- Missing native inspection is not successful cleanup. Windows must not use
+  `ifconfig` or a no-op adapter remover; verify its owned adapter, routes, and
+  DNS with native commands. A disabled retained adapter must be reenabled before
+  reconnect. On macOS, record the core's actual `utunN` with a per-launch UUID,
+  retain incomplete DNS/device recovery after process exit, reject an empty live
+  resolver, and run idempotent startup cleanup without requiring a controller.
+  Exercise production scripts with mocked native commands so network regression
+  tests cannot disconnect the developer (ADR 0134).
+- PowerShell functions with `[Parameter]` already have common parameters.
+  Declaring `ErrorAction` again breaks a native-command fixture before it tests
+  behavior; shadow cmdlets with compatible parameter signatures.
+- A LAN gateway is not proof of a DNS service. Do not replace restored macOS
+  DHCP/static resolvers with a guessed gateway when native resolver state is
+  delayed; retain the original recovery record and retry (ADR 0134).
+- Apple-target Rust std alone cannot cross-check C dependencies from Windows.
+  Use an Apple-target compiler; a Zig wrapper must translate cc-rs's
+  `arm64-apple-macosx` target to `aarch64-macos`. PowerShell also does not expand
+  wildcard path arguments for `rg`; pass the directory plus `-g` instead.
+
+- Keep user-reported domains, URLs, account identifiers, and infrastructure out
+  of documentation, example comments, test fixtures, and PR descriptions. Use
+  generic wording, reserved example domains, or synthetic offline fixtures when
+  a particular suffix is essential to a test.
+
+- An unavailable original proxy client is an incomplete handoff, not a safe
+  reason to delete its baseline. Keep the record, return a cleanup error, and
+  allow Disconnect/Quit to retry after the client returns; never re-enable a
+  dead proxy. Verify the owned process as well as the TUN before handoff, even
+  when the helper reports cleanup complete. Expose pending restoration in Error
+  diagnostics too (ADR 0133, 6.2.85).
+- A queued retry initially retains the previous Error phase. Phase waiters must
+  wait for lifecycle work to become idle before accepting a terminal phase or
+  error; otherwise Restart/Disconnect immediately returns the old failure while
+  its retry is still queued. Cover the actual Stop retry, not only direct
+  shutdown, in cleanup regressions (ADR 0133).
+- A missing Playwright download is not an e2e failure in application behavior.
+  Install its pinned browser or select the installed test browser explicitly
+  through `BIFLOW_CHROMIUM_PATH`, then rerun the failed test.
+
 - A native DMG fixture must select its filesystem and use a unique volume name;
   do not depend on a runner's image-creation defaults. Preserve hdiutil exit
   status and stderr in fixture assertions. A generic attach assertion hid the
@@ -703,7 +784,7 @@ already in progress"`. Cache the last `UpdateInfo` (never log asset URLs).
   allow rustfmt to split `.try_begin(` onto the next line.
 - A `.deb` install puts the helper at `/usr/lib/biflow/iran-split-helper`, which is also `install-helper.sh`'s destination, so `install(1)` aborts with "are the same file" and the in-app Install fails. Compare `readlink -f` of source and destination and re-apply ownership and mode in place instead of copying.
 - Dashboard and every other page grow inside the shell's `overflow-y-auto`. A page root with `h-full overflow-y-auto` locks height to the viewport and traps the live-routing SVG. Use `flex flex-col gap-4 pb-2` like Direct Rules.
-- Diagnostics accepts any pasted form (`https://www.rade.ir/`, `host:port`, IPv6) and reduces it with `extractHost` before calling `test_route`; the rule parser rejects URLs outright. The flow result offers the opposite move — Add to direct for a VPN host, Add to VPN for a direct one — and re-tests afterwards so the card shows the new routing.
+- Diagnostics accepts any pasted form (`https://www.example.ir/`, `host:port`, IPv6) and reduces it with `extractHost` before calling `test_route`; the rule parser rejects URLs outright. The flow result offers the opposite move — Add to direct for a VPN host, Add to VPN for a direct one — and re-tests afterwards so the card shows the new routing.
 - User route pins are one list (ADR 0034/0068): `RoutePinsDocument.pins` with `Outbound::Direct | Client { client_id }`. `pinRoute` takes `"direct"` or a ClientId uuid. Disabled-client pins stay in the document and are grey in Direct Rules but are not emitted to Mihomo. Deleting a client confirms with pin count and can move pins; MATCH `default_route` falls back to Direct. Pins store the PSL registrable root (private suffixes included); `api.shop.example.com` is `example.com`, `user.github.io` is not all of `github.io`. `pin` must not wait on DoH. Writers emit `+.example.com` and never copy `resolved_ips` into IP providers. Precedence in `RuleSet::decide` must match generated Mihomo rules — private/LAN first, then enabled client pins, then DIRECT pins, then bundled Iran domains, then curated `iran-business-domains`, then `MATCH` to `default_route`. Never let a private, loopback, or CGNAT address onto a LocalProxy. Helper `GENERATION_FILES` accept the fixed names plus `custom-<uuid>-domains.txt` / `custom-<uuid>-ips.txt` where `<id>` is `[0-9a-f-]{36}`. Live apply when the stack is running or degraded; persist-only when stopped.
 - `resources/rules/manifest.json` `commit` is the **upstream Chocolate4U** revision the rules came from, not a BiFlow commit. Building a `raw.githubusercontent.com/devlifeX/BiFlow/<commit>/…` URL from it always 404s and surfaces as "cloud rule download failed". Fetch snapshot files from the same branch the manifest itself is fetched from; the per-file SHA-256 in the manifest is what guarantees integrity, not the ref.
 - Windows `.join("biflow/debug.log")` keeps the `/`, so Explorer `/select,C:\…\biflow/debug.log` is ignored and opens This PC. Join `biflow` and `debug.log` as separate components, normalize leftover `/` to `\`, and pass `/select,` with `raw_arg`. The same class of bug is `mihomo_file_name()` returning `"bin/mihomo.exe"` — join `bin` and the file name separately. Helper Install must not elevate `C:\ProgramData\iran-split\bin\iran-split-helper.exe`: a leftover copy `fs::copy`s onto itself and a GUI-subsystem helper leaves stderr empty. Elevate the packaged helper, skip same-file copy, write `ProgramData\iran-split\install.log` on failure, and use NSIS `$PROGRAMDATA` (not `$COMMONPROGRAMDATA`) for helper/Mihomo install destinations. Packaged Windows helper staging is `$PROGRAMDATA\iran-split\staging` (ADR 0064). NSIS `perMachine` `$LOCALAPPDATA` expands to `C:\ProgramData`, so `$LOCALAPPDATA\biflow\runtime\generations` recorded `C:\ProgramData\biflow\runtime\generations` while the desktop wrote under the user's LocalAppData. The elevated installer ignores a mismatched `--staging-dir`, grants Builtin\Users modify with `icacls`, and the desktop stages into `WindowsPaths.generation_staging_dir`.
@@ -748,7 +829,7 @@ SHA-256")`); launchd `KeepAlive` then restarts it in a crash loop and the
 - `pnpm format:check` includes `docs/considering/*.md`. Compact table separators (`|---|---|`) fail Prettier and the frontend GitHub Action. Run `pnpm exec prettier --write` on new markdown before merge.
 - Bundled rule bytes are pinned with `resources/rules/*.json -text`, which covers both `manifest.json` and `iran-business-domains.sources.json`. Contract tests must match that glob; requiring a literal `manifest.json -text` line fails after the curated catalog lands.
 - `RuleSet::from_sources` takes the curated catalog as a fourth iterator. Merging those names into `iran_domains` hides the Mihomo order (Iran list, then business catalog, then `MATCH`) from `test_route` and the CLI.
-- Playwright `listitem` text for a subdomain pin is the registrable root (`rade.ir`, not `www.rade.ir`). Responsive screenshots prefer `/opt/cursor/artifacts/screenshots` and fall back to `test-results/responsive-screenshots` when that path is not writable.
+- Playwright `listitem` text for a subdomain pin is the registrable root (`example.ir`, not `www.example.ir`). Responsive screenshots prefer `/opt/cursor/artifacts/screenshots` and fall back to `test-results/responsive-screenshots` when that path is not writable.
 - Pause never calls `stop_user_proxy` (Hiddify stays up) but must `clear_hiddify_system_proxy` when the OS proxy still points at Hiddify. Connect must not set the OS proxy; Resume restores the user-data snapshot without logging the endpoint. CLI `DemoBackend` must implement those required trait methods as no-ops; Windows `cargo test --workspace` compiles `iran-split-cli` and fails first if they are missing.
 - Basic mobile always shows `data-testid="bottom-nav"`. Tapping Rules, Diagnostics, or Settings writes Advanced and opens that page; Dashboard and About stay in Basic.
 - `list_active_connections` may log a row count, never hosts or URLs. Outbound is the last Mihomo `chains` entry (`DIRECT` → `"direct"`, otherwise the client uuid).

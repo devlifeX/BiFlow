@@ -12,11 +12,14 @@
 //! hosts. Ports are kept because they are what identifies a conflict.
 
 mod apps;
+mod dns;
 // Each collector's parsers are unit-tested on every host; off their own
 // platform only the tests call them, so unused-item lints are expected there.
 #[cfg(any(target_os = "linux", test))]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 mod linux;
+#[cfg(any(target_os = "macos", test))]
+mod macos;
 #[cfg(any(windows, test))]
 #[cfg_attr(not(windows), allow(dead_code, unused_imports))]
 mod windows;
@@ -40,7 +43,10 @@ use std::{
 use tracing::{info, warn};
 use uuid::Uuid;
 
-#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+#[cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "macos")),
+    allow(dead_code)
+)]
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Service and scheduled-task names worth reporting. Same matching rules as
@@ -148,6 +154,10 @@ pub struct EnvironmentReport {
     pub adapters: Vec<Adapter>,
     pub default_routes: Vec<RouteInfo>,
     pub dns_servers: Vec<DnsServers>,
+    /// Native primary resolver availability, distinct from configured servers.
+    pub primary_dns_present: Option<bool>,
+    /// Classified host resolver answers while stopped/paused; no target or IPs.
+    pub inactive_dns_probe: Option<dns::DnsProbe>,
     pub system_proxy: Vec<ProxySetting>,
     pub env_proxy: Vec<ProxySetting>,
     pub vpn_processes: Vec<String>,
@@ -483,6 +493,9 @@ async fn collect(context: CollectContext) -> EnvironmentReport {
         |stack| format!("{:?}", stack.phase).to_ascii_lowercase(),
     );
     report.biflow = biflow_info(context.config.as_ref(), &stack_phase);
+    if matches!(stack_phase.as_str(), "stopped" | "paused") {
+        report.inactive_dns_probe = Some(dns::collect().await);
+    }
     report.runtime = apps::runtime_info(context.stack.as_ref(), context.helper.as_ref());
     report.install = apps::install_info(context.install_kind);
     let data_dir = context.data_dir.as_deref();
@@ -659,6 +672,14 @@ fn loopback_findings(report: &EnvironmentReport, findings: &mut Vec<String>) {
                 "client_port_refused_on_loopback:{}:{}",
                 client.preset, client.port
             ));
+            if report.system_proxy.iter().any(|proxy| {
+                proxy.enabled && proxy.host == Some("loopback") && proxy.port == Some(client.port)
+            }) {
+                findings.push(format!(
+                    "system_proxy_points_to_unavailable_client:{}",
+                    client.port
+                ));
+            }
         } else if client.ipv4 && !client.ipv6 && v6_first {
             // `localhost:<port>` tries ::1 first; an IPv4-only listener then
             // depends on the caller falling back to 127.0.0.1.
@@ -1263,6 +1284,10 @@ fn idle_findings(
     config: Option<&AppConfig>,
     findings: &mut Vec<String>,
 ) {
+    dns::findings(report.inactive_dns_probe.as_ref(), findings);
+    if report.primary_dns_present == Some(false) {
+        findings.push("stopped_without_primary_dns_resolver".into());
+    }
     let is_tun = |name: &str| is_biflow_tun(config, name);
     {
         for adapter in report
@@ -1314,6 +1339,11 @@ fn running_findings(
     config: Option<&AppConfig>,
     findings: &mut Vec<String>,
 ) {
+    if report.adapters.iter().any(|adapter| {
+        is_biflow_tun(config, &adapter.name) && adapter.status.eq_ignore_ascii_case("disabled")
+    }) {
+        findings.push("active_stack_native_tun_disabled".into());
+    }
     if let Some(stack) = &report.runtime.stack {
         for component in ["mihomo", "tun", "dns"] {
             if stack
@@ -1624,7 +1654,7 @@ fn host_findings(
 // Platform collectors.
 // ---------------------------------------------------------------------------
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 async fn run_command(program: &str, args: &[&str]) -> Result<String, String> {
     run_command_timeout(OsStr::new(program), args, COMMAND_TIMEOUT).await
 }
@@ -1671,10 +1701,12 @@ async fn run_command_timeout(
 
 #[cfg(target_os = "linux")]
 use linux::collect_platform;
+#[cfg(target_os = "macos")]
+use macos::collect_platform;
 #[cfg(windows)]
 use windows::collect_platform;
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 #[allow(clippy::unused_async)]
 async fn collect_platform(_report: &mut EnvironmentReport, _tun_name: &str) -> PlatformData {
     PlatformData::default()
@@ -1682,6 +1714,73 @@ async fn collect_platform(_report: &mut EnvironmentReport, _tun_name: &str) -> P
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inactive_dns_evidence_is_not_mistaken_for_an_active_tunnel_failure() {
+        let mut report = EnvironmentReport {
+            inactive_dns_probe: Some(dns::DnsProbe {
+                status: "resolved",
+                answer_classes: vec!["public_ip", "private"],
+            }),
+            ..EnvironmentReport::default()
+        };
+        for phase in ["stopped", "paused"] {
+            report.biflow.stack_phase = phase.into();
+            assert!(
+                findings(&report, None).contains(&"stopped_public_dns_non_public_answer".into())
+            );
+        }
+        for phase in ["running", "degraded", "error", "unknown"] {
+            report.biflow.stack_phase = phase.into();
+            assert!(!findings(&report, None)
+                .iter()
+                .any(|finding| finding.starts_with("stopped_public_dns_")));
+        }
+    }
+
+    #[test]
+    fn an_enabled_proxy_to_a_dead_local_client_is_a_global_network_finding() {
+        let mut report = EnvironmentReport::default();
+        report.loopback.clients.push(ClientLoopback {
+            preset: "hiddify",
+            port: 12334,
+            ipv4: false,
+            ipv6: false,
+        });
+        report.system_proxy.push(ProxySetting {
+            source: "fixture".into(),
+            enabled: true,
+            scheme: Some("http".into()),
+            host: Some("loopback"),
+            port: Some(12334),
+            detail: None,
+        });
+        let mut found = Vec::new();
+        loopback_findings(&report, &mut found);
+        assert!(found.contains(&"system_proxy_points_to_unavailable_client:12334".into()));
+        report.system_proxy[0].enabled = false;
+        found.clear();
+        loopback_findings(&report, &mut found);
+        assert!(!found
+            .iter()
+            .any(|finding| finding.starts_with("system_proxy_points_to_unavailable_client:")));
+    }
+    #[test]
+    fn controller_running_cannot_hide_a_disabled_native_tunnel() {
+        let config = iran_split_config::AppConfig::default();
+        let mut report = super::EnvironmentReport::default();
+        report.biflow.stack_phase = "running".into();
+        report.adapters.push(super::Adapter {
+            name: config.mihomo.tun_name.clone(),
+            description: "Meta Tunnel".into(),
+            status: "Disabled".into(),
+            kind: "tun",
+        });
+        assert!(super::findings(&report, Some(&config))
+            .contains(&"active_stack_native_tun_disabled".into()));
+        report.biflow.stack_phase = "stopped".into();
+        assert!(!super::findings(&report, Some(&config))
+            .contains(&"active_stack_native_tun_disabled".into()));
+    }
     #[test]
     fn active_stack_reports_missing_tun_and_dns_after_resume() {
         let mut report = EnvironmentReport::default();

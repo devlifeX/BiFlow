@@ -4,6 +4,10 @@
 
 Accepted
 
+The LAN-gateway fallback below is superseded by
+[ADR 0134](./0134-native-network-release.md). Restoration now preserves the
+original static resolvers or DHCP and retains recovery until verification.
+
 ## Context
 
 Disconnect on macOS reported a successful DNS restore and then every site

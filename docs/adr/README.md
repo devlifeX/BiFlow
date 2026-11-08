@@ -136,3 +136,8 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0130](./0130-resume-recovery-and-serialized-quit.md)          | Recover after unlock and serialize network release on Quit          | Accepted   |
 | [0131](./0131-verified-macos-install-and-relaunch.md)          | Install and verify macOS updates before a user relaunch             | Accepted   |
 | [0132](./0132-return-user-proxy-on-disconnect.md)              | Return the original live proxy after Disconnect                     | Accepted   |
+| [0133](./0133-verified-network-restoration.md)                 | Preserve incomplete proxy restoration and verify network release    | Accepted   |
+| [0134](./0134-native-network-release.md)                       | Verify native network release on Windows and macOS                  | Accepted   |
+| [0135](./0135-serialized-native-lifecycle.md)                  | Serialize native release and budget lifecycle replies               | Accepted   |
+| [0136](./0136-preserve-completed-proxy-handoff.md)             | Preserve a completed proxy handoff on repeated Stop and Quit        | Accepted   |
+| [0137](./0137-inactive-host-dns-evidence.md)                   | Record classified host DNS answers while disconnected               | Accepted   |

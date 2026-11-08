@@ -11,6 +11,8 @@ pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
 /// Per-frame write/connect budget for helper IPC.
 pub const HELPER_IPC_FRAME_TIMEOUT_SECS: u64 = 5;
+/// Native process, adapter, route, and DNS cleanup can outlive frame IO.
+pub const HELPER_IPC_LIFECYCLE_TIMEOUT_SECS: u64 = 90;
 
 /// Small margin beyond [`HelperCommand::StartSideTunnel`]'s
 /// `timeout_seconds` so route installation and reply framing do not
@@ -25,6 +27,16 @@ pub const HELPER_IPC_SIDE_TUNNEL_MARGIN_SECS: u64 = 15;
 #[must_use]
 pub fn helper_ipc_reply_timeout(command: &HelperCommand) -> Duration {
     match command {
+        HelperCommand::RestartMihomo { .. } => {
+            Duration::from_secs(2 * HELPER_IPC_LIFECYCLE_TIMEOUT_SECS)
+        }
+        HelperCommand::StartMihomo { .. }
+        | HelperCommand::StopMihomo
+        | HelperCommand::CleanupOwnedNetworkState
+        | HelperCommand::PrepareForUpdate
+        | HelperCommand::OverlayRuntimeGeneration { .. } => {
+            Duration::from_secs(HELPER_IPC_LIFECYCLE_TIMEOUT_SECS)
+        }
         HelperCommand::StartSideTunnel {
             timeout_seconds, ..
         } => {
@@ -465,9 +477,34 @@ mod tests {
             helper_ipc_reply_timeout(&HelperCommand::GetServiceStatus),
             Duration::from_secs(HELPER_IPC_FRAME_TIMEOUT_SECS)
         );
-        assert_eq!(
+    }
+
+    #[tokio::test]
+    async fn lifecycle_reply_can_arrive_after_the_frame_deadline() {
+        let (mut desktop, mut helper) = tokio::io::duplex(4096);
+        let reply = Envelope::new(HelperReply::Ack);
+        let expected = reply.clone();
+        let server = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(HELPER_IPC_FRAME_TIMEOUT_SECS + 1)).await;
+            write_frame(&mut helper, &reply).await.unwrap();
+        });
+        let actual: Envelope<HelperReply> = tokio::time::timeout(
             helper_ipc_reply_timeout(&HelperCommand::StopMihomo),
-            Duration::from_secs(HELPER_IPC_FRAME_TIMEOUT_SECS)
-        );
+            read_frame(&mut desktop),
+        )
+        .await
+        .expect("native cleanup reply must outlive frame IO")
+        .unwrap();
+        assert_eq!(actual, expected);
+        server.await.unwrap();
+        for command in [
+            HelperCommand::CleanupOwnedNetworkState,
+            HelperCommand::PrepareForUpdate,
+        ] {
+            assert_eq!(
+                helper_ipc_reply_timeout(&command),
+                Duration::from_secs(HELPER_IPC_LIFECYCLE_TIMEOUT_SECS)
+            );
+        }
     }
 }
