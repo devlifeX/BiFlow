@@ -71,6 +71,21 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- An unavailable original proxy client is an incomplete handoff, not a safe
+  reason to delete its baseline. Keep the record, return a cleanup error, and
+  allow Disconnect/Quit to retry after the client returns; never re-enable a
+  dead proxy. Verify the owned process as well as the TUN before handoff, even
+  when the helper reports cleanup complete. Expose pending restoration in Error
+  diagnostics too (ADR 0133, 6.2.85).
+- A queued retry initially retains the previous Error phase. Phase waiters must
+  wait for lifecycle work to become idle before accepting a terminal phase or
+  error; otherwise Restart/Disconnect immediately returns the old failure while
+  its retry is still queued. Cover the actual Stop retry, not only direct
+  shutdown, in cleanup regressions (ADR 0133).
+- A missing Playwright download is not an e2e failure in application behavior.
+  Install its pinned browser or select the installed test browser explicitly
+  through `BIFLOW_CHROMIUM_PATH`, then rerun the failed test.
+
 - A native DMG fixture must select its filesystem and use a unique volume name;
   do not depend on a runner's image-creation defaults. Preserve hdiutil exit
   status and stderr in fixture assertions. A generic attach assertion hid the

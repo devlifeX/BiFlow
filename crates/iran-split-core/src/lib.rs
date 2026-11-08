@@ -18,7 +18,8 @@ mod proxy_match;
 pub use proxy_match::{proxy_endpoint_matches, proxy_server_matches};
 mod proxy_restore;
 pub use proxy_restore::{
-    proxy_endpoint_ready, proxy_host_is_loopback, proxy_restore_decision, ProxyRestoreDecision,
+    proxy_endpoint_ready, proxy_host_is_loopback, proxy_restore_decision, retire_proxy_snapshot,
+    ProxyRestoreDecision,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -641,12 +642,30 @@ pub trait PlatformBackend: Send + Sync + 'static {
     ) -> Result<ReadinessReport, CoreError>;
     async fn cleanup_owned_state(&self) -> Result<CleanupReport, CoreError>;
     async fn verify_not_intercepting(&self) -> Result<(), CoreError> {
-        let tun = self.tun_status().await?;
-        if tun.active {
+        let (process, tun) = tokio::try_join!(self.core_process(), self.tun_status())?;
+        if process.running || tun.active {
+            warn!(
+                event = "network.cleanup_verification_failed",
+                section = "engine",
+                initiator = "cleanup_verification",
+                cause = "owned_capture_remaining",
+                trace_route = "engine->platform_backend->verify_not_intercepting",
+                process_running = process.running,
+                tun_active = tun.active,
+                "owned process or tunnel remains after cleanup"
+            );
             return Err(CoreError::TunCleanupFailed(
-                "TUN is still active after cleanup".into(),
+                "owned process or TUN is still active after cleanup".into(),
             ));
         }
+        info!(
+            event = "network.cleanup_verified",
+            section = "engine",
+            initiator = "cleanup_verification",
+            cause = "owned_capture_absent",
+            trace_route = "engine->platform_backend->verify_not_intercepting",
+            "verified the owned core and tunnel are stopped before proxy handoff"
+        );
         Ok(())
     }
 }
@@ -2053,6 +2072,7 @@ impl<B: PlatformBackend> Engine<B> {
                 report.warnings.join("; ")
             )));
         }
+        self.backend.verify_not_intercepting().await?;
         self.backend.restore_hiddify_system_proxy().await?;
         Ok(())
     }
@@ -2110,6 +2130,7 @@ impl<B: PlatformBackend> Engine<B> {
             )));
         }
         self.backend.forget_client_egress().await;
+        self.backend.verify_not_intercepting().await?;
         self.backend.restore_hiddify_system_proxy().await?;
         proxy_stop?;
         proxy_clear?;
@@ -2214,6 +2235,7 @@ impl<B: PlatformBackend> Engine<B> {
                 report.warnings.join("; ")
             )));
         }
+        self.backend.verify_not_intercepting().await?;
         self.backend.restore_hiddify_system_proxy().await?;
         Ok(())
     }
@@ -2276,7 +2298,7 @@ impl<B: PlatformBackend> Engine<B> {
         self.snapshots.send_replace(snapshot);
     }
 
-    /// Waits until the stack reaches `desired`, reports an error phase, or times out.
+    /// Waits for an idle `desired` phase, a completed error, or a timeout.
     ///
     /// # Errors
     ///
@@ -2292,10 +2314,12 @@ impl<B: PlatformBackend> Engine<B> {
         tokio::time::timeout(timeout, async {
             loop {
                 let snapshot = receiver.borrow().clone();
-                if snapshot.phase == desired {
+                if snapshot.phase == desired && snapshot.busy.is_none() {
                     return Ok(snapshot);
                 }
-                if snapshot.phase == StackPhase::Error {
+                // An accepted retry can still display the preceding Error
+                // until its queued worker starts. Wait for that retry to finish.
+                if snapshot.phase == StackPhase::Error && snapshot.busy.is_none() {
                     return Err(CoreError::Platform(snapshot.last_error.map_or_else(
                         || "unknown error".into(),
                         |error| error.technical_details.unwrap_or(error.message_key),
@@ -2517,6 +2541,8 @@ mod tests {
         auto_client_sets_proxy: AtomicBool,
         fail_proxy_clear: AtomicBool,
         fail_proxy_stop: AtomicBool,
+        fail_proxy_restore: AtomicBool,
+        process_survives_cleanup: AtomicBool,
     }
 
     #[async_trait]
@@ -2709,6 +2735,11 @@ mod tests {
                 "core must stop before proxy handoff"
             );
             self.proxy_restores.fetch_add(1, Ordering::SeqCst);
+            if self.fail_proxy_restore.load(Ordering::SeqCst) {
+                return Err(CoreError::Platform(
+                    "original proxy client unavailable".into(),
+                ));
+            }
             if self.proxy_lease.load(Ordering::SeqCst) {
                 self.proxy_active
                     .store(self.proxy_baseline.load(Ordering::SeqCst), Ordering::SeqCst);
@@ -2757,7 +2788,10 @@ mod tests {
 
         async fn cleanup_owned_state(&self) -> Result<CleanupReport, CoreError> {
             self.cleanups.fetch_add(1, Ordering::SeqCst);
-            self.process.store(false, Ordering::SeqCst);
+            self.process.store(
+                self.process_survives_cleanup.load(Ordering::SeqCst),
+                Ordering::SeqCst,
+            );
             self.tun.store(false, Ordering::SeqCst);
             Ok(CleanupReport {
                 process_stopped: true,
@@ -2766,6 +2800,81 @@ mod tests {
                 routes_removed: 2,
                 warnings: vec![],
             })
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_and_quit_retry_an_incomplete_proxy_restore() {
+        for quit in [false, true] {
+            let backend = Arc::new(FakeBackend::default());
+            backend.proxy_active.store(true, Ordering::SeqCst);
+            let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+            engine.start_stack(None).await.unwrap();
+            engine
+                .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
+                .await
+                .unwrap();
+            backend.fail_proxy_restore.store(true, Ordering::SeqCst);
+            if quit {
+                assert!(engine.shutdown().await.is_err());
+            } else {
+                engine.stop_stack().await.unwrap();
+                engine
+                    .wait_for_phase(StackPhase::Error, Duration::from_secs(2))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(engine.snapshot().phase, StackPhase::Error);
+            assert!(!backend.process.load(Ordering::SeqCst));
+            assert!(!backend.tun.load(Ordering::SeqCst));
+            assert!(!backend.proxy_active.load(Ordering::SeqCst));
+            assert!(backend.proxy_lease.load(Ordering::SeqCst));
+            backend.fail_proxy_restore.store(false, Ordering::SeqCst);
+            if quit {
+                engine.shutdown().await.unwrap();
+            } else {
+                engine.stop_stack().await.unwrap();
+                engine
+                    .wait_for_phase(StackPhase::Stopped, Duration::from_secs(2))
+                    .await
+                    .unwrap();
+            }
+            assert!(backend.proxy_active.load(Ordering::SeqCst));
+            assert!(!backend.proxy_lease.load(Ordering::SeqCst));
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_and_quit_reject_a_clean_report_when_the_core_survives() {
+        for quit in [false, true] {
+            let backend = Arc::new(FakeBackend::default());
+            backend.proxy_active.store(true, Ordering::SeqCst);
+            let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+            engine.start_stack(None).await.unwrap();
+            engine
+                .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
+                .await
+                .unwrap();
+            backend
+                .process_survives_cleanup
+                .store(true, Ordering::SeqCst);
+            if quit {
+                assert!(engine.shutdown().await.is_err());
+            } else {
+                engine.stop_stack().await.unwrap();
+                engine
+                    .wait_for_phase(StackPhase::Error, Duration::from_secs(2))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(engine.snapshot().phase, StackPhase::Error);
+            assert_eq!(backend.proxy_restores.load(Ordering::SeqCst), 0);
+            assert!(backend.proxy_lease.load(Ordering::SeqCst));
+            backend
+                .process_survives_cleanup
+                .store(false, Ordering::SeqCst);
+            engine.shutdown().await.unwrap();
+            assert!(backend.proxy_active.load(Ordering::SeqCst));
         }
     }
 

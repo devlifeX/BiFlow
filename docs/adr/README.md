@@ -136,3 +136,4 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0130](./0130-resume-recovery-and-serialized-quit.md)          | Recover after unlock and serialize network release on Quit          | Accepted   |
 | [0131](./0131-verified-macos-install-and-relaunch.md)          | Install and verify macOS updates before a user relaunch             | Accepted   |
 | [0132](./0132-return-user-proxy-on-disconnect.md)              | Return the original live proxy after Disconnect                     | Accepted   |
+| [0133](./0133-verified-network-restoration.md)                 | Preserve incomplete proxy restoration and verify network release    | Accepted   |

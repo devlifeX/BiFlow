@@ -185,6 +185,8 @@ test.describe("primary BiFlow flows", () => {
     await expect(
       page.getByRole("heading", { name: "Not connected" }),
     ).toBeVisible();
+    await expect(statusBar).toContainText("Internet connected");
+    await expect(page.locator(".traffic-flow-route")).toHaveCount(0);
   });
 
   test("adds a pasted site from Home and reroutes it in place", async ({
