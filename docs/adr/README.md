@@ -141,3 +141,4 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0135](./0135-serialized-native-lifecycle.md)                  | Serialize native release and budget lifecycle replies               | Accepted   |
 | [0136](./0136-preserve-completed-proxy-handoff.md)             | Preserve a completed proxy handoff on repeated Stop and Quit        | Accepted   |
 | [0137](./0137-inactive-host-dns-evidence.md)                   | Record classified host DNS answers while disconnected               | Accepted   |
+| [0138](./0138-hiddify-5-5-5.md)                                | Use Hiddify 5.5.5 for managed installation                          | Accepted   |
