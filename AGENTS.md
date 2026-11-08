@@ -71,6 +71,10 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- A pinned fallback does not pin an installer that tries `releases/latest`
+  first. Hiddify's automatic installer and manual fallback guide must use the
+  same tested release on Linux and Windows (ADR 0138).
+
 - A fixed sleep does not prove a child has installed its signal handler on a
   busy native runner. The graceful-stop fixture must read an explicit flushed
   readiness message after handler installation, keep the child alive through

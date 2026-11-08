@@ -15,7 +15,7 @@ use tracing::{info, warn};
 
 const USER_AGENT: &str = concat!("BiFlow/", env!("CARGO_PKG_VERSION"));
 const MAX_DOWNLOAD_BYTES: usize = 180 * 1024 * 1024;
-const HIDDIFY_VERSION: &str = "v4.1.1";
+const HIDDIFY_VERSION: &str = "v5.5.5";
 const MIHOMO_VERSION: &str = "v1.19.29";
 const MIHOMO_LINUX_SHA256: &str =
     "9c397be7489538628fae781bc005e4c5b8cd7b0961b8bb2ca815c8150f193577";
@@ -372,11 +372,7 @@ async fn install_hiddify(data: &Path) -> Result<PathBuf, DepsError> {
 }
 
 async fn install_hiddify_linux(data: &Path) -> Result<PathBuf, DepsError> {
-    let bytes = download_first(&[
-        hiddify_linux_appimage_url(),
-        hiddify_linux_appimage_pinned_url(),
-    ])
-    .await?;
+    let bytes = download(&hiddify_linux_appimage_url()).await?;
     if !is_elf(&bytes) {
         return Err(DepsError::Integrity(
             "Hiddify AppImage is not an ELF binary".into(),
@@ -575,11 +571,6 @@ fn mihomo_file_name() -> &'static str {
 }
 
 fn hiddify_linux_appimage_url() -> String {
-    "https://github.com/hiddify/hiddify-app/releases/latest/download/Hiddify-Linux-x64-AppImage.AppImage"
-        .into()
-}
-
-fn hiddify_linux_appimage_pinned_url() -> String {
     format!(
         "https://github.com/hiddify/hiddify-app/releases/download/{HIDDIFY_VERSION}/Hiddify-Linux-x64-AppImage.AppImage"
     )
@@ -865,6 +856,32 @@ mod tests {
         assert!(url_allowed(&hiddify_linux_appimage_url()));
         assert!(url_allowed(&mihomo_linux_url()));
         assert!(!url_allowed("https://example.com/hiddify"));
+    }
+
+    #[test]
+    fn hiddify_downloads_and_manual_guide_use_5_5_5() {
+        let release = "https://github.com/hiddify/hiddify-app/releases/download/v5.5.5";
+        assert_eq!(
+            hiddify_linux_appimage_url(),
+            format!("{release}/Hiddify-Linux-x64-AppImage.AppImage")
+        );
+        assert_eq!(
+            hiddify_windows_portable_url(),
+            format!("{release}/Hiddify-Windows-Portable-x64.zip")
+        );
+        assert_eq!(
+            hiddify_windows_setup_url(),
+            format!("{release}/Hiddify-Windows-Setup-x64.exe")
+        );
+        let guide = install_guide(DependencyId::Hiddify);
+        assert_eq!(
+            guide.download_url,
+            if cfg!(target_os = "windows") {
+                hiddify_windows_setup_url()
+            } else {
+                hiddify_linux_appimage_url()
+            }
+        );
     }
 
     #[test]
